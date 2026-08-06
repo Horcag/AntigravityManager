@@ -296,6 +296,86 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
+  it('emits every ordered Anthropic block from a multipart upstream SSE frame', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    const payload = JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: 'reasoning first',
+                thought: true,
+                thoughtSignature: Buffer.from('multipart-signature').toString('base64'),
+              },
+              {
+                functionCall: {
+                  args: { city: 'Samara' },
+                  id: 'call_weather',
+                  name: 'get_weather',
+                },
+              },
+              { text: 'final text' },
+            ],
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    stream.emit('data', Buffer.from(`data: ${payload}\n\n`));
+    stream.emit('end');
+    await completed;
+
+    const events = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => line.slice('data: '.length))
+      .filter((eventPayload) => eventPayload !== '[DONE]')
+      .map((eventPayload) => JSON.parse(eventPayload));
+
+    expect(events.filter((event) => event.type === 'message_start')).toHaveLength(1);
+    expect(events.map((event) => event.type)).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_delta',
+      'content_block_stop',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ]);
+    expect(events.map((event) => event.delta?.thinking).filter(Boolean)).toEqual([
+      'reasoning first',
+    ]);
+    expect(events.map((event) => event.delta?.signature).filter(Boolean)).toEqual([
+      'multipart-signature',
+    ]);
+    expect(events.find((event) => event.content_block?.type === 'tool_use')).toMatchObject({
+      content_block: { id: 'call_weather', name: 'get_weather' },
+    });
+    expect(events.map((event) => event.delta?.text).filter(Boolean)).toEqual(['final text']);
+    expect(events.find((event) => event.type === 'message_delta')).toMatchObject({
+      delta: { stop_reason: 'tool_use' },
+    });
+    expect(events.filter((event) => event.type === 'message_stop')).toHaveLength(1);
+  });
+
   it('emits one Anthropic wire error when only a done marker arrives', () => {
     const service = new TestableProxyService();
     const controller = new ProxyController({} as any);

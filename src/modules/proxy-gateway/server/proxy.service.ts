@@ -413,7 +413,7 @@ export class ProxyService {
             }
 
             const candidate = json.candidates?.[0];
-            const part = candidate?.content?.parts?.[0];
+            const parts = candidate?.content?.parts;
 
             if (candidate?.finishReason) {
               lastFinishReason = candidate.finishReason;
@@ -422,9 +422,13 @@ export class ProxyService {
               lastUsageMetadata = json.usageMetadata;
             }
 
-            if (this.isGeminiPart(part)) {
-              const chunks = processor.process(part);
-              chunks.forEach((c) => subscriber.next(c));
+            if (Array.isArray(parts)) {
+              for (const part of parts) {
+                if (this.isGeminiPart(part)) {
+                  const chunks = processor.process(part);
+                  chunks.forEach((c) => subscriber.next(c));
+                }
+              }
             }
 
             // Reset error state on successful parse
