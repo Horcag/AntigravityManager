@@ -124,6 +124,8 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   'gemini-3.1-pro': 'gemini-3.1-pro-high',
 };
 
+const INTERNAL_BACKGROUND_TASK_MODEL = 'internal-background-task';
+
 export function getSupportedModels(): string[] {
   return [...PUBLIC_SUPPORTED_MODELS];
 }
@@ -190,9 +192,17 @@ export function getOpenAICompatibleModels(
   customMapping: Record<string, string> = {},
   dynamicModelIds?: Iterable<string>,
 ): string[] {
-  return getAllDynamicModels(customMapping, dynamicModelIds).filter(
-    (id) => !shouldHideNonChatModelFromOpenAIList(id),
-  );
+  const modelIds = new Set([
+    ...getAllDynamicModels(customMapping, dynamicModelIds),
+    ...Object.keys(CLAUDE_TO_GEMINI),
+    ...Object.keys(GEMINI_MODEL_ALIASES),
+  ]);
+
+  return [...modelIds]
+    .filter(
+      (id) => id !== INTERNAL_BACKGROUND_TASK_MODEL && !shouldHideNonChatModelFromOpenAIList(id),
+    )
+    .sort();
 }
 
 export function mapClaudeModelToGemini(input: string): string {
