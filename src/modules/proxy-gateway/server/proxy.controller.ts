@@ -1294,7 +1294,9 @@ export class ProxyController {
         isPlainObject(block.source) &&
         block.source.type === 'base64' &&
         isString(block.source.media_type) &&
-        isString(block.source.data)
+        isString(block.source.data) &&
+        this.isSupportedAnthropicImageMimeType(block.source.media_type) &&
+        !this.hasInvalidBase64Data(block.source.data)
       ) {
         continue;
       }
@@ -2232,25 +2234,7 @@ export class ProxyController {
     param: string,
     res: FastifyReply,
   ): boolean {
-    const hasInvalidImage = inputs.some((input) => {
-      if (!input) {
-        return false;
-      }
-
-      const value = isString(input) ? input : input.data;
-      if (!isString(value)) {
-        return true;
-      }
-      if (/^data:/i.test(value)) {
-        return !parseImageDataUrl(value);
-      }
-
-      return (
-        (!isString(input) && !this.hasSupportedMediaMimeType(input, 'image')) ||
-        this.hasInvalidBase64Data(value)
-      );
-    });
-    if (!hasInvalidImage) {
+    if (inputs.every((input) => this.isValidInlineMediaInput(input, 'image'))) {
       return true;
     }
 
@@ -2295,10 +2279,17 @@ export class ProxyController {
       return kind === 'image' ? Boolean(parseImageDataUrl(data)) : Boolean(parseAudioDataUrl(data));
     }
 
-    return (
-      (isString(input) || this.hasSupportedMediaMimeType(input, kind)) &&
-      !this.hasInvalidBase64Data(data)
-    );
+    if (this.hasInvalidBase64Data(data)) {
+      return false;
+    }
+
+    return isString(input)
+      ? Boolean(this.detectMediaMimeType(data, kind))
+      : this.hasSupportedMediaMimeType(input, kind);
+  }
+
+  private isSupportedAnthropicImageMimeType(mimeType: string): boolean {
+    return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mimeType.toLowerCase());
   }
 
   private hasSupportedMediaMimeType(input: Exclude<InlineInput, string>, kind: MediaKind): boolean {
@@ -2417,9 +2408,10 @@ export class ProxyController {
       }
 
       const cleaned = input.replace(/\s+/g, '');
-      if (cleaned.length > 0) {
+      const mimeType = this.detectMediaMimeType(cleaned, kind);
+      if (cleaned.length > 0 && mimeType) {
         return {
-          mimeType: defaultMimeType,
+          mimeType,
           data: cleaned,
         };
       }

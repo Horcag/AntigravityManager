@@ -272,6 +272,74 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
+  it.each([
+    ['an unsupported image MIME type', 'image/bmp', 'iVBORw0KGgo='],
+    ['invalid image base64', 'image/png', 'not valid base64!'],
+  ])('rejects Anthropic image blocks with %s before upstream', async (_label, mediaType, data) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'image', source: { type: 'base64', media_type: mediaType, data } }],
+            },
+          ],
+        },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'messages contains unsupported content' },
+    });
+    expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['image/jpeg', '/9j/'],
+    ['image/png', 'iVBORw0KGgo='],
+    ['image/gif', 'R0lGODlh'],
+    ['image/webp', 'UklGRgAAAABXRUJQ'],
+  ])('accepts a valid Anthropic %s image block before upstream', async (mediaType, data) => {
+    proxyService.handleAnthropicMessages.mockResolvedValue({ id: 'msg_1', type: 'message' });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'image',
+                  source: { type: 'base64', media_type: mediaType, data },
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+  });
+
   it('emits an Anthropic SSE error event after a stream frame fails', async () => {
     proxyService.handleAnthropicMessages.mockResolvedValue(
       concat(
@@ -596,6 +664,98 @@ describe('OpenAI multipart media endpoints', () => {
         ],
       }),
     );
+  });
+
+  it('normalizes bare JSON image base64 from its recognized signature', async () => {
+    const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: { prompt: 'make it blue', image: image.toString('base64') },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                image_url: { url: `data:image/png;base64,${image.toString('base64')}` },
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('normalizes bare JSON audio base64 from its recognized signature', async () => {
+    const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]);
+    proxyService.handleGeminiGenerateContent.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'hello world' }] } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: { model: 'gemini-3-flash', file: audio.toString('base64') },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
+      'gemini-3-flash',
+      expect.objectContaining({
+        contents: [
+          expect.objectContaining({
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                inlineData: { mimeType: 'audio/mpeg', data: audio.toString('base64') },
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    ['/v1/images/edits', { prompt: 'make it blue', image: 'aGVsbG8=' }, 'image'],
+    ['/v1/audio/transcriptions', { model: 'gemini-3-flash', file: 'aGVsbG8=' }, 'file'],
+  ])('rejects valid-base64 non-media JSON data locally for %s', async (url, payload, param) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'POST', url, payload });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: `${param} must contain valid base64 data.`,
+        type: 'invalid_request_error',
+        param,
+        code: 'invalid_value',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
   });
 
   it.each([
