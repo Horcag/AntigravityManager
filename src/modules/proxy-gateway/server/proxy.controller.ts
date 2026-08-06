@@ -560,7 +560,7 @@ export class ProxyController {
     }));
   }
 
-  @All('*')
+  @All('/*')
   unmatchedOpenAIRoute(@Req() request: FastifyRequest): never {
     throw new OpenAIProtocolException(
       `Route ${request.method}:${request.url} not found`,

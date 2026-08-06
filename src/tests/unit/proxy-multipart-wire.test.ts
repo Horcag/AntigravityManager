@@ -14,6 +14,7 @@ import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
 const proxyService = {
   handleChatCompletions: vi.fn(),
   handleGeminiGenerateContent: vi.fn(),
+  handleAnthropicMessages: vi.fn(),
 };
 
 @Module({
@@ -123,6 +124,44 @@ describe('OpenAI multipart media endpoints', () => {
         param: null,
         code: null,
       },
+    });
+  });
+
+  it('leaves unmatched non-/v1 routes to Nest default 404 handling', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'GET', url: '/unmatched-non-v1-route' });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      message: 'Cannot GET /unmatched-non-v1-route',
+      error: 'Not Found',
+      statusCode: 404,
+    });
+  });
+
+  it('preserves Anthropic errors through the assembled Nest and Fastify pipeline', async () => {
+    proxyService.handleAnthropicMessages.mockRejectedValue(new Error('anthropic upstream failure'));
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] },
+      });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({
+      type: 'error',
+      error: { type: 'api_error', message: 'anthropic upstream failure' },
     });
   });
 
