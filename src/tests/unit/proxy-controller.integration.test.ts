@@ -1,5 +1,5 @@
-import { HttpStatus, Module, UnauthorizedException } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { Controller, HttpStatus, Module, Post, UnauthorizedException } from '@nestjs/common';
+import { APP_FILTER, NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { concat, of, throwError } from 'rxjs';
@@ -11,6 +11,7 @@ import { UpstreamRequestError } from '../../modules/proxy-gateway/server/clients
 import { GeminiController } from '../../modules/proxy-gateway/server/gemini.controller';
 import { ProxyGuard } from '../../modules/proxy-gateway/server/proxy.guard';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { MultipartOpenAIExceptionFilter } from '../../modules/proxy-gateway/server/fastify-multipart.provider';
 import { transformClaudeRequestIn } from '../../modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import {
   AccountPoolUnavailableException,
@@ -36,18 +37,31 @@ function createReplyMock() {
   return reply;
 }
 
-async function createHttpApp(proxyService: object) {
+async function createHttpApp(proxyService: object, bodyLimit?: number) {
+  @Controller('outside')
+  class OutsideController {
+    @Post('json')
+    acceptJson(): { ok: true } {
+      return { ok: true };
+    }
+  }
+
   @Module({
-    controllers: [ProxyController, GeminiController],
+    controllers: [ProxyController, GeminiController, OutsideController],
     providers: [
       ProxyGuard,
       { provide: ProxyService, useValue: proxyService },
       { provide: AccountLeaseService, useValue: { getAllCollectedModels: () => new Set() } },
+      { provide: APP_FILTER, useClass: MultipartOpenAIExceptionFilter },
     ],
   })
   class HttpTestModule {}
 
-  const app = await NestFactory.create(HttpTestModule, new FastifyAdapter(), { logger: false });
+  const app = await NestFactory.create(
+    HttpTestModule,
+    new FastifyAdapter(bodyLimit ? { bodyLimit } : undefined),
+    { logger: false },
+  );
   await app.init();
   return app;
 }
@@ -424,7 +438,7 @@ describe('ProxyController Integration', () => {
     });
   });
 
-  it('preserves protocol contracts through the assembled Nest and Fastify pipeline', async () => {
+  it('contains unexpected Anthropic endpoint failures through the assembled Nest and Fastify pipeline', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {
       handleChatCompletions: vi.fn().mockRejectedValue(
@@ -465,7 +479,22 @@ describe('ProxyController Integration', () => {
       expect(anthropicFailure.statusCode).toBe(500);
       expect(anthropicFailure.json()).toEqual({
         type: 'error',
-        error: { type: 'api_error', message: 'anthropic upstream failure' },
+        error: { type: 'api_error', message: 'Internal Server Error' },
+      });
+
+      proxyService.handleAnthropicMessages.mockRejectedValueOnce(
+        new UpstreamRequestError({ message: 'trusted upstream failure', status: 503 }),
+      );
+      const trustedAnthropicFailure = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: authorizedHeaders,
+        payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(trustedAnthropicFailure.statusCode).toBe(503);
+      expect(trustedAnthropicFailure.json()).toEqual({
+        type: 'error',
+        error: { type: 'api_error', message: 'trusted upstream failure' },
       });
 
       const invalidRequest = await server.inject({
@@ -526,6 +555,83 @@ describe('ProxyController Integration', () => {
       });
     } finally {
       await app.close();
+    }
+  });
+
+  it('uses Anthropic JSON wire envelopes only for POST /v1/messages', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const headers = {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json',
+    };
+    const malformedPayload = '{"model":';
+
+    const malformedApp = await createHttpApp(proxyService);
+    const malformedServer = malformedApp.getHttpAdapter().getInstance();
+
+    try {
+      const anthropicResponse = await malformedServer.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers,
+        payload: malformedPayload,
+      });
+      expect(anthropicResponse.statusCode).toBe(400);
+      expect(anthropicResponse.json()).toEqual({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: 'Malformed JSON request body.' },
+      });
+
+      const openAIResponse = await malformedServer.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers,
+        payload: malformedPayload,
+      });
+      expect(openAIResponse.statusCode).toBe(400);
+      expect(openAIResponse.json()).toEqual({
+        error: {
+          message: 'Malformed JSON request body.',
+          type: 'invalid_request_error',
+          param: null,
+          code: 'invalid_json',
+        },
+      });
+
+      const outsideResponse = await malformedServer.inject({
+        method: 'POST',
+        url: '/outside/json',
+        headers: { 'content-type': 'application/json' },
+        payload: malformedPayload,
+      });
+      expect(outsideResponse.statusCode).toBe(400);
+      expect(outsideResponse.json()).toMatchObject({ statusCode: 400 });
+      expect(outsideResponse.json()).not.toHaveProperty('error.type');
+    } finally {
+      await malformedApp.close();
+    }
+
+    const limitedApp = await createHttpApp(proxyService, 1);
+    const limitedServer = limitedApp.getHttpAdapter().getInstance();
+
+    try {
+      const bodyLimitResponse = await limitedServer.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers,
+        payload: '{"model":"claude-sonnet-4-5"}',
+      });
+      expect(bodyLimitResponse.statusCode).toBe(413);
+      expect(bodyLimitResponse.json()).toEqual({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: 'Request body too large.' },
+      });
+    } finally {
+      await limitedApp.close();
     }
   });
 

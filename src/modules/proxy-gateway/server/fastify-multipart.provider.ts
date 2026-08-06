@@ -73,6 +73,20 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
     const response = host.switchToHttp().getResponse();
 
     if (pathname.startsWith('/v1/') && isOpenAIJsonWireError(error, contentType)) {
+      if (pathname === '/v1/messages') {
+        response.status(this.getHttpStatus(error)).send({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message:
+              this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+                ? 'Request body too large.'
+                : 'Malformed JSON request body.',
+          },
+        });
+        return;
+      }
+
       response.status(this.getHttpStatus(error)).send({
         error: {
           message:
