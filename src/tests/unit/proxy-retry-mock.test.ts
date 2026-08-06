@@ -726,6 +726,62 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).not.toContain('[DONE]');
   });
 
+  it('fails an in-band upstream error frame before emitting Anthropic success events', () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    let errorMessage = '';
+
+    service.testProcessStream(stream).subscribe({
+      next: (chunk) => chunks.push(chunk),
+      error: (error: Error) => {
+        errorMessage = error.message;
+      },
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"error":{"code":429,"message":"quota exhausted"}}\n\n'),
+    );
+    stream.emit('end');
+
+    expect(errorMessage).toBe('quota exhausted');
+    expect(chunks).toEqual([]);
+  });
+
+  it('emits one Anthropic wire error for an in-band upstream error frame without success events', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+
+    (controller as any).writeSseResponse(
+      { hijack: vi.fn(), raw },
+      service.testProcessStream(stream),
+      'anthropic',
+    );
+    stream.emit(
+      'data',
+      Buffer.from('data: {"error":{"code":429,"message":"quota exhausted"}}\n\n'),
+    );
+    stream.emit('end');
+
+    const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(output).toBe(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"quota exhausted"}}\n\n',
+    );
+    expect(output).not.toContain('message_start');
+    expect(output).not.toContain('message_delta');
+    expect(output).not.toContain('message_stop');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
   it('emits one Anthropic wire error after four malformed upstream frames without success terminators', () => {
     const service = new TestableProxyService();
     const controller = new ProxyController({} as any);

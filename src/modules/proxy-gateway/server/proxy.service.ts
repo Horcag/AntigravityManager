@@ -408,6 +408,18 @@ export class ProxyService {
           try {
             const json = JSON.parse(dataStr);
 
+            if (isPlainObject(json.error)) {
+              const message = isString(json.error.message)
+                ? json.error.message
+                : 'Upstream stream error';
+              const status =
+                isNumber(json.error.code) && json.error.code >= 400 && json.error.code <= 599
+                  ? json.error.code
+                  : undefined;
+              failStream(new UpstreamRequestError({ message, status }));
+              return;
+            }
+
             if (json) {
               const startMsg = state.emitMessageStart(json);
               if (startMsg) {
