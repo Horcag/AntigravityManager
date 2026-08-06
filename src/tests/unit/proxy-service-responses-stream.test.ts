@@ -74,6 +74,31 @@ describe('ProxyService Responses streaming', () => {
     });
   });
 
+  it('accepts a no-space SSE data frame as a normal Responses stream', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstream = Readable.from([
+      Buffer.from(
+        'data:{"response":{"candidates":[{"content":{"parts":[{"text":"ok"} ]},"finishReason":"STOP"}]}}\n\n',
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.map((event) => event.sequence_number)).toEqual(events.map((_, index) => index));
+    expect(events.map((event) => event.type)).toEqual([
+      'response.created',
+      'response.in_progress',
+      'response.output_item.added',
+      'response.content_part.added',
+      'response.output_text.delta',
+      'response.output_text.done',
+      'response.content_part.done',
+      'response.output_item.done',
+      'response.completed',
+    ]);
+  });
+
   it('carries actual usage through a synthetic Responses completion event', async () => {
     const service = new ProxyService({} as never, {} as never);
     const stream = createSyntheticResponsesStream(service, {

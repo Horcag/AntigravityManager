@@ -1174,10 +1174,10 @@ export class ProxyService {
 
       const processLine = (line: string): void => {
         const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) {
+        if (!trimmed.startsWith('data:')) {
           return;
         }
-        const dataString = trimmed.slice(6);
+        const dataString = trimmed.slice('data:'.length).trim();
         if (dataString === '[DONE]') {
           return;
         }
