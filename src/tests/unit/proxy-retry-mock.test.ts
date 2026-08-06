@@ -296,6 +296,32 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
+  it('emits one Anthropic wire error when only a done marker arrives', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const reply = { hijack: vi.fn(), raw };
+
+    (controller as any).writeSseResponse(reply, service.testProcessStream(stream), 'anthropic');
+    stream.emit('data', Buffer.from('data: [DONE]\n\n'));
+    stream.emit('end');
+
+    const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(output).toBe(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}\n\n',
+    );
+    expect(output).not.toContain('message_delta');
+    expect(output).not.toContain('message_stop');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
   it('keeps one Anthropic text block open across empty SSE keepalives', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();

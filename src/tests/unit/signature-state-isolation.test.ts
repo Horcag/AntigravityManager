@@ -15,6 +15,7 @@ import {
   SignatureStore,
 } from '@/modules/proxy-gateway/antigravity/SignatureStore';
 import type { ClaudeRequest, GeminiPart } from '@/modules/proxy-gateway/antigravity/types';
+import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
 import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
 
 const ACCOUNT_A: SignatureContext = { accountId: 'account-a', model: 'gemini-3-pro' };
@@ -321,6 +322,74 @@ describe('thought signature state isolation', () => {
     expect(
       toolUsePart(toolUseRequest('some-other-id'), ACCOUNT_A)?.thoughtSignature,
     ).toBeUndefined();
+  });
+
+  it('deduplicates repeated Chat function call ids without shifting distinct call indices', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstreamStream = Readable.from([
+      Buffer.from(
+        `data: ${JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: { args: { city: 'London' }, id: 'call_repeat', name: 'weather' },
+                    thoughtSignature: encode(SIGNATURE_A),
+                  },
+                  {
+                    functionCall: { args: { city: 'Paris' }, id: 'call_repeat', name: 'weather' },
+                    thoughtSignature: encode(SIGNATURE_B),
+                  },
+                  {
+                    functionCall: { args: { city: 'Rome' }, id: 'call_distinct', name: 'weather' },
+                    thoughtSignature: encode(SIGNATURE_B),
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n\n`,
+      ),
+      Buffer.from(`data: ${JSON.stringify({ candidates: [{ finishReason: 'STOP' }] })}\n\n`),
+    ]);
+    const method: unknown = Reflect.get(service, 'processStreamResponse');
+    if (typeof method !== 'function') {
+      throw new Error('Chat stream processor is unavailable');
+    }
+    const result: unknown = Reflect.apply(method, service, [
+      upstreamStream,
+      ACCOUNT_A.model,
+      ACCOUNT_A,
+    ]);
+    if (!(result instanceof Observable)) {
+      throw new Error('Chat stream processor did not return an Observable');
+    }
+
+    const controller = new ProxyController({} as never);
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const ended = new Promise<void>((resolve) => {
+      raw.end.mockImplementation(resolve);
+    });
+
+    (controller as any).writeSseResponse({ hijack: vi.fn(), raw }, result);
+    await ended;
+
+    const toolCalls = parseSseData(raw.write.mock.calls.map(([chunk]) => String(chunk))).flatMap(
+      (event) => event.choices?.[0]?.delta?.tool_calls ?? [],
+    );
+
+    expect(toolCalls.map((toolCall) => toolCall.id)).toEqual(['call_repeat', 'call_distinct']);
+    expect(toolCalls.map((toolCall) => toolCall.index)).toEqual([0, 1]);
+    expect(SignatureStore.get({ ...ACCOUNT_A, toolCallId: 'call_repeat' })).toBe(SIGNATURE_A);
+    expect(SignatureStore.get({ ...ACCOUNT_A, toolCallId: 'call_distinct' })).toBe(SIGNATURE_B);
+    expect(raw.end).toHaveBeenCalledOnce();
   });
 
   it('captures non-streaming signatures under the generated id when Gemini omits functionCall.id', () => {

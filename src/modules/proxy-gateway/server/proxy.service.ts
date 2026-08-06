@@ -366,7 +366,7 @@ export class ProxyService {
       let lastFinishReason: string | undefined;
       let lastUsageMetadata: Record<string, unknown> | undefined;
 
-      let receivedData = false;
+      let hasUsableEvent = false;
       let terminated = false;
       let idleTimer: StreamIdleTimer;
       const failStream = (error: Error): void => {
@@ -387,7 +387,6 @@ export class ProxyService {
         if (terminated) {
           return;
         }
-        receivedData = true; // Mark that we got data
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split('\n');
@@ -407,7 +406,10 @@ export class ProxyService {
 
             if (json) {
               const startMsg = state.emitMessageStart(json);
-              if (startMsg) subscriber.next(startMsg);
+              if (startMsg) {
+                hasUsableEvent = true;
+                subscriber.next(startMsg);
+              }
             }
 
             const candidate = json.candidates?.[0];
@@ -444,9 +446,9 @@ export class ProxyService {
           return;
         }
         idleTimer.clear();
-        if (!receivedData) {
-          this.logger.warn('Empty response stream detected');
-          subscriber.error(new Error('Empty response stream'));
+        if (!hasUsableEvent || !state.messageStartSent) {
+          this.logger.warn('Upstream stream ended without a usable Anthropic message start');
+          failStream(new Error('Empty response stream'));
           return;
         }
 
@@ -1614,6 +1616,9 @@ export class ProxyService {
             if (part.functionCall) {
               const toolCallId =
                 part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
+              if (part.functionCall.id && toolCallIndices.has(toolCallId)) {
+                continue;
+              }
               const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
               toolCallIndices.set(toolCallId, toolCallIndex);
               // Capture for replay under the id the client actually sees (upstream id when
