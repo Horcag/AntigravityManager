@@ -1,5 +1,5 @@
 import { ConflictException, Controller, Module, Post, UnauthorizedException } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import { APP_FILTER } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -93,6 +93,17 @@ describe('OpenAI multipart media endpoints', () => {
   afterEach(async () => {
     vi.clearAllMocks();
     await app?.close();
+  });
+
+  it('declares HttpAdapterHost explicitly for production-safe multipart injection', () => {
+    expect(Reflect.getMetadata('self:paramtypes', FastifyMultipartProvider)).toContainEqual({
+      index: 0,
+      param: HttpAdapterHost,
+    });
+    expect(Reflect.getMetadata('self:paramtypes', MultipartOpenAIExceptionFilter)).toContainEqual({
+      index: 0,
+      param: HttpAdapterHost,
+    });
   });
 
   it('preserves audio binary bytes and MIME type through a real multipart request', async () => {

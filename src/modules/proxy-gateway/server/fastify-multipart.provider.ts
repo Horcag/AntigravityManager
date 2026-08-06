@@ -1,4 +1,4 @@
-import { ArgumentsHost, Catch, Injectable, OnModuleInit } from '@nestjs/common';
+import { ArgumentsHost, Catch, Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import multipart from '@fastify/multipart';
 import { FastifyInstance } from 'fastify';
@@ -35,7 +35,7 @@ export function isMultipartParserOrLimitError(error: unknown): error is Error {
 
 @Catch()
 export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
-  constructor(httpAdapterHost: HttpAdapterHost) {
+  constructor(@Inject(HttpAdapterHost) httpAdapterHost: HttpAdapterHost) {
     super(httpAdapterHost.httpAdapter);
   }
 
@@ -71,7 +71,7 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
 @Injectable()
 export class FastifyMultipartProvider implements OnModuleInit {
-  constructor(private readonly httpAdapterHost: HttpAdapterHost) {}
+  constructor(@Inject(HttpAdapterHost) private readonly httpAdapterHost: HttpAdapterHost) {}
 
   onModuleInit(): void {
     const fastify = this.httpAdapterHost.httpAdapter.getInstance<FastifyInstance>();
