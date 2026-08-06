@@ -1921,7 +1921,7 @@ export class ProxyService {
       system: systemPrompt,
       tools: this.convertOpenAIToolsToAnthropicTools(request.tools),
       tool_choice: this.convertOpenAIToolChoice(request.tool_choice, request.tools),
-      max_tokens: request.max_tokens,
+      max_tokens: request.max_completion_tokens ?? request.max_tokens,
       temperature: request.temperature,
       top_p: request.top_p,
       stop_sequences: this.convertOpenAIStopSequences(request.stop),

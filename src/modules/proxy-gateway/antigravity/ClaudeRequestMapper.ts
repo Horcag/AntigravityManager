@@ -112,8 +112,12 @@ export function transformClaudeRequestIn(
 
   // 4. Generation Config & Thinking
   const thinkingType = (claudeReq.thinking?.type ?? '').toLowerCase();
+  const hasExplicitOpenAIOutputLimit =
+    claudeReq.metadata?.source === 'openai' && claudeReq.max_tokens !== undefined;
   const autoThinkingEnabled =
-    !claudeReq.thinking && shouldEnableThinkingByDefault(requestConfig.finalModel, claudeReq.model);
+    !claudeReq.thinking &&
+    !hasExplicitOpenAIOutputLimit &&
+    shouldEnableThinkingByDefault(requestConfig.finalModel, claudeReq.model);
   let isThinkingEnabled =
     thinkingType === 'enabled' || thinkingType === 'adaptive' || autoThinkingEnabled;
 

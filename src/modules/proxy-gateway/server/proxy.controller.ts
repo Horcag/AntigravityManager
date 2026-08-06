@@ -544,8 +544,21 @@ export class ProxyController {
     this.validateUnsupportedSamplingOptions(body);
     this.validateUnsupportedIdentityOptions(body);
     this.validateChatOnlyOptions(body);
+    this.validateMaxCompletionTokens(body.max_completion_tokens);
     this.validateResponseFormat(body.response_format);
     this.normalizeStopSequences(body.stop);
+  }
+
+  private validateMaxCompletionTokens(value: number | undefined): void {
+    if (isNil(value)) {
+      return;
+    }
+    if (!isNumber(value) || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+      throw this.invalidRequest(
+        'max_completion_tokens must be a positive integer',
+        'max_completion_tokens',
+      );
+    }
   }
 
   private validateCompletionPrompt(prompt: string | string[] | undefined): void {

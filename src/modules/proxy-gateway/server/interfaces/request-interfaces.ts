@@ -4,6 +4,7 @@ export interface OpenAIChatRequest {
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
+  max_completion_tokens?: number;
   stream?: boolean;
   stream_options?: OpenAIStreamOptions;
   stop?: string | string[];
