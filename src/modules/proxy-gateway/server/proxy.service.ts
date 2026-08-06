@@ -374,19 +374,25 @@ export class ProxyService {
       let hasUsableEvent = false;
       let terminated = false;
       let idleTimer: StreamIdleTimer;
-      const failStream = (error: Error): void => {
+
+      const cleanup = (): void => {
+        idleTimer.clear();
+        upstreamStream.removeListener('data', onData);
+        upstreamStream.removeListener('end', onEnd);
+        upstreamStream.removeListener('error', onError);
+      };
+
+      const failStream = (error: Error, destroyUpstream = false): void => {
         if (terminated) {
           return;
         }
         terminated = true;
-        idleTimer.clear();
+        cleanup();
+        if (destroyUpstream) {
+          this.destroyUpstreamStream(upstreamStream);
+        }
         subscriber.error(error);
       };
-      idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
-        failStream(new Error('Upstream stream idle timeout after 300s'));
-      });
-
-      idleTimer.reset();
 
       const processLine = (line: string): void => {
         const trimmed = line.trim();
@@ -402,7 +408,7 @@ export class ProxyService {
           const json = JSON.parse(dataStr);
           const upstreamError = this.getUpstreamStreamError(json);
           if (upstreamError) {
-            failStream(upstreamError);
+            failStream(upstreamError, true);
             return;
           }
 
@@ -436,19 +442,19 @@ export class ProxyService {
           state.resetErrorState();
         } catch (error) {
           if (error instanceof ToolCallIdConflictError) {
-            failStream(error);
+            failStream(error, true);
             return;
           }
           this.logger.error('Stream parse error', error);
           const errorChunks = state.handleParseError(dataStr);
           errorChunks.forEach((chunk) => subscriber.next(chunk));
           if (state.getErrorCount() > 3) {
-            failStream(new Error('Malformed upstream stream payload'));
+            failStream(new Error('Malformed upstream stream payload'), true);
           }
         }
       };
 
-      upstreamStream.on('data', (chunk: Buffer) => {
+      const onData = (chunk: Buffer): void => {
         if (terminated) {
           return;
         }
@@ -463,9 +469,9 @@ export class ProxyService {
           }
           processLine(line);
         }
-      });
+      };
 
-      upstreamStream.on('end', () => {
+      const onEnd = (): void => {
         if (terminated) {
           return;
         }
@@ -476,7 +482,6 @@ export class ProxyService {
         if (terminated) {
           return;
         }
-        idleTimer.clear();
         if (!hasUsableEvent || !state.messageStartSent) {
           this.logger.warn('Upstream stream ended without a usable Anthropic message start');
           failStream(new Error('Empty response stream'));
@@ -485,19 +490,35 @@ export class ProxyService {
 
         const finishChunks = state.emitFinish(lastFinishReason, lastUsageMetadata);
         finishChunks.forEach((c) => subscriber.next(c));
+        terminated = true;
+        cleanup();
         subscriber.complete();
-      });
+      };
 
-      upstreamStream.on('error', (err: unknown) => {
+      const onError = (err: unknown): void => {
         const cleanError = err instanceof Error ? err : new Error(String(err));
         const { type } = classifyStreamError(cleanError);
 
         this.logger.error(`Stream error: ${type} - ${cleanError.message}`);
         failStream(cleanError);
+      };
+
+      idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
+        failStream(new Error('Upstream stream idle timeout after 300s'));
       });
 
+      upstreamStream.on('data', onData);
+      upstreamStream.on('end', onEnd);
+      upstreamStream.on('error', onError);
+      idleTimer.reset();
+
       return () => {
-        idleTimer.dispose();
+        if (terminated) {
+          return;
+        }
+        terminated = true;
+        cleanup();
+        this.destroyUpstreamStream(upstreamStream);
       };
     });
   }
@@ -2616,6 +2637,28 @@ export class ProxyService {
   }
 
   private isGeminiPart(value: unknown): value is InternalGeminiPart {
-    return isPlainObject(value);
+    const part = this.toUnknownRecord(value);
+    if (!part) {
+      return false;
+    }
+
+    const hasText = isString(part.text) && !isEmpty(part.text);
+    const signature = part.thoughtSignature ?? part.thought_signature;
+    const hasSignature = isString(signature) && !isEmpty(decodeSignature(signature));
+    const functionCall = this.toUnknownRecord(part.functionCall);
+    const hasFunctionCall =
+      functionCall !== null &&
+      isString(functionCall.name) &&
+      !isEmpty(functionCall.name) &&
+      isPlainObject(functionCall.args);
+    const inlineData = this.toUnknownRecord(part.inlineData);
+    const hasInlineData =
+      inlineData !== null &&
+      isString(inlineData.mimeType) &&
+      !isEmpty(inlineData.mimeType) &&
+      isString(inlineData.data) &&
+      !isEmpty(inlineData.data);
+
+    return hasText || hasSignature || hasFunctionCall || hasInlineData;
   }
 }

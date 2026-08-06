@@ -300,12 +300,14 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(stream.listenerCount('error')).toBe(0);
   });
 
-  it('rejects candidate-free and usage-only fallback streams', async () => {
+  it('rejects candidate-free, usage-only, and no-op fallback streams', async () => {
     const service = new TestableProxyService();
 
     for (const payload of [
       { candidates: [] },
       { usageMetadata: { totalTokenCount: 3 }, candidates: [{ finishReason: 'STOP' }] },
+      { candidates: [{ content: { parts: [{}] } }] },
+      { candidates: [{ content: { parts: [{ text: '' }] } }] },
     ]) {
       const stream = new EventEmitter();
       const resultPromise = service.testCollectStream(stream);
@@ -905,7 +907,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     vi.useFakeTimers();
     const service = new TestableProxyService();
     (service as any).streamIdleTimeoutMs = 1;
-    const stream = new EventEmitter();
+    const stream = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const chunks: string[] = [];
     let errorMessage = '';
 
@@ -917,16 +919,21 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
 
     vi.advanceTimersByTime(1);
-    vi.useRealTimers();
 
     expect(errorMessage).toBe('Upstream stream idle timeout after 300s');
     expect(chunks.join('')).not.toContain('message_stop');
     expect(chunks.join('')).not.toContain('[DONE]');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(stream.listenerCount('end')).toBe(0);
+    expect(stream.listenerCount('error')).toBe(0);
+    expect(stream.destroy).toHaveBeenCalledOnce();
+    vi.useRealTimers();
   });
 
   it('fails an in-band upstream error frame before emitting Anthropic success events', () => {
     const service = new TestableProxyService();
-    const stream = new EventEmitter();
+    const stream = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const chunks: string[] = [];
     let errorMessage = '';
 
@@ -944,6 +951,17 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     stream.emit('end');
 
     expect(errorMessage).toBe('quota exhausted');
+    expect(chunks).toEqual([]);
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(stream.listenerCount('end')).toBe(0);
+    expect(stream.listenerCount('error')).toBe(0);
+    expect(stream.destroy).toHaveBeenCalledOnce();
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"late"}]}}]}\n\n'),
+    );
+    stream.emit('end');
     expect(chunks).toEqual([]);
   });
 
@@ -970,12 +988,14 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks).toEqual([]);
   });
 
-  it('rejects candidate-free and usage-only Anthropic frames without success terminators', () => {
+  it('rejects candidate-free, usage-only, and no-op Anthropic frames without success terminators', () => {
     const service = new TestableProxyService();
 
     for (const payload of [
       { candidates: [] },
       { usageMetadata: { totalTokenCount: 3 }, candidates: [{ finishReason: 'STOP' }] },
+      { candidates: [{ content: { parts: [{}] } }] },
+      { candidates: [{ content: { parts: [{ text: '' }] } }] },
     ]) {
       const stream = new EventEmitter();
       const chunks: string[] = [];
@@ -994,6 +1014,67 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       expect(chunks.join('')).not.toContain('message_stop');
       expect(chunks.join('')).not.toContain('[DONE]');
     }
+  });
+
+  it('accepts valid Anthropic text, function-call, and thought-signature parts', () => {
+    const service = new TestableProxyService();
+
+    for (const part of [
+      { text: 'text' },
+      { functionCall: { name: 'weather', args: {} } },
+      { thoughtSignature: 'c2ln' },
+      { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+    ]) {
+      const stream = new EventEmitter();
+      let completed = false;
+      let errorMessage = '';
+
+      service.testProcessStream(stream).subscribe({
+        error: (error: Error) => {
+          errorMessage = error.message;
+        },
+        complete: () => {
+          completed = true;
+        },
+      });
+
+      stream.emit(
+        'data',
+        Buffer.from(
+          `data: ${JSON.stringify({ candidates: [{ content: { parts: [part] } }] })}\n\n`,
+        ),
+      );
+      stream.emit('end');
+
+      expect(errorMessage).toBe('');
+      expect(completed).toBe(true);
+      expect(stream.listenerCount('data')).toBe(0);
+      expect(stream.listenerCount('end')).toBe(0);
+      expect(stream.listenerCount('error')).toBe(0);
+    }
+  });
+
+  it('removes Anthropic listeners after upstream error and unsubscribe', () => {
+    const service = new TestableProxyService();
+    const errored = new EventEmitter();
+    const subscription = service.testProcessStream(errored).subscribe({ error: () => {} });
+
+    errored.emit('error', new Error('connection reset'));
+    expect(errored.listenerCount('data')).toBe(0);
+    expect(errored.listenerCount('end')).toBe(0);
+    expect(errored.listenerCount('error')).toBe(0);
+    subscription.unsubscribe();
+
+    const unsubscribed = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const activeSubscription = service
+      .testProcessStream(unsubscribed)
+      .subscribe({ error: () => {} });
+    activeSubscription.unsubscribe();
+
+    expect(unsubscribed.listenerCount('data')).toBe(0);
+    expect(unsubscribed.listenerCount('end')).toBe(0);
+    expect(unsubscribed.listenerCount('error')).toBe(0);
+    expect(unsubscribed.destroy).toHaveBeenCalledOnce();
   });
 
   it('does not emit Anthropic success terminators after an in-band failure', () => {
