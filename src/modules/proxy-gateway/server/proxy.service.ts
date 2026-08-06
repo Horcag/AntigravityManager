@@ -1895,7 +1895,8 @@ export class ProxyService {
     const systemPromptParts: string[] = [];
     const anthropicMessages: ClaudeRequest['messages'] = [];
 
-    for (const msg of messages) {
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const msg = messages[messageIndex];
       // `developer` is the current OpenAI spelling of `system`; both are instructions,
       // never user turns.
       if (msg.role === 'system' || msg.role === 'developer') {
@@ -1907,18 +1908,24 @@ export class ProxyService {
       }
 
       if (msg.role === 'tool') {
-        const toolResultText = this.extractOpenAITextContent(msg.content) || '';
+        const toolResults: AnthropicContent[] = [];
+        do {
+          const toolMessage = messages[messageIndex];
+          const toolResultText = this.extractOpenAITextContent(toolMessage.content) || '';
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolMessage.tool_call_id || toolMessage.name || `tool-result-${uuidv4()}`,
+            content: toolResultText,
+            is_error: false,
+          });
+          messageIndex++;
+        } while (messages[messageIndex]?.role === 'tool');
+
         anthropicMessages.push({
           role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: msg.tool_call_id || msg.name || `tool-result-${uuidv4()}`,
-              content: toolResultText,
-              is_error: false,
-            },
-          ],
+          content: toolResults,
         });
+        messageIndex--;
         continue;
       }
 

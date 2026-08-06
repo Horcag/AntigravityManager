@@ -152,6 +152,80 @@ describe('Proxy Parity Fixtures', () => {
     });
   });
 
+  it('groups consecutive OpenAI tool results into one Gemini user turn', () => {
+    const service = new TestableProxyService();
+    const claudeRequest = service.toAnthropic({
+      model: 'gemini-3-flash',
+      messages: [
+        { role: 'user', content: 'Look up both cities.' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'call_paris',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+            },
+            {
+              id: 'call_tokyo',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Tokyo"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_paris', content: 'Paris: 18 C' },
+        { role: 'tool', tool_call_id: 'call_tokyo', content: 'Tokyo: 24 C' },
+      ],
+    });
+    const body = transformClaudeRequestIn(claudeRequest);
+
+    expect(body.request.contents).toHaveLength(3);
+    expect(body.request.contents.map((content) => content.role)).toEqual(['user', 'model', 'user']);
+    expect(body.request.contents[1]?.parts.map((part) => part.functionCall)).toEqual([
+      { id: 'call_paris', name: 'get_weather', args: { city: 'Paris' } },
+      { id: 'call_tokyo', name: 'get_weather', args: { city: 'Tokyo' } },
+    ]);
+    expect(body.request.contents[2]?.parts.map((part) => part.functionResponse)).toEqual([
+      { id: 'call_paris', name: 'get_weather', response: { result: 'Paris: 18 C' } },
+      { id: 'call_tokyo', name: 'get_weather', response: { result: 'Tokyo: 24 C' } },
+    ]);
+  });
+
+  it('keeps a single OpenAI tool result in its existing Gemini turn shape', () => {
+    const service = new TestableProxyService();
+    const claudeRequest = service.toAnthropic({
+      model: 'gemini-3-flash',
+      messages: [
+        { role: 'user', content: 'Look up Paris.' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'call_paris',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_paris', content: 'Paris: 18 C' },
+      ],
+    });
+    const body = transformClaudeRequestIn(claudeRequest);
+
+    expect(body.request.contents.map((content) => content.role)).toEqual(['user', 'model', 'user']);
+    expect(body.request.contents[2]?.parts).toEqual([
+      {
+        functionResponse: {
+          id: 'call_paris',
+          name: 'get_weather',
+          response: { result: 'Paris: 18 C' },
+        },
+      },
+    ]);
+  });
+
   it('removes Codex-injected tools from function parameter schemas', () => {
     const service = new TestableProxyService();
     const input = {

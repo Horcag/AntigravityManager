@@ -11,6 +11,7 @@ import { UpstreamRequestError } from '../../modules/proxy-gateway/server/clients
 import { GeminiController } from '../../modules/proxy-gateway/server/gemini.controller';
 import { ProxyGuard } from '../../modules/proxy-gateway/server/proxy.guard';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { transformClaudeRequestIn } from '../../modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import {
   AccountPoolUnavailableException,
   mapOpenAIProtocolError,
@@ -840,6 +841,84 @@ describe('ProxyController Integration', () => {
         }),
       }),
     );
+  });
+
+  it('groups consecutive Responses function calls and preserves ordered tool outputs', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_resp',
+        object: 'chat.completion',
+        created: 1700000001,
+        model: 'gpt-4o',
+        choices: [{ index: 0, finish_reason: 'stop', message: { content: 'done' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses(
+      {
+        model: 'gemini-3-flash',
+        input: [
+          { type: 'message', role: 'user', content: 'Look up both cities.' },
+          {
+            type: 'function_call',
+            call_id: 'call_paris',
+            name: 'get_weather',
+            arguments: '{"city":"Paris"}',
+          },
+          {
+            type: 'function_call',
+            call_id: 'call_tokyo',
+            name: 'get_weather',
+            arguments: '{"city":"Tokyo"}',
+          },
+          { type: 'function_call_output', call_id: 'call_paris', output: 'Paris: 18 C' },
+          { type: 'function_call_output', call_id: 'call_tokyo', output: 'Tokyo: 24 C' },
+        ],
+      },
+      reply as any,
+    );
+
+    const chatRequest = proxyService.handleChatCompletions.mock.calls[0][0];
+    expect(chatRequest.messages).toEqual([
+      { role: 'user', content: 'Look up both cities.' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_paris',
+            type: 'function',
+            function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+          },
+          {
+            id: 'call_tokyo',
+            type: 'function',
+            function: { name: 'get_weather', arguments: '{"city":"Tokyo"}' },
+          },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_paris', name: 'get_weather', content: 'Paris: 18 C' },
+      { role: 'tool', tool_call_id: 'call_tokyo', name: 'get_weather', content: 'Tokyo: 24 C' },
+    ]);
+
+    const converter = new ProxyService({} as never, {} as never) as unknown as {
+      convertOpenAIToClaude: (
+        request: typeof chatRequest,
+      ) => Parameters<typeof transformClaudeRequestIn>[0];
+    };
+    const body = transformClaudeRequestIn(converter.convertOpenAIToClaude(chatRequest));
+
+    expect(body.request.contents.map((content) => content.role)).toEqual(['user', 'model', 'user']);
+    expect(body.request.contents[1]?.parts.map((part) => part.functionCall?.id)).toEqual([
+      'call_paris',
+      'call_tokyo',
+    ]);
+    expect(body.request.contents[2]?.parts.map((part) => part.functionResponse?.id)).toEqual([
+      'call_paris',
+      'call_tokyo',
+    ]);
   });
 
   it('marks non-stream Responses output as incomplete when Chat reaches its length limit', async () => {

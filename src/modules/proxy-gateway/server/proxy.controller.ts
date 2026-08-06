@@ -1456,17 +1456,21 @@ export class ProxyController {
         }
       }
 
+      let previousWasFunctionCall = false;
       for (const item of inputItems) {
         const itemObj = this.toRecord(item);
         if (!itemObj) {
+          previousWasFunctionCall = false;
           continue;
         }
 
         const type = this.responsesInputItemType(itemObj);
         if (!type) {
+          previousWasFunctionCall = false;
           continue;
         }
         if (type === 'reasoning') {
+          previousWasFunctionCall = false;
           continue;
         }
 
@@ -1474,6 +1478,7 @@ export class ProxyController {
           const role = this.asString(itemObj.role) ?? 'user';
           const content = this.normalizeResponsesMessageContent(itemObj.content);
           messages.push({ role, content });
+          previousWasFunctionCall = false;
           continue;
         }
 
@@ -1485,20 +1490,25 @@ export class ProxyController {
             type === 'function_call'
               ? this.requireResponsesFunctionCallArguments(itemObj.arguments)
               : JSON.stringify(this.resolveToolArguments(type, itemObj));
-          messages.push({
-            role: 'assistant',
-            content: '',
-            tool_calls: [
-              {
-                id: callId,
-                type: 'function',
-                function: {
-                  name: toolName,
-                  arguments: argumentsValue,
-                },
-              },
-            ],
-          });
+          const toolCall = {
+            id: callId,
+            type: 'function' as const,
+            function: {
+              name: toolName,
+              arguments: argumentsValue,
+            },
+          };
+          const previousMessage = messages.at(-1);
+          if (previousWasFunctionCall && previousMessage?.role === 'assistant') {
+            previousMessage.tool_calls?.push(toolCall);
+          } else {
+            messages.push({
+              role: 'assistant',
+              content: '',
+              tool_calls: [toolCall],
+            });
+          }
+          previousWasFunctionCall = true;
           continue;
         }
 
@@ -1511,8 +1521,11 @@ export class ProxyController {
             name: callIdToToolName.get(callId) ?? 'unknown',
             content: this.normalizeResponsesOutput(output),
           });
+          previousWasFunctionCall = false;
           continue;
         }
+
+        previousWasFunctionCall = false;
       }
     } else if (isString(body.input)) {
       messages.push({
