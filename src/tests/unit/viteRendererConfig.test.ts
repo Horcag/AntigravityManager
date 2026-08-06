@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { PluginOption, UserConfig } from 'vite';
 
 async function loadRendererConfig() {
@@ -38,21 +38,29 @@ function flattenPluginNames(plugins: PluginOption[] = []): string[] {
 }
 
 describe('renderer Vite config', () => {
-  it('keeps code inspector out of production builds', async () => {
-    const config = await resolveRendererConfig('production');
+  let productionConfig: UserConfig;
+  let developmentConfig: UserConfig;
+
+  beforeAll(async () => {
+    productionConfig = await resolveRendererConfig('production');
+    developmentConfig = await resolveRendererConfig('development');
+  }, 30000);
+
+  it('keeps code inspector out of production builds', () => {
+    const config = productionConfig;
 
     expect(flattenPluginNames(config.plugins)).not.toContain('@code-inspector/vite');
-  }, 15000);
+  });
 
-  it('keeps code inspector available during development', async () => {
-    const config = await resolveRendererConfig('development');
+  it('keeps code inspector available during development', () => {
+    const config = developmentConfig;
 
     expect(flattenPluginNames(config.plugins)).toContain('@code-inspector/vite');
-  }, 15000);
+  });
 
-  it('defines NODE_ENV for renderer code without requiring Node integration', async () => {
-    const config = await resolveRendererConfig('production');
+  it('defines NODE_ENV for renderer code without requiring Node integration', () => {
+    const config = productionConfig;
 
     expect(config.define?.['process.env.NODE_ENV']).toBe(JSON.stringify('production'));
-  }, 15000);
+  });
 });
