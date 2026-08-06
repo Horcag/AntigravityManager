@@ -1312,10 +1312,11 @@ export class ProxyController {
     const text = isString(content) ? content : '';
     const incomplete = choice?.finish_reason?.toLowerCase() === 'length';
     const output: Array<Record<string, unknown>> = [];
+    const allocatedOutputIds = new Set<string>();
 
     if (text) {
       output.push({
-        id: this.normalizeResponsesId('msg', response.id),
+        id: this.allocateResponsesOutputId('msg', response.id, allocatedOutputIds),
         type: 'message',
         status: incomplete ? 'incomplete' : 'completed',
         role: 'assistant',
@@ -1331,7 +1332,7 @@ export class ProxyController {
 
     for (const toolCall of choice?.message?.tool_calls ?? []) {
       output.push({
-        id: this.normalizeResponsesId('fc', toolCall.id),
+        id: this.allocateResponsesOutputId('fc', toolCall.id, allocatedOutputIds),
         type: 'function_call',
         status: 'completed',
         call_id: toolCall.id,
@@ -1376,6 +1377,27 @@ export class ProxyController {
       .replace(/^(?:chatcmpl|resp|msg|fc|call)[_-]?/i, '')
       .replace(/[^a-zA-Z0-9_-]/g, '_');
     return `${prefix}_${normalizedSource || 'generated'}`;
+  }
+
+  private allocateResponsesOutputId(
+    prefix: 'msg' | 'fc',
+    sourceId: string | undefined,
+    allocatedIds: Set<string>,
+  ): string {
+    const normalizedId = this.normalizeResponsesId(prefix, sourceId);
+    if (!allocatedIds.has(normalizedId)) {
+      allocatedIds.add(normalizedId);
+      return normalizedId;
+    }
+
+    let suffix = 2;
+    let allocatedId = `${normalizedId}_${suffix}`;
+    while (allocatedIds.has(allocatedId)) {
+      suffix += 1;
+      allocatedId = `${normalizedId}_${suffix}`;
+    }
+    allocatedIds.add(allocatedId);
+    return allocatedId;
   }
 
   private normalizeResponsesInput(input: unknown): string {

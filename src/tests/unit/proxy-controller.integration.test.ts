@@ -843,6 +843,129 @@ describe('ProxyController Integration', () => {
     );
   });
 
+  it('allocates unique non-stream Responses function-call output IDs without changing call IDs', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_response',
+        created: 1700000002,
+        model: 'gpt-4o',
+        choices: [
+          {
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'first', arguments: '{}' },
+                },
+                {
+                  id: '1',
+                  type: 'function',
+                  function: { name: 'second', arguments: '{}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses({ model: 'gpt-4o', input: 'Call both tools.' }, reply as any);
+
+    const output = reply.send.mock.calls[0][0].output;
+    expect(output.map((item: { id: string }) => item.id)).toEqual(['fc_1', 'fc_1_2']);
+    expect(output.map((item: { call_id: string }) => item.call_id)).toEqual(['call_1', '1']);
+    expect(output.map((item: { name: string }) => item.name)).toEqual(['first', 'second']);
+  });
+
+  it('avoids collisions between generated Responses output suffixes and later normalized IDs', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_response',
+        created: 1700000003,
+        model: 'gpt-4o',
+        choices: [
+          {
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'first', arguments: '{}' },
+                },
+                {
+                  id: '1',
+                  type: 'function',
+                  function: { name: 'second', arguments: '{}' },
+                },
+                {
+                  id: 'call_1_2',
+                  type: 'function',
+                  function: { name: 'third', arguments: '{}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses({ model: 'gpt-4o', input: 'Call three tools.' }, reply as any);
+
+    const output = reply.send.mock.calls[0][0].output;
+    expect(output.map((item: { id: string }) => item.id)).toEqual(['fc_1', 'fc_1_2', 'fc_1_2_2']);
+    expect(output.map((item: { call_id: string }) => item.call_id)).toEqual([
+      'call_1',
+      '1',
+      'call_1_2',
+    ]);
+  });
+
+  it('keeps a non-colliding Responses function-call output ID unchanged', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_response',
+        created: 1700000004,
+        model: 'gpt-4o',
+        choices: [
+          {
+            index: 0,
+            finish_reason: 'tool_calls',
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_ordinary',
+                  type: 'function',
+                  function: { name: 'ordinary', arguments: '{}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses({ model: 'gpt-4o', input: 'Call one tool.' }, reply as any);
+
+    const output = reply.send.mock.calls[0][0].output;
+    expect(output).toEqual([
+      expect.objectContaining({ id: 'fc_ordinary', call_id: 'call_ordinary', name: 'ordinary' }),
+    ]);
+  });
+
   it('groups consecutive Responses function calls and preserves ordered tool outputs', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({
