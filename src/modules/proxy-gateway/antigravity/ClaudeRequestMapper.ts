@@ -311,7 +311,7 @@ function isGeminiImageModel(modelName: string): boolean {
 
 function isGeminiFlashModel(modelName: string): boolean {
   const normalized = modelName.toLowerCase();
-  return normalized.includes('gemini-3-flash') || normalized.includes('gemini-3.1-flash');
+  return /^(?:models\/)?gemini-3(?:\.\d+)?-flash(?!-image(?:-|$))(?:-|$)/.test(normalized);
 }
 
 function targetModelSupportsThinking(modelName: string): boolean {
@@ -339,8 +339,7 @@ function shouldEnableThinkingByDefault(mappedModel: string, originalModel: strin
     originalLower.includes('claude-opus-4-6') ||
     mappedLower.includes('-thinking') ||
     mappedLower.includes('gemini-3.1-pro') ||
-    mappedLower.includes('gemini-3-flash') ||
-    mappedLower.includes('gemini-3.1-flash')
+    isGeminiFlashModel(mappedLower)
   );
 }
 
@@ -580,8 +579,10 @@ function buildContents(
         };
         cleanJsonSchema(part);
         toolIdToName.set(block.id, block.name);
-        const finalSig = block.signature || lastThoughtSignature || SignatureStore.get();
+        const finalSig: string | null =
+          block.signature ?? lastThoughtSignature ?? SignatureStore.get();
         if (finalSig) {
+          lastThoughtSignature = finalSig;
           part.thoughtSignature = finalSig;
           part.thought_signature = finalSig;
         } else if (isThinkingEnabled && isGeminiFlashModel(mappedModel)) {

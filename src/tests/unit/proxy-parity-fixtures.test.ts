@@ -4,6 +4,8 @@ import { EventEmitter } from 'events';
 import { describe, expect, it, vi } from 'vitest';
 import { Observable } from 'rxjs';
 
+import { transformClaudeRequestIn } from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
+import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 
 const mockAccountLeaseService = {
@@ -54,6 +56,28 @@ describe('Proxy Parity Fixtures', () => {
     expect(actual.messages[0]).toEqual(expected.messages[0]);
     expect(actual.messages[1].content[1]).toEqual(expected.messages[1].content[1]);
     expect(actual.messages[2].content[0]).toEqual(expected.messages[2].content[0]);
+  });
+
+  it('accepts a null assistant content field between tool calls and tool results', () => {
+    const service = new TestableProxyService();
+    const input = readFixture<any>('request/openai.chat-tools.input.json');
+    input.messages[2].content = null;
+
+    const actual = service.toAnthropic(input);
+
+    expect(actual.messages[1].content).toEqual([
+      {
+        type: 'tool_use',
+        id: 'call_weather',
+        name: 'get_weather',
+        input: { city: 'Paris' },
+      },
+    ]);
+    expect(actual.messages[2].content[0]).toMatchObject({
+      type: 'tool_result',
+      tool_use_id: 'call_weather',
+      content: '18 C and cloudy',
+    });
   });
 
   it('removes Codex-injected tools from function parameter schemas', () => {
@@ -128,5 +152,75 @@ describe('Proxy Parity Fixtures', () => {
     for (const token of expected.contains) {
       expect(output).toContain(token);
     }
+  });
+
+  it('replays a streamed tool thought signature for an OpenAI null-content follow-up', async () => {
+    SignatureStore.clear();
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const outputChunks: string[] = [];
+
+    const promise = new Promise<void>((resolve, reject) => {
+      service.streamToOpenAI(stream, 'gemini-3.6-flash-high').subscribe({
+        next: (chunk) => outputChunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        `data: ${JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_weather',
+                      name: 'get_weather',
+                      args: { city: 'Paris' },
+                    },
+                    thoughtSignature: 'thought-signature-for-openai-tool-loop',
+                  },
+                ],
+              },
+            },
+          ],
+        })}\n`,
+      ),
+    );
+    stream.emit('end');
+    await promise;
+
+    const followUp = service.toAnthropic({
+      model: 'gemini-3.6-flash-high',
+      messages: [
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_weather',
+              type: 'function',
+              function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+            },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_weather', content: '18 C and cloudy' },
+      ],
+    });
+    const body = transformClaudeRequestIn(followUp);
+    const [functionCallPart] = body.request.contents[0].parts;
+    const [functionResponsePart] = body.request.contents[1].parts;
+
+    expect(outputChunks.join('')).toContain('"tool_calls"');
+    expect(body.request.generationConfig?.thinkingConfig).toBeDefined();
+    for (const part of [functionCallPart, functionResponsePart]) {
+      expect(part.thoughtSignature).toBe('thought-signature-for-openai-tool-loop');
+      expect(part.thought_signature).toBe('thought-signature-for-openai-tool-loop');
+    }
+    SignatureStore.clear();
   });
 });

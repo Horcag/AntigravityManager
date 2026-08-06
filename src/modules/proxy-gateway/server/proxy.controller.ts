@@ -909,7 +909,7 @@ export class ProxyController {
           fallbackPrompt ||
           'Please generate an image based on this request.',
       });
-    } else {
+    } else if (Array.isArray(userMessage.content)) {
       for (const block of userMessage.content) {
         if (block.type === 'text' && isString(block.text) && !isEmpty(block.text.trim())) {
           textParts.push(block.text);
@@ -930,6 +930,8 @@ export class ProxyController {
       if (textParts.length > 0) {
         parts.unshift({ text: textParts.join('\n') });
       }
+    } else {
+      parts.push({ text: fallbackPrompt || 'Please generate an image based on this request.' });
     }
 
     if (parts.length === 0) {

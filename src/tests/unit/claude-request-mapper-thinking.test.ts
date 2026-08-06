@@ -21,6 +21,19 @@ function createThinkingRequest(model: string): ClaudeRequest {
 }
 
 describe('ClaudeRequestMapper thinking support', () => {
+  it.each([
+    ['gemini-3-flash', true],
+    ['gemini-3.1-flash', true],
+    ['gemini-3.6-flash-high', true],
+    ['models/gemini-3.6-flash-high', true],
+    ['gemini-3.6-flash-image', false],
+    ['other-gemini-3.6-flash-high', false],
+  ])('configures thinking for Gemini 3 Flash family model %s: %s', (model, supportsThinking) => {
+    const body = transformClaudeRequestIn(createThinkingRequest(model));
+
+    expect(Boolean(body.request.generationConfig?.thinkingConfig)).toBe(supportsThinking);
+  });
+
   it.each(['gemini-3.1-pro-high', 'gemini-3.1-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-low'])(
     'omits thinkingConfig for tiered Gemini Pro variant %s',
     (model) => {

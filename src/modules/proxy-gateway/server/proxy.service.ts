@@ -8,6 +8,8 @@ import { Observable } from 'rxjs';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
 import { transformResponse } from '../antigravity/ClaudeResponseMapper';
 import { StreamingState, PartProcessor } from '../antigravity/ClaudeStreamingMapper';
+import { SignatureStore } from '../antigravity/SignatureStore';
+import { decodeSignature } from '../antigravity/signature-utils';
 import {
   type GeminiResponsesGroundingMetadata,
   type GeminiResponsesStreamPart,
@@ -1220,6 +1222,11 @@ export class ProxyService {
             const parts = candidate?.content?.parts || [];
 
             for (const part of parts) {
+              const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
+              if (signature) {
+                SignatureStore.store(signature);
+              }
+
               if (part.thought && part.text) {
                 const reasoningChunk = {
                   id: streamId,
@@ -1599,6 +1606,10 @@ export class ProxyService {
   private convertOpenAIPartsToAnthropicContent(
     content: OpenAIChatRequest['messages'][number]['content'],
   ): AnthropicContent[] {
+    if (content === null) {
+      return [];
+    }
+
     if (isString(content)) {
       return content.trim() ? [{ type: 'text', text: content }] : [];
     }
@@ -1633,6 +1644,10 @@ export class ProxyService {
   private extractOpenAITextContent(
     content: OpenAIChatRequest['messages'][number]['content'],
   ): string {
+    if (content === null) {
+      return '';
+    }
+
     if (isString(content)) {
       return content;
     }

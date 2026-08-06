@@ -15,7 +15,7 @@ export interface OpenAIChatRequest {
 
 export interface OpenAIMessage {
   role: string;
-  content: string | OpenAIContentPart[];
+  content: string | OpenAIContentPart[] | null;
   name?: string;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
