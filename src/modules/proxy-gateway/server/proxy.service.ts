@@ -1044,15 +1044,47 @@ export class ProxyService {
       let buffer = '';
       let receivedData = false;
       const mergedParts: InternalGeminiPart[] = [];
+      const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
       let finishReason: string | undefined;
       let usageMetadata: GeminiResponse['usageMetadata'];
+      let settled = false;
+
+      const cleanup = (): void => {
+        idleTimer.clear();
+        upstreamStream.removeListener('data', onData);
+        upstreamStream.removeListener('end', onEnd);
+        upstreamStream.removeListener('error', onError);
+      };
+
+      const rejectOnce = (error: Error, destroyUpstream = false): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        if (destroyUpstream) {
+          this.destroyUpstreamStream(upstreamStream);
+        }
+        reject(error);
+      };
+
+      const resolveOnce = (response: GeminiResponse): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve(response);
+      };
+
       const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Gemini-Collect', () => {
-        reject(new Error('Stream idle timeout'));
+        rejectOnce(new Error('Stream idle timeout'));
       });
 
-      idleTimer.reset();
-
-      upstreamStream.on('data', (chunk: Buffer) => {
+      const onData = (chunk: Buffer): void => {
+        if (settled) {
+          return;
+        }
         receivedData = true;
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
@@ -1075,9 +1107,22 @@ export class ProxyService {
             const candidate = parsed?.candidates?.[0];
             const parts = candidate?.content?.parts;
             if (Array.isArray(parts)) {
-              mergedParts.push(
-                ...parts.filter((part): part is InternalGeminiPart => this.isGeminiPart(part)),
-              );
+              for (const part of parts) {
+                if (!this.isGeminiPart(part)) {
+                  continue;
+                }
+                if (
+                  part.functionCall &&
+                  toolCallIdIntegrity.record(
+                    part.functionCall.id,
+                    part.functionCall.name,
+                    part.functionCall.args,
+                  ) === 'replay'
+                ) {
+                  continue;
+                }
+                mergedParts.push(part);
+              }
             }
 
             if (candidate?.finishReason) {
@@ -1086,20 +1131,26 @@ export class ProxyService {
             if (parsed?.usageMetadata) {
               usageMetadata = parsed.usageMetadata;
             }
-          } catch {
+          } catch (error) {
+            if (error instanceof ToolCallIdConflictError) {
+              rejectOnce(error, true);
+              return;
+            }
             // Ignore malformed chunks and continue collecting valid parts.
           }
         }
-      });
+      };
 
-      upstreamStream.on('end', () => {
-        idleTimer.clear();
+      const onEnd = (): void => {
+        if (settled) {
+          return;
+        }
         if (!receivedData) {
-          reject(new Error('Empty response stream'));
+          rejectOnce(new Error('Empty response stream'));
           return;
         }
 
-        resolve({
+        resolveOnce({
           candidates: [
             {
               content: {
@@ -1111,12 +1162,16 @@ export class ProxyService {
           ],
           usageMetadata,
         });
-      });
+      };
 
-      upstreamStream.on('error', (error: unknown) => {
-        idleTimer.clear();
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
+      const onError = (error: unknown): void => {
+        rejectOnce(error instanceof Error ? error : new Error(String(error)));
+      };
+
+      upstreamStream.on('data', onData);
+      upstreamStream.on('end', onEnd);
+      upstreamStream.on('error', onError);
+      idleTimer.reset();
     });
   }
 

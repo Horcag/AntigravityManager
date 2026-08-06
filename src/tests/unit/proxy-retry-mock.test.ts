@@ -6,6 +6,7 @@ import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
 import { Observable } from 'rxjs';
 import { GeminiClient } from '../../modules/proxy-gateway/server/clients/gemini.client';
+import { transformResponse } from '../../modules/proxy-gateway/antigravity/ClaudeResponseMapper';
 import { setServerConfig } from '../../server/server-config';
 import { DEFAULT_APP_CONFIG, ProxyConfig } from '@/modules/config/types';
 
@@ -58,6 +59,10 @@ class TestableProxyService extends ProxyService {
 
   public testPassthroughStream(stream: any): Observable<string> {
     return (this as any).passthroughSseStream(stream);
+  }
+
+  public testCollectStream(stream: any): Promise<unknown> {
+    return (this as any).collectGeminiStreamAsResponse(stream);
   }
 
   public testModelHeaders(model: string): Record<string, string> {
@@ -259,6 +264,127 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     const result = await resultPromise;
     expect(result.candidates[0].content.parts[0].text).toBe('no-space fallback text');
     expect(result.candidates[0].finishReason).toBe('STOP');
+  });
+
+  it('suppresses exact explicit tool-call replays across fallback frames before protocol mapping', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream) as Promise<any>;
+
+    for (const parts of [
+      [{ functionCall: { id: 'call_a', name: 'alpha', args: { a: 1 } } }],
+      [{ functionCall: { id: 'call_b', name: 'beta', args: {} } }],
+      [{ functionCall: { id: 'call_a', name: 'alpha', args: { a: 1 } } }],
+    ]) {
+      stream.emit(
+        'data',
+        Buffer.from(`data: ${JSON.stringify({ candidates: [{ content: { parts } }] })}\n\n`),
+      );
+    }
+    stream.emit('end');
+
+    const result = await resultPromise;
+    expect(
+      result.candidates[0].content.parts.map(
+        (part: { functionCall?: { id?: string } }) => part.functionCall?.id,
+      ),
+    ).toEqual(['call_a', 'call_b']);
+
+    const claudeResponse = transformResponse(result);
+    const anthropicResponse = (service as any).toAnthropicChatResponse(claudeResponse);
+    const chatResponse = (service as any).convertClaudeToOpenAIResponse(
+      claudeResponse,
+      'gpt-4o-mini',
+    );
+    const responsesResponse = (service as any).convertClaudeToOpenAIResponse(
+      claudeResponse,
+      'gpt-4o-mini',
+      undefined,
+      'responses',
+    );
+
+    expect(anthropicResponse.content.map((part: { id?: string }) => part.id)).toEqual([
+      'call_a',
+      'call_b',
+    ]);
+    expect(
+      chatResponse.choices[0].message.tool_calls.map((call: { id: string }) => call.id),
+    ).toEqual(['call_a', 'call_b']);
+    expect(
+      responsesResponse.choices[0].message.tool_calls.map((call: { id: string }) => call.id),
+    ).toEqual(['call_a', 'call_b']);
+  });
+
+  it('rejects conflicting explicit tool-call reuse once and clears its idle timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const service = new TestableProxyService();
+      (service as any).streamIdleTimeoutMs = 1;
+      const stream = new EventEmitter();
+      const resultPromise = service.testCollectStream(stream);
+
+      for (const args of [{ city: 'London' }, { city: 'Paris' }]) {
+        stream.emit(
+          'data',
+          Buffer.from(
+            `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { id: 'call_weather', name: 'weather', args } }] } }] })}\n\n`,
+          ),
+        );
+      }
+
+      await expect(resultPromise).rejects.toThrow('Conflicting function call reuse');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(stream.listenerCount('data')).toBe(0);
+      expect(stream.listenerCount('end')).toBe(0);
+      expect(stream.listenerCount('error')).toBe(0);
+
+      stream.emit(
+        'data',
+        Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"late"}]}}]}\n\n'),
+      );
+      stream.emit('end');
+      vi.advanceTimersByTime(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('settles fallback collection once for normal end, upstream error, and idle timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const service = new TestableProxyService();
+      (service as any).streamIdleTimeoutMs = 1;
+
+      const ended = new EventEmitter();
+      const endedPromise = service.testCollectStream(ended) as Promise<any>;
+      ended.emit(
+        'data',
+        Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"complete"}]}}]}\n\n'),
+      );
+      ended.emit('end');
+      await expect(endedPromise).resolves.toMatchObject({
+        candidates: [{ content: { parts: [{ text: 'complete' }] } }],
+      });
+      expect(vi.getTimerCount()).toBe(0);
+
+      const errored = new EventEmitter();
+      const erroredPromise = service.testCollectStream(errored);
+      errored.emit('error', new Error('upstream interrupted'));
+      await expect(erroredPromise).rejects.toThrow('upstream interrupted');
+      expect(vi.getTimerCount()).toBe(0);
+
+      const idle = new EventEmitter();
+      const idlePromise = service.testCollectStream(idle);
+      vi.advanceTimersByTime(1);
+      await expect(idlePromise).rejects.toThrow('Stream idle timeout');
+      expect(vi.getTimerCount()).toBe(0);
+      expect(idle.listenerCount('data')).toBe(0);
+      expect(idle.listenerCount('end')).toBe(0);
+      expect(idle.listenerCount('error')).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('emits an ordered Anthropic response for a no-space SSE frame', async () => {
