@@ -367,13 +367,26 @@ export class ProxyService {
       let lastUsageMetadata: Record<string, unknown> | undefined;
 
       let receivedData = false;
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
-        subscriber.error(new Error('Upstream stream idle timeout after 300s'));
+      let terminated = false;
+      let idleTimer: StreamIdleTimer;
+      const failStream = (error: Error): void => {
+        if (terminated) {
+          return;
+        }
+        terminated = true;
+        idleTimer.clear();
+        subscriber.error(error);
+      };
+      idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
+        failStream(new Error('Upstream stream idle timeout after 300s'));
       });
 
       idleTimer.reset();
 
       upstreamStream.on('data', (chunk: Buffer) => {
+        if (terminated) {
+          return;
+        }
         receivedData = true; // Mark that we got data
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
@@ -381,6 +394,9 @@ export class ProxyService {
         buffer = lines.pop() || '';
 
         for (const line of lines) {
+          if (terminated) {
+            return;
+          }
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:')) continue;
           const dataStr = trimmed.slice('data:'.length).trim();
@@ -415,11 +431,18 @@ export class ProxyService {
             this.logger.error('Stream parse error', e);
             const errorChunks = state.handleParseError(dataStr);
             errorChunks.forEach((c) => subscriber.next(c));
+            if (state.getErrorCount() > 3) {
+              failStream(new Error('Malformed upstream stream payload'));
+              return;
+            }
           }
         }
       });
 
       upstreamStream.on('end', () => {
+        if (terminated) {
+          return;
+        }
         idleTimer.clear();
         if (!receivedData) {
           this.logger.warn('Empty response stream detected');
@@ -433,12 +456,11 @@ export class ProxyService {
       });
 
       upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
         const cleanError = err instanceof Error ? err : new Error(String(err));
         const { type } = classifyStreamError(cleanError);
 
         this.logger.error(`Stream error: ${type} - ${cleanError.message}`);
-        subscriber.error(cleanError);
+        failStream(cleanError);
       });
 
       return () => {
@@ -632,31 +654,47 @@ export class ProxyService {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let receivedData = false;
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Gemini-SSE', () => {
-        subscriber.complete();
+      let terminated = false;
+      let idleTimer: StreamIdleTimer;
+      const failStream = (error: Error): void => {
+        if (terminated) {
+          return;
+        }
+        terminated = true;
+        idleTimer.clear();
+        subscriber.error(error);
+      };
+      idleTimer = this.createStreamIdleTimer(upstreamStream, 'Gemini-SSE', () => {
+        failStream(new Error('Upstream stream idle timeout after 300s'));
       });
 
       idleTimer.reset();
 
       upstreamStream.on('data', (chunk: Buffer) => {
+        if (terminated) {
+          return;
+        }
         receivedData = true;
         idleTimer.reset();
         subscriber.next(decoder.decode(chunk, { stream: true }));
       });
 
       upstreamStream.on('end', () => {
+        if (terminated) {
+          return;
+        }
         idleTimer.clear();
         if (!receivedData) {
           subscriber.error(new Error('Empty response stream'));
           return;
         }
+        terminated = true;
         subscriber.complete();
       });
 
       upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
         const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
-        subscriber.error(cleanError);
+        failStream(cleanError);
       });
 
       return () => {

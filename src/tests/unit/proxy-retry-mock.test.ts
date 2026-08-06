@@ -3,6 +3,7 @@ import axios, { AxiosError } from 'axios';
 import { EventEmitter } from 'events';
 import { Readable } from 'node:stream';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
 import { Observable } from 'rxjs';
 import { GeminiClient } from '../../modules/proxy-gateway/server/clients/gemini.client';
 import { setServerConfig } from '../../server/server-config';
@@ -471,6 +472,61 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(errorMessage).toBe('Upstream stream idle timeout after 300s');
     expect(chunks.join('')).not.toContain('message_stop');
     expect(chunks.join('')).not.toContain('[DONE]');
+  });
+
+  it('emits one Anthropic wire error after four malformed upstream frames without success terminators', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const reply = { hijack: vi.fn(), raw };
+
+    (controller as any).writeSseResponse(reply, service.testProcessStream(stream), 'anthropic');
+    stream.emit(
+      'data',
+      Buffer.from('data: {oops\n\ndata: {oops\n\ndata: {oops\n\ndata: {oops\n\n'),
+    );
+    stream.emit('end');
+
+    const output = raw.write.mock.calls.map(([chunk]) => chunk).join('');
+    expect(output).toContain(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}\n\n',
+    );
+    expect(output).not.toContain('network_error');
+    expect(output).not.toContain('message_delta');
+    expect(output).not.toContain('message_stop');
+    expect(output).not.toContain('[DONE]');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
+  it('fails an idle Gemini passthrough stream instead of completing successfully', () => {
+    vi.useFakeTimers();
+    const service = new TestableProxyService();
+    (service as any).streamIdleTimeoutMs = 1;
+    const stream = new EventEmitter();
+    let completed = false;
+    let errorMessage = '';
+
+    service.testPassthroughStream(stream).subscribe({
+      complete: () => {
+        completed = true;
+      },
+      error: (error: Error) => {
+        errorMessage = error.message;
+      },
+    });
+
+    vi.advanceTimersByTime(1);
+    vi.useRealTimers();
+
+    expect(completed).toBe(false);
+    expect(errorMessage).toBe('Upstream stream idle timeout after 300s');
   });
 
   it('propagates Gemini passthrough interruption errors', async () => {

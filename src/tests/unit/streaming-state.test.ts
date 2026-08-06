@@ -17,16 +17,14 @@ describe('StreamingState', () => {
       expect(chunks).toEqual([]);
     });
 
-    it('should emit error event when error count exceeds 3', () => {
+    it('does not emit a protocol error event when error count exceeds 3', () => {
       // Simulate 4 parse errors
       state.handleParseError('error 1');
       state.handleParseError('error 2');
       state.handleParseError('error 3');
       const chunks = state.handleParseError('error 4');
 
-      expect(chunks.length).toBeGreaterThan(0);
-      expect(chunks[0]).toContain('network_error');
-      expect(chunks[0]).toContain('Unstable network');
+      expect(chunks).toEqual([]);
     });
 
     it('should safely close active block on error', () => {

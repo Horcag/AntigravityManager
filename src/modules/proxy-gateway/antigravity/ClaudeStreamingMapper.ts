@@ -259,24 +259,11 @@ export class StreamingState {
       chunks.push(...this.endBlock());
     }
 
-    // Emit error event if too many errors
+    // The service owns terminal stream errors so each public protocol gets its
+    // correct wire envelope instead of a mapper-specific event.
     if (this.parseErrorCount > 3) {
       logger.error(
         `[SSE-Parser] High error rate (${this.parseErrorCount} errors). Stream may be corrupted.`,
-      );
-      chunks.push(
-        this.emit('error', {
-          type: 'error',
-          error: {
-            type: 'network_error',
-            message: 'Unstable network connection. Please check your network or proxy settings.',
-            code: 'stream_decode_error',
-            details: {
-              error_count: this.parseErrorCount,
-              suggestion: 'Check network connection',
-            },
-          },
-        }),
       );
     }
 
