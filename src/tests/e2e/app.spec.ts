@@ -188,6 +188,30 @@ test.describe.serial('Antigravity Manager', () => {
       object: 'list',
       data: expect.any(Array),
     });
+
+    const boundary = '----agm-truncated-multipart';
+    const multipartResponse = await fetch(
+      `http://127.0.0.1:${proxyPort}/v1/audio/transcriptions?source=packaged-e2e`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${proxyApiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        // Deliberately omit the terminal boundary so Fastify's parser fails before any upstream work.
+        body: `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\ngemini-3-flash\r\n`,
+      },
+    );
+
+    expect(multipartResponse.status).toBe(400);
+    await expect(multipartResponse.json()).resolves.toMatchObject({
+      error: {
+        message: expect.any(String),
+        type: 'invalid_request_error',
+        param: null,
+        code: 'multipart_parse_error',
+      },
+    });
   });
 
   test('should navigate to settings', async () => {
