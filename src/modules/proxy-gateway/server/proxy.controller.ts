@@ -514,6 +514,8 @@ export class ProxyController {
 
   @Post('messages')
   async anthropicMessages(@Body() body: AnthropicChatRequest, @Res() res: FastifyReply) {
+    this.validateAnthropicRequest(body);
+
     try {
       const result = await this.proxyService.handleAnthropicMessages(body);
 
@@ -979,7 +981,10 @@ export class ProxyController {
     if (
       tools &&
       (!Array.isArray(tools) ||
-        tools.some((tool) => tool.type !== 'function' || !tool.function?.name))
+        tools.some(
+          (tool) =>
+            !isPlainObject(tool) || tool.type !== 'function' || !isString(tool.function?.name),
+        ))
     ) {
       throw this.invalidRequest('tools must contain function declarations with names', 'tools');
     }
@@ -1008,6 +1013,9 @@ export class ProxyController {
       throw this.invalidRequest('messages contains unsupported content', 'messages');
     }
     for (const part of content) {
+      if (!isPlainObject(part)) {
+        throw this.invalidRequest('messages contains unsupported content', 'messages');
+      }
       if (part.type === 'text' && isString(part.text)) {
         continue;
       }
@@ -1020,6 +1028,105 @@ export class ProxyController {
         continue;
       }
       throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+  }
+
+  private validateAnthropicRequest(body: AnthropicChatRequest): void {
+    this.requireJsonObject(body);
+    this.requireNonEmptyString(body.model, 'model');
+    if (!Array.isArray(body.messages) || body.messages.length === 0) {
+      throw this.invalidRequest('messages must be a non-empty array', 'messages');
+    }
+    for (const message of body.messages) {
+      if (
+        !isPlainObject(message) ||
+        !isString(message.role) ||
+        !['user', 'assistant'].includes(message.role)
+      ) {
+        throw this.invalidRequest('messages contains an unsupported role', 'messages');
+      }
+      this.validateAnthropicContent(message.content);
+    }
+    this.validateAnthropicTools(body.tools);
+    this.validateAnthropicSystem(body.system);
+  }
+
+  private validateAnthropicContent(content: unknown): void {
+    if (isString(content)) {
+      return;
+    }
+    if (!Array.isArray(content) || content.length === 0) {
+      throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+    for (const block of content) {
+      if (!isPlainObject(block) || !isString(block.type)) {
+        throw this.invalidRequest('messages contains unsupported content', 'messages');
+      }
+      if (block.type === 'text' && isString(block.text)) {
+        continue;
+      }
+      if (block.type === 'thinking' && isString(block.thinking)) {
+        continue;
+      }
+      if (
+        block.type === 'image' &&
+        isPlainObject(block.source) &&
+        block.source.type === 'base64' &&
+        isString(block.source.media_type) &&
+        isString(block.source.data)
+      ) {
+        continue;
+      }
+      if (
+        block.type === 'tool_use' &&
+        isString(block.id) &&
+        isString(block.name) &&
+        isPlainObject(block.input)
+      ) {
+        continue;
+      }
+      if (block.type === 'tool_result' && isString(block.tool_use_id)) {
+        this.validateAnthropicContent(block.content);
+        continue;
+      }
+      if (block.type === 'redacted_thinking' && isString(block.data)) {
+        continue;
+      }
+      throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+  }
+
+  private validateAnthropicTools(tools: AnthropicChatRequest['tools']): void {
+    if (tools === undefined) {
+      return;
+    }
+    if (
+      !Array.isArray(tools) ||
+      tools.some(
+        (tool) =>
+          !isPlainObject(tool) ||
+          !isString(tool.name) ||
+          isEmpty(tool.name.trim()) ||
+          (tool.description !== undefined && !isString(tool.description)) ||
+          (tool.input_schema !== undefined && !isPlainObject(tool.input_schema)) ||
+          (tool.type !== undefined && !isString(tool.type)),
+      )
+    ) {
+      throw this.invalidRequest('tools must contain named tool declarations', 'tools');
+    }
+  }
+
+  private validateAnthropicSystem(system: AnthropicChatRequest['system']): void {
+    if (system === undefined || isString(system)) {
+      return;
+    }
+    if (
+      !Array.isArray(system) ||
+      system.some(
+        (block) => !isPlainObject(block) || block.type !== 'text' || !isString(block.text),
+      )
+    ) {
+      throw this.invalidRequest('system must be a string or text block array', 'system');
     }
   }
 

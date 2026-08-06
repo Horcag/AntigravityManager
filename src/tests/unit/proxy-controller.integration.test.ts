@@ -110,6 +110,95 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const invalidOpenAIRequests: Array<[string, Record<string, unknown>, string]> = [
+      [
+        '/v1/chat/completions',
+        { model: 'gemini-3-flash', messages: [{ role: 'user', content: 'hi' }], tools: [null] },
+        'tools',
+      ],
+      ['/v1/responses', { model: 'gemini-3-flash', input: 'hi', tools: [null] }, 'tools'],
+      [
+        '/v1/chat/completions',
+        { model: 'gemini-3-flash', messages: [{ role: 'user', content: [null] }] },
+        'messages',
+      ],
+    ];
+    const invalidAnthropicBodies: unknown[] = [
+      {},
+      [],
+      { model: 42, messages: [{ role: 'user', content: 'hi' }] },
+      { messages: [{ role: 'user', content: 'hi' }] },
+      { model: 'claude-sonnet-4-5', messages: null },
+      { model: 'claude-sonnet-4-5', messages: [] },
+      { model: 'claude-sonnet-4-5', messages: [null] },
+      { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: null }] },
+      { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: [] }] },
+      { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: [null] }] },
+      {
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [null],
+      },
+      {
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ name: null }],
+      },
+    ];
+
+    try {
+      for (const [url, payload, param] of invalidOpenAIRequests) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error).toMatchObject({ type: 'invalid_request_error', param });
+      }
+      for (const payload of invalidAnthropicBodies) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          type: 'error',
+          error: { type: 'invalid_request_error' },
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+
+      const validAnthropic = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers,
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'text', text: 'Use the supplied tool.' }],
+            },
+          ],
+          tools: [{ name: 'lookup_weather', input_schema: { type: 'object' } }],
+        },
+      });
+      expect(validAnthropic.statusCode).toBe(200);
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
