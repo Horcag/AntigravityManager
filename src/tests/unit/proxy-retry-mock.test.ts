@@ -295,7 +295,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
-  it('skips empty SSE keepalives without corrupting an Anthropic stream', async () => {
+  it('keeps one Anthropic text block open across empty SSE keepalives', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
     const chunks: string[] = [];
@@ -308,35 +308,47 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       });
     });
 
-    const payload = JSON.stringify({
+    const initialPayload = JSON.stringify({
       candidates: [
         {
-          content: { parts: [{ text: 'keepalive stream text' }] },
+          content: { parts: [{ text: 'hello' }] },
+        },
+      ],
+    });
+    const finalPayload = JSON.stringify({
+      candidates: [
+        {
+          content: { parts: [{ text: ' world' }] },
           finishReason: 'STOP',
         },
       ],
     });
-    stream.emit('data', Buffer.from(`data:\n\ndata: \n\ndata: ${payload}\n\n`));
+    stream.emit(
+      'data',
+      Buffer.from(
+        `data: ${initialPayload}\n\ndata:\n\ndata: \n\ndata:\n\ndata: \n\ndata: ${finalPayload}\n\n`,
+      ),
+    );
     stream.emit('end');
     await completed;
 
-    const eventTypes = chunks
+    const events = chunks
       .flatMap((chunk) => chunk.split('\n'))
       .filter((line) => line.startsWith('data: '))
       .map((line) => line.slice('data: '.length))
       .filter((eventPayload) => eventPayload !== '[DONE]')
-      .map((eventPayload) => JSON.parse(eventPayload).type);
+      .map((eventPayload) => JSON.parse(eventPayload));
 
-    expect(eventTypes).toEqual([
-      'message_start',
-      'content_block_start',
-      'content_block_delta',
-      'content_block_stop',
-      'message_delta',
-      'message_stop',
-    ]);
-    expect(chunks.join('')).toContain('keepalive stream text');
-    expect(eventTypes).not.toContain('error');
+    const contentBlockStarts = events.filter((event) => event.type === 'content_block_start');
+    const contentBlockStops = events.filter((event) => event.type === 'content_block_stop');
+    const textDeltas = events.filter((event) => event.type === 'content_block_delta');
+
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(contentBlockStarts).toHaveLength(1);
+    expect(contentBlockStops).toHaveLength(1);
+    expect(contentBlockStarts[0]).toMatchObject({ index: 0 });
+    expect(contentBlockStops[0]).toMatchObject({ index: 0 });
+    expect(textDeltas.map((event) => event.delta.text).join('')).toBe('hello world');
   });
 
   it('injects Claude beta headers when handling Gemini-compatible Claude models', async () => {
