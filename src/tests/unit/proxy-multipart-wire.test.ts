@@ -265,6 +265,7 @@ describe('OpenAI multipart media endpoints', () => {
       error: {
         message: 'Premature close',
         type: 'invalid_request_error',
+        param: null,
         code: 'multipart_parse_error',
       },
     });

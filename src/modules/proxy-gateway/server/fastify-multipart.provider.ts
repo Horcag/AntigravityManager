@@ -54,6 +54,7 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
         error: {
           message: error instanceof Error ? error.message : 'Malformed multipart request.',
           type: 'invalid_request_error',
+          param: null,
           code: 'multipart_parse_error',
         },
       });
