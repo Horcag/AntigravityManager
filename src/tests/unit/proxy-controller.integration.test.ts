@@ -1827,8 +1827,8 @@ describe('ProxyController Integration', () => {
       {
         model: 'gemini-3-pro-image',
         prompt: 'make it brighter',
-        image: 'data:image/png;base64,IMGBASE64',
-        reference_images: ['data:image/jpeg;base64,REFBASE64'],
+        image: 'data:image/png;base64,AQID',
+        reference_images: ['data:image/jpeg;base64,BAUG'],
       },
       {
         headers: {
@@ -1853,7 +1853,7 @@ describe('ProxyController Integration', () => {
     const reply = createReplyMock();
 
     await controller.imageEdits(
-      { prompt: 'make it brighter', image: 'data:image/png;base64,IMGBASE64' },
+      { prompt: 'make it brighter', image: 'data:image/png;base64,AQID' },
       { headers: { 'content-type': 'application/json' } } as any,
       reply as any,
     );
@@ -1875,8 +1875,8 @@ describe('ProxyController Integration', () => {
     await controller.imageEdits(
       {
         prompt: 'edit image',
-        image: 'RAW_IMAGE',
-        reference_images: [{ data: 'EXPLICIT_IMAGE', mimeType: 'image/webp' }],
+        image: 'BwgJ',
+        reference_images: [{ data: 'CgsM', mimeType: 'image/webp' }],
       },
       { headers: { 'content-type': 'application/json' } } as any,
       reply as any,
@@ -1887,10 +1887,10 @@ describe('ProxyController Integration', () => {
         messages: [
           expect.objectContaining({
             content: expect.arrayContaining([
-              { type: 'image_url', image_url: { url: 'data:image/png;base64,RAW_IMAGE' } },
+              { type: 'image_url', image_url: { url: 'data:image/png;base64,BwgJ' } },
               {
                 type: 'image_url',
-                image_url: { url: 'data:image/webp;base64,EXPLICIT_IMAGE' },
+                image_url: { url: 'data:image/webp;base64,CgsM' },
               },
             ]),
           }),
