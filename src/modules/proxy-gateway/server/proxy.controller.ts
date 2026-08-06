@@ -1492,7 +1492,6 @@ export class ProxyController {
           continue;
         }
         if (type === 'reasoning') {
-          previousWasFunctionCall = false;
           continue;
         }
 
