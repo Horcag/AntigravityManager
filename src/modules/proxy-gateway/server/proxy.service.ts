@@ -1319,7 +1319,7 @@ export class ProxyService {
       const decoder = new TextDecoder();
       let buffer = '';
       let completed = false;
-      let receivedUsableCandidate = false;
+      let receivedUsableOutput = false;
       const mapper = new OpenAIResponsesStreamingMapper({
         model,
         responseId: `resp_${uuidv4()}`,
@@ -1402,7 +1402,7 @@ export class ProxyService {
             responsePayload.usageMetadata ?? payload.usageMetadata,
           );
           if (!Array.isArray(responsePayload.candidates)) {
-            if (receivedUsableCandidate && usageMetadata) {
+            if (usageMetadata) {
               mapper.setUsageMetadata(usageMetadata);
               return;
             }
@@ -1420,14 +1420,17 @@ export class ProxyService {
             );
             return;
           }
-          receivedUsableCandidate = true;
           mapper.setUsageMetadata(usageMetadata);
           const content = this.toUnknownRecord(candidate?.content);
           if (Array.isArray(content?.parts)) {
             for (const part of content.parts) {
               const normalizedPart = this.toResponsesStreamPart(part);
               if (normalizedPart) {
-                for (const event of mapper.processPart(normalizedPart)) {
+                const events = mapper.processPart(normalizedPart);
+                if (events.length > 0) {
+                  receivedUsableOutput = true;
+                }
+                for (const event of events) {
                   subscriber.next(event);
                 }
               }
@@ -1435,11 +1438,19 @@ export class ProxyService {
           }
           const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
           if (grounding) {
-            for (const event of mapper.processGrounding(grounding)) {
+            const events = mapper.processGrounding(grounding);
+            if (events.length > 0) {
+              receivedUsableOutput = true;
+            }
+            for (const event of events) {
               subscriber.next(event);
             }
           }
-          if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
+          if (
+            receivedUsableOutput &&
+            isString(candidate?.finishReason) &&
+            candidate.finishReason.length > 0
+          ) {
             complete(candidate.finishReason);
           }
         } catch (error) {
@@ -1471,7 +1482,7 @@ export class ProxyService {
         if (buffer.trim()) {
           processLine(buffer);
         }
-        if (!receivedUsableCandidate) {
+        if (!receivedUsableOutput) {
           fail('Upstream Responses stream was empty', 'empty_stream');
           return;
         }

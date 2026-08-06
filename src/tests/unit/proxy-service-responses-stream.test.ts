@@ -372,6 +372,97 @@ describe('ProxyService Responses streaming', () => {
   });
 
   it.each([
+    ['empty parts', { content: { parts: [{}] }, finishReason: 'STOP' }],
+    ['empty text', { content: { parts: [{ text: '' }] }, finishReason: 'STOP' }],
+    [
+      'signature-only thought',
+      {
+        content: {
+          parts: [{ text: 'internal reasoning', thought: true, thoughtSignature: 'c2lnbmF0dXJl' }],
+        },
+        finishReason: 'STOP',
+      },
+    ],
+    ['finish reason only', { finishReason: 'STOP' }],
+  ])('fails an unusable candidate with %s as an empty stream', async (_name, candidate) => {
+    const upstream = Readable.from([
+      Buffer.from(`data: ${JSON.stringify({ response: { candidates: [candidate] } })}\n\n`),
+    ]);
+    const events = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.map((event) => event.type).slice(-2)).toEqual(['error', 'response.failed']);
+    expect(events.at(-2)).toMatchObject({ code: 'empty_stream' });
+    expect(events.at(-1)).toMatchObject({
+      response: { error: { code: 'empty_stream' }, status: 'failed' },
+      type: 'response.failed',
+    });
+  });
+
+  it('fails a usage-only stream as empty output', async () => {
+    const upstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}}\n\n',
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.map((event) => event.type).slice(-2)).toEqual(['error', 'response.failed']);
+    expect(events.at(-2)).toMatchObject({ code: 'empty_stream' });
+  });
+
+  it.each([
+    ['text', { content: { parts: [{ text: 'visible' }] }, finishReason: 'STOP' }],
+    [
+      'function call',
+      {
+        content: {
+          parts: [{ functionCall: { args: { query: 'test' }, id: 'call_search', name: 'search' } }],
+        },
+        finishReason: 'STOP',
+      },
+    ],
+    [
+      'inline data',
+      {
+        content: {
+          parts: [{ inlineData: { data: 'aGVsbG8=', mimeType: 'text/plain' } }],
+        },
+        finishReason: 'STOP',
+      },
+    ],
+    [
+      'grounding',
+      {
+        groundingMetadata: { webSearchQueries: ['Responses API'] },
+        finishReason: 'STOP',
+      },
+    ],
+  ])('completes a usable %s candidate', async (_name, candidate) => {
+    const upstream = Readable.from([
+      Buffer.from(`data: ${JSON.stringify({ response: { candidates: [candidate] } })}\n\n`),
+    ]);
+    const events = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.at(-1)).toMatchObject({
+      response: { status: 'completed' },
+      type: 'response.completed',
+    });
+    expect(events.some((event) => event.type === 'response.failed')).toBe(false);
+  });
+
+  it.each([
     ['malformed JSON', Readable.from([Buffer.from('data: {oops\n\n')])],
     ['upstream error', Readable.from([Buffer.from('data: {"error":{"message":"nope"}}\n\n')])],
     ['empty stream', Readable.from([])],
