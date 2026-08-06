@@ -102,6 +102,7 @@
     "vitest": "^4.0.8"
   },
   "dependencies": {
+    "@fastify/multipart": "^9.4.0",
     "@grpc/grpc-js": "^1.14.3",
     "@grpc/proto-loader": "^0.8.0",
     "@icons-pack/react-simple-icons": "^13.8.0",

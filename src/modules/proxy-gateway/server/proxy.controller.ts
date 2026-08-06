@@ -14,6 +14,7 @@ import {
   UseFilters,
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
+import { MultipartFile } from '@fastify/multipart';
 import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
 import { ProxyService } from './proxy.service';
 import { Observable } from 'rxjs';
@@ -40,6 +41,32 @@ import {
   mapOpenAIProtocolError,
   sendOpenAIProtocolError,
 } from './openai-protocol-error';
+import { isMultipartParserOrLimitError } from './fastify-multipart.provider';
+
+type InlineInput = string | { data?: string; mimeType?: string };
+
+interface MultipartMediaInput {
+  fields: Record<string, string | string[]>;
+  files: Record<string, InlineInput[]>;
+}
+
+interface MediaInput {
+  model?: string;
+  prompt?: string;
+  size?: string;
+  quality?: string;
+  n?: string;
+  responseFormat?: string;
+  language?: string;
+  temperature?: number;
+  invalidTemperature: boolean;
+  timestampGranularities: string[];
+  images: InlineInput[];
+  referenceImages: InlineInput[];
+  mask?: InlineInput;
+  file?: InlineInput;
+  audio?: InlineInput;
+}
 
 @Controller('v1')
 @UseGuards(ProxyGuard)
@@ -204,27 +231,58 @@ export class ProxyController {
       prompt?: string;
       size?: string;
       quality?: string;
-      image?: string | { data?: string; mimeType?: string };
-      reference_images?: Array<string | { data?: string; mimeType?: string }>;
-      mask?: string | { data?: string; mimeType?: string };
+      n?: number | string;
+      response_format?: string;
+      image?: InlineInput;
+      reference_images?: InlineInput[];
+      mask?: InlineInput;
     },
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
-    this.requireNonEmptyString(body.prompt, 'prompt');
-    if (!this.hasMultipartBoundary(req)) {
-      sendOpenAIProtocolError(res, this.invalidRequest('Invalid multipart/form-data boundary'));
+    const multipart = await this.readMultipartMediaInput(req, body, res);
+    if (!multipart) {
+      return;
+    }
+    const input = this.mergeMediaInput(body ?? {}, multipart);
+    this.requireNonEmptyString(input.prompt, 'prompt');
+
+    if (input.n && input.n !== '1') {
+      this.sendInvalidRequest(
+        res,
+        'Only n=1 is supported by this proxy.',
+        'n',
+        'unsupported_option',
+      );
+      return;
+    }
+    if (input.responseFormat && input.responseFormat !== 'b64_json') {
+      this.sendInvalidRequest(
+        res,
+        'Only response_format=b64_json is supported by this proxy.',
+        'response_format',
+        'unsupported_option',
+      );
       return;
     }
 
     const imageParts = this.collectImageContentParts([
-      body.image,
-      body.mask,
-      ...(body.reference_images ?? []),
+      ...input.images,
+      input.mask,
+      ...input.referenceImages,
     ]);
+    if (imageParts.length === 0) {
+      this.sendInvalidRequest(
+        res,
+        "Missing required 'image' file.",
+        'image',
+        'missing_required_parameter',
+      );
+      return;
+    }
 
     const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3-pro-image',
+      model: input.model ?? 'gemini-3-pro-image',
       messages: [
         {
           role: 'user',
@@ -234,19 +292,19 @@ export class ProxyController {
                   {
                     type: 'text',
                     text:
-                      body.prompt ?? 'Please edit this image based on the provided instruction.',
+                      input.prompt ?? 'Please edit this image based on the provided instruction.',
                   },
                   ...imageParts,
                 ]
-              : (body.prompt ?? 'Please edit this image based on the provided instruction.'),
+              : (input.prompt ?? 'Please edit this image based on the provided instruction.'),
         },
       ],
       stream: false,
-      size: body.size,
-      quality: body.quality,
+      size: input.size,
+      quality: input.quality,
     };
 
-    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', res);
+    await this.sendOpenAIImageGenerationResponse(request, input.prompt ?? '', res);
   }
 
   @Post('audio/transcriptions')
@@ -255,54 +313,101 @@ export class ProxyController {
     body: {
       model?: string;
       prompt?: string;
-      file?: string | { data?: string; mimeType?: string };
-      audio?: string | { data?: string; mimeType?: string };
+      language?: string;
+      response_format?: string;
+      temperature?: number | string;
+      timestamp_granularities?: string[];
+      file?: InlineInput;
+      audio?: InlineInput;
     },
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
-    this.requireNonEmptyString(body.model, 'model');
-    if (!this.hasMultipartBoundary(req)) {
-      sendOpenAIProtocolError(res, this.invalidRequest('Invalid multipart/form-data boundary'));
+    const multipart = await this.readMultipartMediaInput(req, body, res);
+    if (!multipart) {
+      return;
+    }
+    const input = this.mergeMediaInput(body ?? {}, multipart);
+    this.requireNonEmptyString(input.model, 'model');
+    if (input.invalidTemperature) {
+      this.sendInvalidRequest(
+        res,
+        'temperature must be a finite number between 0 and 1.',
+        'temperature',
+        'invalid_value',
+      );
+      return;
+    }
+    if (
+      input.responseFormat &&
+      input.responseFormat !== 'json' &&
+      input.responseFormat !== 'text'
+    ) {
+      this.sendInvalidRequest(
+        res,
+        'Only response_format=json and response_format=text are supported by this proxy.',
+        'response_format',
+        'unsupported_option',
+      );
+      return;
+    }
+    if (input.timestampGranularities.length > 0) {
+      this.sendInvalidRequest(
+        res,
+        'timestamp_granularities is not supported by this proxy.',
+        'timestamp_granularities',
+        'unsupported_option',
+      );
       return;
     }
 
-    const inlineAudio = this.resolveInlineData(body.file ?? body.audio);
+    const inlineAudio = this.resolveInlineData(input.file ?? input.audio);
     if (!inlineAudio) {
-      sendOpenAIProtocolError(
+      this.sendInvalidRequest(
         res,
-        this.invalidRequest(
-          "Missing 'file' or 'audio' input. Provide base64 content or a data URL.",
-        ),
+        "Missing required 'file' input.",
+        'file',
+        'missing_required_parameter',
       );
       return;
     }
 
     try {
-      const result = await this.proxyService.handleGeminiGenerateContent(body.model, {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: body.prompt ?? 'Please transcribe the provided speech audio accurately.',
-              },
-              {
-                inlineData: inlineAudio,
-              },
-            ],
-          },
-        ],
-      });
+      const result = await this.proxyService.handleGeminiGenerateContent(
+        input.model,
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: this.buildTranscriptionPrompt(input.prompt, input.language),
+                },
+                {
+                  inlineData: inlineAudio,
+                },
+              ],
+            },
+          ],
+          generationConfig:
+            input.temperature === undefined ? undefined : { temperature: input.temperature },
+        },
+      );
 
       const text = result.candidates?.[0]?.content?.parts
         ?.map((part) => part.text ?? '')
         .join('')
         .trim();
 
-      res.status(HttpStatus.OK).send({
-        text: text ?? '',
-      });
+      if (input.responseFormat === 'text') {
+        res
+          .type('text/plain; charset=utf-8')
+          .status(HttpStatus.OK)
+          .send(text ?? '');
+        return;
+      }
+
+      res.status(HttpStatus.OK).send({ text: text ?? '' });
     } catch (error) {
       this.sendOpenAIErrorResponse(res, '/v1/audio/transcriptions', error);
     }
@@ -837,12 +942,199 @@ export class ProxyController {
     return null;
   }
 
-  private collectImageContentParts(
-    entries: Array<string | { data?: string; mimeType?: string } | undefined>,
-  ): OpenAIContentPart[] {
+  private async readMultipartMediaInput(
+    req: FastifyRequest,
+    body: unknown,
+    res: FastifyReply,
+  ): Promise<MultipartMediaInput | null> {
+    if (this.isMultipartContentType(req) && !this.hasMultipartBoundary(req)) {
+      this.sendInvalidRequest(
+        res,
+        'Invalid boundary for multipart/form-data request.',
+        undefined,
+        'multipart_parse_error',
+      );
+      return null;
+    }
+    if (!this.hasMultipartBoundary(req)) {
+      return { fields: {}, files: {} };
+    }
+
+    try {
+      const attachedInput = await this.readAttachedMultipartMediaInput(body);
+      if (attachedInput) {
+        return attachedInput;
+      }
+
+      const request = req as FastifyRequest & {
+        parts?: () => AsyncIterableIterator<
+          MultipartFile | { type: 'field'; fieldname: string; value: string }
+        >;
+      };
+      if (!isFunction(request.parts)) {
+        return { fields: {}, files: {} };
+      }
+
+      const fields: Record<string, string | string[]> = {};
+      const files: Record<string, InlineInput[]> = {};
+      for await (const part of request.parts()) {
+        if (part.type === 'file') {
+          const data = (await part.toBuffer()).toString('base64');
+          const entries = files[part.fieldname] ?? [];
+          entries.push({ data, mimeType: part.mimetype || 'application/octet-stream' });
+          files[part.fieldname] = entries;
+          continue;
+        }
+
+        const fieldValue = isString(part.value) ? part.value : String(part.value ?? '');
+        const existing = fields[part.fieldname];
+        fields[part.fieldname] = existing
+          ? Array.isArray(existing)
+            ? [...existing, fieldValue]
+            : [existing, fieldValue]
+          : fieldValue;
+      }
+      return { fields, files };
+    } catch (error) {
+      if (isMultipartParserOrLimitError(error)) {
+        this.sendInvalidRequest(res, error.message, undefined, 'multipart_parse_error');
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
+  private async readAttachedMultipartMediaInput(
+    body: unknown,
+  ): Promise<MultipartMediaInput | null> {
+    const entries = this.toRecord(body);
+    if (!entries) {
+      return null;
+    }
+
+    const fields: Record<string, string | string[]> = {};
+    const files: Record<string, InlineInput[]> = {};
+    let foundMultipartPart = false;
+    for (const [fieldname, value] of Object.entries(entries)) {
+      const values = Array.isArray(value) ? value : [value];
+      for (const part of values) {
+        const partRecord = this.toRecord(part);
+        if (!partRecord || !isString(partRecord.type)) {
+          continue;
+        }
+        foundMultipartPart = true;
+        if (partRecord.type === 'file' && isFunction(partRecord.toBuffer)) {
+          const data = (await (partRecord.toBuffer as () => Promise<Buffer>)()).toString('base64');
+          const mimeType = this.asString(partRecord.mimetype) ?? 'application/octet-stream';
+          files[fieldname] = [...(files[fieldname] ?? []), { data, mimeType }];
+          continue;
+        }
+        if (partRecord.type === 'field' && isString(partRecord.value)) {
+          const fieldValue = partRecord.value;
+          const existing = fields[fieldname];
+          fields[fieldname] = existing
+            ? Array.isArray(existing)
+              ? [...existing, fieldValue]
+              : [existing, fieldValue]
+            : fieldValue;
+        }
+      }
+    }
+
+    return foundMultipartPart ? { fields, files } : null;
+  }
+
+  private mergeMediaInput(
+    body: {
+      model?: string;
+      prompt?: string;
+      size?: string;
+      quality?: string;
+      n?: number | string;
+      response_format?: string;
+      language?: string;
+      temperature?: number | string;
+      timestamp_granularities?: string[];
+      image?: InlineInput;
+      reference_images?: InlineInput[];
+      mask?: InlineInput;
+      file?: InlineInput;
+      audio?: InlineInput;
+    },
+    multipart: MultipartMediaInput,
+  ): MediaInput {
+    const field = (name: string): string | undefined => {
+      const value = multipart.fields[name];
+      return Array.isArray(value) ? value.at(-1) : value;
+    };
+    const file = (name: string): InlineInput | undefined => multipart.files[name]?.[0];
+    const files = (name: string): InlineInput[] => multipart.files[name] ?? [];
+    const temperatureValue = field('temperature') ?? body.temperature;
+    const parsedTemperature =
+      typeof temperatureValue === 'number'
+        ? temperatureValue
+        : isString(temperatureValue) && temperatureValue.trim() !== ''
+          ? Number(temperatureValue)
+          : Number.NaN;
+    const timestampGranularities = [
+      ...(body.timestamp_granularities ?? []),
+      ...this.asStringArray(multipart.fields.timestamp_granularities),
+    ];
+
+    return {
+      model: field('model') ?? body.model,
+      prompt: field('prompt') ?? body.prompt,
+      size: field('size') ?? body.size,
+      quality: field('quality') ?? body.quality,
+      n: field('n') ?? (body.n === undefined ? undefined : String(body.n)),
+      responseFormat: field('response_format') ?? body.response_format,
+      language: field('language') ?? body.language,
+      temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
+      invalidTemperature:
+        temperatureValue !== undefined &&
+        (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 1),
+      timestampGranularities,
+      images: [...files('image'), ...(body.image ? [body.image] : [])],
+      referenceImages: [...files('reference_images'), ...(body.reference_images ?? [])],
+      mask: file('mask') ?? body.mask,
+      file: file('file') ?? body.file,
+      audio: file('audio') ?? body.audio,
+    };
+  }
+
+  private asStringArray(value: string | string[] | undefined): string[] {
+    if (Array.isArray(value)) {
+      return value;
+    }
+    return value ? [value] : [];
+  }
+
+  private buildTranscriptionPrompt(prompt?: string, language?: string): string {
+    const instruction = prompt ?? 'Please transcribe the provided speech audio accurately.';
+    return language ? `${instruction} The expected language is ${language}.` : instruction;
+  }
+
+  private sendInvalidRequest(
+    res: FastifyReply,
+    message: string,
+    param: string | undefined,
+    code: string,
+  ): void {
+    res.status(HttpStatus.BAD_REQUEST).send({
+      error: {
+        message,
+        type: 'invalid_request_error',
+        ...(param ? { param } : {}),
+        code,
+      },
+    });
+  }
+
+  private collectImageContentParts(entries: Array<InlineInput | undefined>): OpenAIContentPart[] {
     const parts: OpenAIContentPart[] = [];
     for (const entry of entries) {
-      const inlineData = this.resolveInlineData(entry);
+      const inlineData = this.resolveInlineData(entry, 'image/png');
       if (!inlineData) {
         continue;
       }
@@ -856,7 +1148,10 @@ export class ProxyController {
     return parts;
   }
 
-  private resolveInlineData(input: unknown): {
+  private resolveInlineData(
+    input: unknown,
+    defaultMimeType = 'audio/mpeg',
+  ): {
     mimeType: string;
     data: string;
   } | null {
@@ -876,7 +1171,7 @@ export class ProxyController {
       const cleaned = input.replace(/\s+/g, '');
       if (cleaned.length > 0) {
         return {
-          mimeType: 'audio/mpeg',
+          mimeType: defaultMimeType,
           data: cleaned,
         };
       }
@@ -890,7 +1185,7 @@ export class ProxyController {
         return null;
       }
       return {
-        mimeType: this.asString(inputRecord.mimeType) ?? 'audio/mpeg',
+        mimeType: this.asString(inputRecord.mimeType) ?? defaultMimeType,
         data,
       };
     }
@@ -1112,7 +1407,7 @@ export class ProxyController {
         }
         if (block.type === 'image_url') {
           const imageUrl = this.resolveImageUrl(block as unknown as Record<string, unknown>);
-          const inlineData = this.resolveInlineData(imageUrl);
+          const inlineData = this.resolveInlineData(imageUrl, 'image/png');
           if (inlineData) {
             parts.push({
               inlineData: {
@@ -1160,8 +1455,12 @@ export class ProxyController {
       return false;
     }
 
-    const lowered = contentType.toLowerCase();
-    return lowered.includes('multipart/form-data') && lowered.includes('boundary=');
+    return this.isMultipartContentType(req) && contentType.toLowerCase().includes('boundary=');
+  }
+
+  private isMultipartContentType(req: FastifyRequest): boolean {
+    const contentType = req.headers['content-type'];
+    return isString(contentType) && contentType.toLowerCase().includes('multipart/form-data');
   }
 
   private resolveErrorMessageText(error: unknown): string {

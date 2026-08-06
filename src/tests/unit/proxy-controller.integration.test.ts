@@ -28,6 +28,7 @@ afterEach(() => {
 function createReplyMock() {
   const reply: Record<string, any> = {};
   reply.status = vi.fn(() => reply);
+  reply.type = vi.fn(() => reply);
   reply.header = vi.fn(() => reply);
   reply.send = vi.fn(() => reply);
   return reply;
@@ -834,7 +835,7 @@ describe('ProxyController Integration', () => {
 
     await controller.imageEdits(
       { prompt: 'make it brighter', image: 'data:image/png;base64,IMGBASE64' },
-      { headers: { 'content-type': 'multipart/form-data; boundary=----parity' } } as any,
+      { headers: { 'content-type': 'application/json' } } as any,
       reply as any,
     );
 
@@ -843,7 +844,43 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('rejects image edits request without multipart boundary', async () => {
+  it('maps raw JSON base64 image inputs to image/png while preserving explicit MIME types', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'data:image/png;base64,RESULT' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      {
+        prompt: 'edit image',
+        image: 'RAW_IMAGE',
+        reference_images: [{ data: 'EXPLICIT_IMAGE', mimeType: 'image/webp' }],
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            content: expect.arrayContaining([
+              { type: 'image_url', image_url: { url: 'data:image/png;base64,RAW_IMAGE' } },
+              {
+                type: 'image_url',
+                image_url: { url: 'data:image/webp;base64,EXPLICIT_IMAGE' },
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('rejects unsupported image edit options with an OpenAI error envelope', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
     };
@@ -855,6 +892,7 @@ describe('ProxyController Integration', () => {
         model: 'gemini-3-pro-image',
         prompt: 'make it brighter',
         image: 'data:image/png;base64,IMGBASE64',
+        n: 2,
       },
       {
         headers: {
@@ -868,10 +906,10 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       error: {
-        message: 'Invalid multipart/form-data boundary',
+        message: 'Only n=1 is supported by this proxy.',
         type: 'invalid_request_error',
-        param: null,
-        code: null,
+        param: 'n',
+        code: 'unsupported_option',
       },
     });
   });
@@ -909,7 +947,88 @@ describe('ProxyController Integration', () => {
     expect(reply.send).toHaveBeenCalledWith({ text: 'transcribed text' });
   });
 
-  it('rejects audio transcription request without multipart boundary', async () => {
+  it.each([0, 1])('forwards valid transcription temperature %s', async (temperature) => {
+    const proxyService = {
+      handleGeminiGenerateContent: vi.fn().mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'transcribed text' }] } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.audioTranscriptions(
+      {
+        model: 'gemini-3-flash',
+        file: 'data:audio/mpeg;base64,QUJDRA==',
+        temperature,
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
+      'gemini-3-flash',
+      expect.objectContaining({ generationConfig: { temperature } }),
+    );
+  });
+
+  it.each(['not-a-number', Number.POSITIVE_INFINITY, -0.01, 1.01])(
+    'rejects invalid transcription temperature %s',
+    async (temperature) => {
+      const proxyService = {
+        handleGeminiGenerateContent: vi.fn(),
+      };
+      const controller = new ProxyController(proxyService as any);
+      const reply = createReplyMock();
+
+      await controller.audioTranscriptions(
+        {
+          model: 'gemini-3-flash',
+          file: 'data:audio/mpeg;base64,QUJDRA==',
+          temperature,
+        },
+        { headers: { 'content-type': 'application/json' } } as any,
+        reply as any,
+      );
+
+      expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+      expect(reply.status).toHaveBeenCalledWith(400);
+      expect(reply.send).toHaveBeenCalledWith({
+        error: {
+          message: 'temperature must be a finite number between 0 and 1.',
+          type: 'invalid_request_error',
+          param: 'temperature',
+          code: 'invalid_value',
+        },
+      });
+    },
+  );
+
+  it('returns plain text for audio transcription response_format=text', async () => {
+    const proxyService = {
+      handleGeminiGenerateContent: vi.fn().mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'transcribed text' }] } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.audioTranscriptions(
+      {
+        model: 'gemini-3-flash',
+        file: 'data:audio/mpeg;base64,QUJDRA==',
+        response_format: 'text',
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(reply.type).toHaveBeenCalledWith('text/plain; charset=utf-8');
+    expect(reply.status).toHaveBeenCalledWith(200);
+    expect(reply.send).toHaveBeenCalledWith('transcribed text');
+  });
+
+  it('rejects unsupported transcription options with an OpenAI error envelope', async () => {
     const proxyService = {
       handleGeminiGenerateContent: vi.fn(),
     };
@@ -920,6 +1039,7 @@ describe('ProxyController Integration', () => {
       {
         model: 'gemini-2.5-flash',
         file: 'data:audio/mpeg;base64,QUJDRA==',
+        response_format: 'verbose_json',
       },
       {
         headers: {
@@ -933,10 +1053,10 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       error: {
-        message: 'Invalid multipart/form-data boundary',
+        message: 'Only response_format=json and response_format=text are supported by this proxy.',
         type: 'invalid_request_error',
-        param: null,
-        code: null,
+        param: 'response_format',
+        code: 'unsupported_option',
       },
     });
   });
