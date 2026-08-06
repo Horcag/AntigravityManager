@@ -837,6 +837,30 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('rejects malformed image stream values before invoking upstream work', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+
+    for (const value of ['False', '', 0, null, {}]) {
+      const reply = createReplyMock();
+      await controller.imageGenerations(
+        { prompt: 'draw a cat', stream: value } as any,
+        reply as any,
+      );
+
+      expect(reply.status).toHaveBeenCalledWith(400);
+      expect(reply.send).toHaveBeenCalledWith({
+        error: {
+          message: 'stream must be a boolean.',
+          type: 'invalid_request_error',
+          param: 'stream',
+          code: 'invalid_value',
+        },
+      });
+    }
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('rejects an explicit image generation user before invoking upstream work', async () => {
     const proxyService = { handleChatCompletions: vi.fn() };
     const controller = new ProxyController(proxyService as any);
@@ -1040,7 +1064,7 @@ describe('ProxyController Integration', () => {
         message: 'At most 16 image inputs are supported by this endpoint.',
         type: 'invalid_request_error',
         param: 'image',
-        code: 'invalid_request_error',
+        code: 'invalid_value',
       },
     });
   });

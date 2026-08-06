@@ -683,12 +683,16 @@ export class ProxyController {
       );
       return false;
     }
-    if (input.stream === true || input.stream === 'true') {
-      this.sendUnsupportedImageOption(
-        res,
-        'Streaming image generation is not supported by this endpoint.',
-        'stream',
-      );
+    if (input.stream !== undefined && input.stream !== false && input.stream !== 'false') {
+      if (input.stream === true || input.stream === 'true') {
+        this.sendUnsupportedImageOption(
+          res,
+          'Streaming image generation is not supported by this endpoint.',
+          'stream',
+        );
+        return false;
+      }
+      this.sendInvalidRequest(res, 'stream must be a boolean.', 'stream', 'invalid_value');
       return false;
     }
     if (input.style !== undefined) {
@@ -1231,7 +1235,8 @@ export class ProxyController {
       return Array.isArray(value) ? value.at(-1) : value;
     };
     const file = (name: string): InlineInput | undefined => multipart.files[name]?.[0];
-    const files = (name: string): InlineInput[] => multipart.files[name] ?? [];
+    const files = (...names: string[]): InlineInput[] =>
+      names.flatMap((name) => multipart.files[name] ?? []);
     const temperatureValue = field('temperature') ?? body.temperature;
     const parsedTemperature =
       typeof temperatureValue === 'number'
@@ -1270,10 +1275,15 @@ export class ProxyController {
         temperatureValue !== undefined &&
         (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 1),
       timestampGranularities,
-      images: files('image').length > 0 ? files('image') : body.image ? [body.image] : [],
+      images:
+        files('image', 'image[]').length > 0
+          ? files('image', 'image[]')
+          : body.image
+            ? [body.image]
+            : [],
       referenceImages:
-        files('reference_images').length > 0
-          ? files('reference_images')
+        files('reference_images', 'reference_images[]').length > 0
+          ? files('reference_images', 'reference_images[]')
           : (body.reference_images ?? []),
       mask: file('mask') ?? body.mask,
       file: file('file') ?? body.file,
@@ -1339,7 +1349,7 @@ export class ProxyController {
       res,
       'At most 16 image inputs are supported by this endpoint.',
       'image',
-      'invalid_request_error',
+      'invalid_value',
     );
     return false;
   }

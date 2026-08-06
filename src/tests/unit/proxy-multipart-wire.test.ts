@@ -148,7 +148,7 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
-  it('preserves image binary bytes and MIME type through a real multipart request', async () => {
+  it('accepts a scalar image field through a real multipart request', async () => {
     proxyService.handleChatCompletions.mockResolvedValue({
       choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
     });
@@ -193,6 +193,50 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it('accepts reference_images[] without duplicating multipart image parts', async () => {
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const boundary = '----openai-image-references';
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="prompt"'], value: 'combine images' },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="image"; filename="source.png"',
+              'Content-Type: image/png',
+            ],
+            value: Buffer.from([1]),
+          },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="reference_images[]"; filename="reference.png"',
+              'Content-Type: image/png',
+            ],
+            value: Buffer.from([2]),
+          },
+        ]),
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    const request = proxyService.handleChatCompletions.mock.calls[0][0];
+    expect(request.messages[0].content).toEqual(
+      expect.arrayContaining([expect.objectContaining({ image_url: expect.any(Object) })]),
+    );
+    expect(
+      request.messages[0].content.filter((part: { type: string }) => part.type === 'image_url'),
+    ).toHaveLength(2);
+  });
+
   it('returns the OpenAI error envelope for a truncated multipart file with a query suffix', async () => {
     app = await createApp();
     await app.init();
@@ -226,7 +270,7 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
-  it('accepts sixteen image files without altering multipart parser limits', async () => {
+  it('accepts sixteen OpenAI SDK image[] files without altering multipart parser limits', async () => {
     proxyService.handleChatCompletions.mockResolvedValue({
       choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
     });
@@ -236,7 +280,7 @@ describe('OpenAI multipart media endpoints', () => {
     const boundary = '----image-limit';
     const images = Array.from({ length: 16 }, (_, index) => ({
       headers: [
-        `Content-Disposition: form-data; name="image"; filename="${index}.png"`,
+        `Content-Disposition: form-data; name="image[]"; filename="${index}.png"`,
         'Content-Type: image/png',
       ],
       value: Buffer.from([index]),
@@ -268,14 +312,14 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
-  it('rejects a seventeenth multipart image before invoking upstream work', async () => {
+  it('rejects a seventeenth OpenAI SDK image[] file before invoking upstream work', async () => {
     app = await createApp();
     await app.init();
 
     const boundary = '----image-limit-overflow';
     const images = Array.from({ length: 17 }, (_, index) => ({
       headers: [
-        `Content-Disposition: form-data; name="image"; filename="${index}.png"`,
+        `Content-Disposition: form-data; name="image[]"; filename="${index}.png"`,
         'Content-Type: image/png',
       ],
       value: Buffer.from([index]),
@@ -299,7 +343,7 @@ describe('OpenAI multipart media endpoints', () => {
         message: 'At most 16 image inputs are supported by this endpoint.',
         type: 'invalid_request_error',
         param: 'image',
-        code: 'invalid_request_error',
+        code: 'invalid_value',
       },
     });
     expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
@@ -331,7 +375,7 @@ describe('OpenAI multipart media endpoints', () => {
         message: 'At most 16 image inputs are supported by this endpoint.',
         type: 'invalid_request_error',
         param: 'image',
-        code: 'invalid_request_error',
+        code: 'invalid_value',
       },
     });
     expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
