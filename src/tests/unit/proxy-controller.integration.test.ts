@@ -169,6 +169,16 @@ describe('ProxyController Integration', () => {
             finish_reason: 'stop',
             message: {
               content: 'normalized response',
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: {
+                    name: 'search_docs',
+                    arguments: '{"query":"token"}',
+                  },
+                },
+              ],
             },
           },
         ],
@@ -205,6 +215,7 @@ describe('ProxyController Integration', () => {
             output: { content: 'result: ok' },
           },
         ],
+        tool_choice: { type: 'function', function: { name: 'search_docs' } },
       },
       reply as any,
     );
@@ -220,20 +231,40 @@ describe('ProxyController Integration', () => {
     expect(callArg.messages.some((message: { role: string }) => message.role === 'tool')).toBe(
       true,
     );
+    expect(callArg.tool_choice).toEqual({ type: 'function', function: { name: 'search_docs' } });
     expect(reply.status).toHaveBeenCalledWith(200);
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
-        object: 'text_completion',
+        id: 'resp_resp',
+        object: 'response',
         model: 'gpt-4o',
-        choices: [
+        status: 'completed',
+        output: [
           expect.objectContaining({
-            text: 'normalized response',
-            logprobs: null,
+            id: 'msg_resp',
+            type: 'message',
+            role: 'assistant',
+            content: [
+              {
+                type: 'output_text',
+                text: 'normalized response',
+                annotations: [],
+              },
+            ],
+          }),
+          expect.objectContaining({
+            id: 'fc_1',
+            type: 'function_call',
+            call_id: 'call_1',
+            name: 'search_docs',
+            arguments: '{"query":"token"}',
           }),
         ],
         usage: expect.objectContaining({
-          prompt_tokens: 10,
-          completion_tokens: 6,
+          input_tokens: 10,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 6,
+          output_tokens_details: { reasoning_tokens: 0 },
           total_tokens: 16,
         }),
       }),

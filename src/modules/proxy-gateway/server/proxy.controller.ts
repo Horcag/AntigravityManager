@@ -130,6 +130,7 @@ export class ProxyController {
       instructions?: string;
       input?: unknown;
       tools?: OpenAIChatRequest['tools'];
+      tool_choice?: OpenAIChatRequest['tool_choice'];
       max_output_tokens?: number;
       temperature?: number;
       top_p?: number;
@@ -147,7 +148,7 @@ export class ProxyController {
       }
 
       const response = result as OpenAIChatResponse;
-      res.status(HttpStatus.OK).send(this.toLegacyTextCompletionsResponse(response));
+      res.status(HttpStatus.OK).send(this.toResponsesResponse(response));
     } catch (error) {
       this.sendOpenAIErrorResponse(res, '/v1/responses', error);
     }
@@ -360,6 +361,73 @@ export class ProxyController {
     };
   }
 
+  private toResponsesResponse(response: OpenAIChatResponse): Record<string, unknown> {
+    const choice = response.choices?.[0];
+    const content = choice?.message?.content;
+    const text = isString(content) ? content : '';
+    const output: Array<Record<string, unknown>> = [];
+
+    if (text) {
+      output.push({
+        id: this.normalizeResponsesId('msg', response.id),
+        type: 'message',
+        status: 'completed',
+        role: 'assistant',
+        content: [
+          {
+            type: 'output_text',
+            text,
+            annotations: [],
+          },
+        ],
+      });
+    }
+
+    for (const toolCall of choice?.message?.tool_calls ?? []) {
+      output.push({
+        id: this.normalizeResponsesId('fc', toolCall.id),
+        type: 'function_call',
+        status: 'completed',
+        call_id: toolCall.id,
+        name: toolCall.function.name,
+        arguments: toolCall.function.arguments,
+      });
+    }
+
+    return {
+      id: this.normalizeResponsesId('resp', response.id),
+      object: 'response',
+      created_at: response.created,
+      status: 'completed',
+      error: null,
+      incomplete_details: null,
+      model: response.model,
+      output,
+      parallel_tool_calls: true,
+      usage: {
+        input_tokens: response.usage?.prompt_tokens ?? 0,
+        input_tokens_details: {
+          cached_tokens: 0,
+        },
+        output_tokens: response.usage?.completion_tokens ?? 0,
+        output_tokens_details: {
+          reasoning_tokens: 0,
+        },
+        total_tokens: response.usage?.total_tokens ?? 0,
+      },
+    };
+  }
+
+  private normalizeResponsesId(
+    prefix: 'resp' | 'msg' | 'fc',
+    sourceId: string | undefined,
+  ): string {
+    const normalizedSource = (sourceId ?? 'generated')
+      .replace(/^(?:chatcmpl|resp|msg|fc|call)[_-]?/i, '')
+      .replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `${prefix}_${normalizedSource || 'generated'}`;
+  }
+
   private normalizeResponsesInput(input: unknown): string {
     if (isString(input)) {
       return input;
@@ -393,6 +461,7 @@ export class ProxyController {
     instructions?: string;
     input?: unknown;
     tools?: OpenAIChatRequest['tools'];
+    tool_choice?: OpenAIChatRequest['tool_choice'];
     max_output_tokens?: number;
     temperature?: number;
     top_p?: number;
@@ -509,6 +578,7 @@ export class ProxyController {
       model: body.model ?? 'gemini-3-flash',
       messages,
       tools: body.tools,
+      tool_choice: body.tool_choice,
       max_tokens: body.max_output_tokens,
       temperature: body.temperature,
       top_p: body.top_p,
