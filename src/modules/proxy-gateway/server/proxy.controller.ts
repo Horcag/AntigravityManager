@@ -894,6 +894,9 @@ export class ProxyController {
             `${param}.function.arguments`,
           );
         }
+        if (declaredToolCallIds.has(toolCallRecord.id)) {
+          throw this.invalidRequest('tool_calls ids must be unique', `${param}.id`);
+        }
         declaredToolCallIds.add(toolCallRecord.id);
       }
     }
@@ -1158,8 +1161,12 @@ export class ProxyController {
     index: number,
   ): void {
     const { content } = message;
-    if (content === undefined) {
-      if (message.role === 'assistant' && message.tool_calls !== undefined) {
+    if (content === undefined || (content === null && message.role === 'assistant')) {
+      if (
+        message.role === 'assistant' &&
+        Array.isArray(message.tool_calls) &&
+        message.tool_calls.length > 0
+      ) {
         return;
       }
       throw this.invalidRequest('messages content is required', `messages[${index}].content`);

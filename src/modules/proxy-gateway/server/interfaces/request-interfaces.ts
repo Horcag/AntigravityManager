@@ -72,7 +72,7 @@ export type OpenAIToolChoice =
 
 export interface OpenAIMessage {
   role: string;
-  content: string | OpenAIContentPart[] | null;
+  content?: string | OpenAIContentPart[] | null;
   name?: string;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;

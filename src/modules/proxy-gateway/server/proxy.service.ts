@@ -2082,7 +2082,7 @@ export class ProxyService {
   private convertOpenAIPartsToAnthropicContent(
     content: OpenAIChatRequest['messages'][number]['content'],
   ): AnthropicContent[] {
-    if (content === null) {
+    if (content === null || content === undefined) {
       return [];
     }
 
@@ -2120,7 +2120,7 @@ export class ProxyService {
   private extractOpenAITextContent(
     content: OpenAIChatRequest['messages'][number]['content'],
   ): string {
-    if (content === null) {
+    if (content === null || content === undefined) {
       return '';
     }
 
