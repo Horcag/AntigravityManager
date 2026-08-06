@@ -74,6 +74,8 @@ interface OpenAIResponsesStreamingMapperOptions {
   signatureContext?: SignatureContext;
 }
 
+type ResponsesFinishReasonSource = 'gemini' | 'openai';
+
 /** Maps Gemini's streaming parts into the OpenAI Responses SSE event contract. */
 export class OpenAIResponsesStreamingMapper {
   private readonly createdAt = Math.floor(Date.now() / 1000);
@@ -155,12 +157,15 @@ export class OpenAIResponsesStreamingMapper {
     return groundingText ? this.processText(groundingText) : [];
   }
 
-  public complete(finishReason?: string | null): string[] {
+  public complete(
+    finishReason?: string | null,
+    source: ResponsesFinishReasonSource = 'gemini',
+  ): string[] {
     if (this.completed) {
       return [];
     }
     this.completed = true;
-    const incompleteReason = this.incompleteReason(finishReason);
+    const incompleteReason = this.incompleteReason(finishReason, source);
     const incomplete = incompleteReason !== null;
     const events = this.completeTextItem(incomplete);
     for (const functionCall of this.pendingFunctionCalls) {
@@ -378,9 +383,21 @@ export class OpenAIResponsesStreamingMapper {
 
   private incompleteReason(
     finishReason?: string | null,
+    source: ResponsesFinishReasonSource = 'gemini',
   ): 'content_filter' | 'max_output_tokens' | null {
     if (!finishReason) {
       return null;
+    }
+
+    if (source === 'openai') {
+      switch (finishReason.toLowerCase()) {
+        case 'length':
+          return 'max_output_tokens';
+        case 'content_filter':
+          return 'content_filter';
+        default:
+          return null;
+      }
     }
 
     const mapped = mapGeminiFinishReasonToOpenAI(finishReason);

@@ -204,7 +204,7 @@ describe('ProxyService Responses streaming', () => {
     });
   });
 
-  it('reports incomplete MAX_TOKENS Responses streams for live and synthetic paths', async () => {
+  it('reports incomplete MAX_TOKENS Responses streams from live Gemini', async () => {
     const service = new ProxyService({} as never, {} as never);
     const upstream = Readable.from([
       Buffer.from(
@@ -214,33 +214,48 @@ describe('ProxyService Responses streaming', () => {
     const liveEvents = (
       await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
     ).map((event) => parseEvent(String(event)));
-    const syntheticEvents = (
-      await lastValueFrom(
-        createSyntheticResponsesStream(service, {
-          choices: [{ finish_reason: 'length', message: { content: 'cut off' } }],
-          model: 'gemini-3-pro',
-        }).pipe(toArray()),
-      )
-    ).map((event) => parseEvent(String(event)));
-
-    for (const events of [liveEvents, syntheticEvents]) {
-      const textItemDone = events.find(
-        (event) =>
-          event.type === 'response.output_item.done' &&
-          (event.item as Record<string, unknown>).type === 'message',
-      );
-      expect(events.at(-1)).toMatchObject({
-        response: {
-          completed_at: null,
-          incomplete_details: { reason: 'max_output_tokens' },
-          output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
-          status: 'incomplete',
-        },
-        type: 'response.incomplete',
-      });
-      expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
-    }
+    const textItemDone = liveEvents.find(
+      (event) =>
+        event.type === 'response.output_item.done' &&
+        (event.item as Record<string, unknown>).type === 'message',
+    );
+    expect(liveEvents.at(-1)).toMatchObject({
+      response: {
+        completed_at: null,
+        incomplete_details: { reason: 'max_output_tokens' },
+        output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
+        status: 'incomplete',
+      },
+      type: 'response.incomplete',
+    });
+    expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
   });
+
+  it.each([
+    ['length', 'response.incomplete', 'incomplete', { reason: 'max_output_tokens' }],
+    ['content_filter', 'response.incomplete', 'incomplete', { reason: 'content_filter' }],
+    ['stop', 'response.completed', 'completed', null],
+    ['tool_calls', 'response.completed', 'completed', null],
+    ['function_call', 'response.completed', 'completed', null],
+  ])(
+    'preserves synthetic OpenAI finish reason %s',
+    async (finishReason, terminalType, status, incompleteDetails) => {
+      const service = new ProxyService({} as never, {} as never);
+      const events = (
+        await lastValueFrom(
+          createSyntheticResponsesStream(service, {
+            choices: [{ finish_reason: finishReason, message: { content: 'done' } }],
+            model: 'gemini-3-pro',
+          }).pipe(toArray()),
+        )
+      ).map((event) => parseEvent(String(event)));
+
+      expect(events.at(-1)).toMatchObject({
+        response: { incomplete_details: incompleteDetails, status },
+        type: terminalType,
+      });
+    },
+  );
 
   it('preserves Responses usage parity for live and synthetic Gemini thinking output', async () => {
     const service = new ProxyService({} as never, {} as never);

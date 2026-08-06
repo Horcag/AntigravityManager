@@ -2048,7 +2048,7 @@ export class ProxyService {
         }
       }
 
-      for (const event of mapper.complete(choice?.finish_reason)) {
+      for (const event of mapper.complete(choice?.finish_reason, 'openai')) {
         subscriber.next(event);
       }
       subscriber.complete();

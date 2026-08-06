@@ -163,13 +163,32 @@ describe('OpenAIResponsesStreamingMapper', () => {
   });
 
   it.each([
+    ['length', 'response.incomplete', 'incomplete', { reason: 'max_output_tokens' }],
+    ['content_filter', 'response.incomplete', 'incomplete', { reason: 'content_filter' }],
+    ['stop', 'response.completed', 'completed', null],
+    ['tool_calls', 'response.completed', 'completed', null],
+    ['function_call', 'response.completed', 'completed', null],
+  ])(
+    'normalizes synthetic OpenAI finish reason %s without Gemini mapping',
+    (finishReason, terminalType, status, incompleteDetails) => {
+      const mapper = createMapper();
+      const terminal = mapper.complete(finishReason, 'openai').map(parseEvent).at(-1);
+
+      expect(terminal).toMatchObject({
+        response: { incomplete_details: incompleteDetails, status },
+        type: terminalType,
+      });
+    },
+  );
+
+  it.each([
     'SAFETY',
     'recitation',
     'BLOCKLIST',
     'MALFORMED_FUNCTION_CALL',
     'IMAGE_SAFETY',
     'UNKNOWN',
-  ])('maps %s to content-filter incompleteness', (finishReason) => {
+  ])('maps unknown live Gemini reason %s to content-filter incompleteness', (finishReason) => {
     const mapper = createMapper();
     const terminal = mapper.complete(finishReason).map(parseEvent).at(-1);
 
