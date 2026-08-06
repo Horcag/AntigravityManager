@@ -303,6 +303,42 @@ describe('ProxyController Integration', () => {
       expect(duplicateCall.statusCode).toBe(400);
       expect(duplicateCall.json().error).toMatchObject({ param: 'input[1].call_id' });
 
+      const standaloneCustomToolOutput = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [{ type: 'custom_tool_call_output', call_id: 'call_1', output: 'result' }],
+        },
+      });
+      expect(standaloneCustomToolOutput.statusCode).toBe(400);
+      expect(standaloneCustomToolOutput.json()).toEqual({
+        error: {
+          message:
+            'input[0].type is not supported by this gateway: custom_tool_call_output requires unsupported custom tools',
+          type: 'invalid_request_error',
+          param: 'input[0].type',
+          code: 'unsupported_parameter',
+        },
+      });
+
+      const duplicateOutput = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'first result' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'duplicate result' },
+          ],
+        },
+      });
+      expect(duplicateOutput.statusCode).toBe(400);
+      expect(duplicateOutput.json().error).toMatchObject({ param: 'input[2].call_id' });
+
       const validCallThenOutput = await server.inject({
         method: 'POST',
         url: '/v1/responses',
@@ -316,6 +352,24 @@ describe('ProxyController Integration', () => {
         },
       });
       expect(validCallThenOutput.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
+
+      proxyService.handleChatCompletions.mockClear();
+      const validTwoCallsThenOutputs = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+            { type: 'function_call', call_id: 'call_2', name: 'lookup', arguments: '{}' },
+            { type: 'function_call_output', call_id: 'call_2', output: 'second result' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'first result' },
+          ],
+        },
+      });
+      expect(validTwoCallsThenOutputs.statusCode).toBe(200);
       expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
     } finally {
       await app.close();
@@ -415,6 +469,63 @@ describe('ProxyController Integration', () => {
         param: 'messages[0].tool_calls[1].id',
       });
       expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects a duplicate chat tool result while accepting distinct results in any declared order', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn().mockResolvedValue({ ok: true }) };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const toolCalls = [
+      {
+        id: 'call_1',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{}' },
+      },
+      {
+        id: 'call_2',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{}' },
+      },
+    ];
+
+    try {
+      const duplicateResult = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          messages: [
+            { role: 'assistant', content: null, tool_calls: toolCalls },
+            { role: 'tool', tool_call_id: 'call_1', content: 'first result' },
+            { role: 'tool', tool_call_id: 'call_1', content: 'duplicate result' },
+          ],
+        },
+      });
+      expect(duplicateResult.statusCode).toBe(400);
+      expect(duplicateResult.json().error).toMatchObject({ param: 'messages[2].tool_call_id' });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+
+      const distinctResults = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          messages: [
+            { role: 'assistant', content: null, tool_calls: toolCalls },
+            { role: 'tool', tool_call_id: 'call_2', content: 'second result' },
+            { role: 'tool', tool_call_id: 'call_1', content: 'first result' },
+          ],
+        },
+      });
+      expect(distinctResults.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
     } finally {
       await app.close();
     }

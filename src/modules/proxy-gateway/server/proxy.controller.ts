@@ -92,6 +92,11 @@ interface MediaInput {
   audio?: InlineInput;
 }
 
+interface ToolCallValidationState {
+  declaredIds: Set<string>;
+  consumedIds: Set<string>;
+}
+
 interface OpenAIResponsesRequest {
   model?: string;
   instructions?: string;
@@ -602,7 +607,10 @@ export class ProxyController {
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       throw this.invalidRequest('messages must be a non-empty array', 'messages');
     }
-    const declaredToolCallIds = new Set<string>();
+    const toolCallState: ToolCallValidationState = {
+      declaredIds: new Set<string>(),
+      consumedIds: new Set<string>(),
+    };
     for (const [index, message] of body.messages.entries()) {
       if (
         !message ||
@@ -613,7 +621,7 @@ export class ProxyController {
       if (message.role !== 'assistant') {
         this.validateChatMessageContent(message, index);
       }
-      this.validateChatToolMessage(message, index, declaredToolCallIds);
+      this.validateChatToolMessage(message, index, toolCallState);
       if (message.role === 'assistant') {
         this.validateChatMessageContent(message, index);
       }
@@ -851,8 +859,8 @@ export class ProxyController {
       return;
     }
     if (Array.isArray(input) && input.length > 0) {
-      for (const item of input) {
-        this.validateResponsesInputItem(item);
+      for (const [index, item] of input.entries()) {
+        this.validateResponsesInputItem(item, index);
       }
       this.validateResponsesToolOutputReferences(input);
       return;
@@ -863,7 +871,7 @@ export class ProxyController {
   private validateChatToolMessage(
     message: OpenAIChatRequest['messages'][number],
     index: number,
-    declaredToolCallIds: Set<string>,
+    toolCallState: ToolCallValidationState,
   ): void {
     if (message.tool_calls !== undefined) {
       if (message.role !== 'assistant') {
@@ -900,26 +908,27 @@ export class ProxyController {
             `${param}.function.arguments`,
           );
         }
-        if (declaredToolCallIds.has(toolCallRecord.id)) {
-          throw this.invalidRequest('tool_calls ids must be unique', `${param}.id`);
-        }
-        declaredToolCallIds.add(toolCallRecord.id);
+        this.declareToolCall(toolCallState, toolCallRecord.id, `${param}.id`, 'tool_calls ids');
       }
     }
 
     if (message.role === 'tool') {
       this.requireNonEmptyString(message.tool_call_id, `messages[${index}].tool_call_id`);
-      if (!declaredToolCallIds.has(message.tool_call_id)) {
-        throw this.invalidRequest(
-          'tool_call_id must reference an earlier assistant tool_calls id',
-          `messages[${index}].tool_call_id`,
-        );
-      }
+      this.consumeToolCall(
+        toolCallState,
+        message.tool_call_id,
+        `messages[${index}].tool_call_id`,
+        'tool_call_id must reference an earlier assistant tool_calls id',
+        'tool_call_id may only be used once',
+      );
     }
   }
 
   private validateResponsesToolOutputReferences(input: unknown[]): void {
-    const declaredToolCallIds = new Set<string>();
+    const toolCallState: ToolCallValidationState = {
+      declaredIds: new Set<string>(),
+      consumedIds: new Set<string>(),
+    };
     for (const [index, item] of input.entries()) {
       const inputItem = this.toRecord(item);
       const type = inputItem ? this.responsesInputItemType(inputItem) : null;
@@ -928,26 +937,52 @@ export class ProxyController {
         (type === 'function_call' || type === 'local_shell_call' || type === 'web_search_call')
       ) {
         const callId = this.responsesCallId(inputItem);
-        if (declaredToolCallIds.has(callId)) {
-          const callIdParam = Object.hasOwn(inputItem, 'call_id') ? 'call_id' : 'id';
-          throw this.invalidRequest(
-            'tool call ids must be unique',
-            `input[${index}].${callIdParam}`,
-          );
-        }
-        declaredToolCallIds.add(callId);
+        const callIdParam = Object.hasOwn(inputItem, 'call_id') ? 'call_id' : 'id';
+        this.declareToolCall(
+          toolCallState,
+          callId,
+          `input[${index}].${callIdParam}`,
+          'tool call ids',
+        );
       }
-      if (
-        inputItem &&
-        type === 'function_call_output' &&
-        !declaredToolCallIds.has(this.responsesCallId(inputItem))
-      ) {
-        throw this.invalidRequest(
-          'function_call_output must reference an earlier function_call in input',
+      if (inputItem && type === 'function_call_output') {
+        this.consumeToolCall(
+          toolCallState,
+          this.responsesCallId(inputItem),
           `input[${index}].call_id`,
+          'function_call_output must reference an earlier function_call in input',
+          'function_call_output call_id may only be used once',
         );
       }
     }
+  }
+
+  private declareToolCall(
+    toolCallState: ToolCallValidationState,
+    callId: string,
+    param: string,
+    duplicateMessage: string,
+  ): void {
+    if (toolCallState.declaredIds.has(callId)) {
+      throw this.invalidRequest(`${duplicateMessage} must be unique`, param);
+    }
+    toolCallState.declaredIds.add(callId);
+  }
+
+  private consumeToolCall(
+    toolCallState: ToolCallValidationState,
+    callId: string,
+    param: string,
+    missingMessage: string,
+    duplicateMessage: string,
+  ): void {
+    if (!toolCallState.declaredIds.has(callId)) {
+      throw this.invalidRequest(missingMessage, param);
+    }
+    if (toolCallState.consumedIds.has(callId)) {
+      throw this.invalidRequest(duplicateMessage, param);
+    }
+    toolCallState.consumedIds.add(callId);
   }
 
   private validateResponsesOptions(body: OpenAIResponsesRequest): void {
@@ -997,7 +1032,7 @@ export class ProxyController {
     }
   }
 
-  private validateResponsesInputItem(item: unknown): void {
+  private validateResponsesInputItem(item: unknown, index: number): void {
     const inputItem = this.toRecord(item);
     if (!inputItem) {
       throw this.invalidRequest('input items must be objects', 'input');
@@ -1018,7 +1053,13 @@ export class ProxyController {
       this.requireResponsesFunctionCallArguments(inputItem.arguments);
       return;
     }
-    if (type === 'function_call_output' || type === 'custom_tool_call_output') {
+    if (type === 'custom_tool_call_output') {
+      throw this.unsupportedParameter(
+        `input[${index}].type`,
+        'custom_tool_call_output requires unsupported custom tools',
+      );
+    }
+    if (type === 'function_call_output') {
       this.requireResponsesCallId(inputItem);
       this.validateResponsesOutput(inputItem.output);
       return;
