@@ -581,7 +581,7 @@ export class ProxyController {
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       throw this.invalidRequest('messages must be a non-empty array', 'messages');
     }
-    for (const message of body.messages) {
+    for (const [index, message] of body.messages.entries()) {
       if (
         !message ||
         !['system', 'developer', 'user', 'assistant', 'tool'].includes(message.role)
@@ -589,6 +589,7 @@ export class ProxyController {
         throw this.invalidRequest('messages contains an unsupported role', 'messages');
       }
       this.validateChatMessageContent(message.content);
+      this.validateChatToolMessage(message, index);
     }
     this.validateTools(body.tools, body.tool_choice);
     this.validateUnsupportedSamplingOptions(body);
@@ -826,9 +827,80 @@ export class ProxyController {
       for (const item of input) {
         this.validateResponsesInputItem(item);
       }
+      this.validateResponsesToolOutputReferences(input);
       return;
     }
     throw this.invalidRequest('input must be non-empty', 'input');
+  }
+
+  private validateChatToolMessage(
+    message: OpenAIChatRequest['messages'][number],
+    index: number,
+  ): void {
+    if (message.role === 'tool') {
+      this.requireNonEmptyString(message.tool_call_id, `messages[${index}].tool_call_id`);
+    }
+
+    if (message.tool_calls === undefined) {
+      return;
+    }
+    if (!Array.isArray(message.tool_calls)) {
+      throw this.invalidRequest('tool_calls must be an array', `messages[${index}].tool_calls`);
+    }
+
+    for (const [toolCallIndex, toolCall] of message.tool_calls.entries()) {
+      const param = `messages[${index}].tool_calls[${toolCallIndex}]`;
+      const toolCallRecord = this.toRecord(toolCall);
+      if (!toolCallRecord) {
+        throw this.invalidRequest('tool_calls entries must be objects', param);
+      }
+      if (toolCallRecord.type !== 'function') {
+        throw this.invalidRequest('tool_calls entries must have type function', `${param}.type`);
+      }
+      this.requireNonEmptyString(toolCallRecord.id, `${param}.id`);
+      const functionRecord = this.toRecord(toolCallRecord.function);
+      if (!functionRecord) {
+        throw this.invalidRequest(
+          'tool_calls entries must include a function object',
+          `${param}.function`,
+        );
+      }
+      this.requireNonEmptyString(functionRecord.name, `${param}.function.name`);
+      if (!isString(functionRecord.arguments)) {
+        throw this.invalidRequest(
+          'tool_calls function arguments must be a string',
+          `${param}.function.arguments`,
+        );
+      }
+    }
+  }
+
+  private validateResponsesToolOutputReferences(input: unknown[]): void {
+    const normalizedToolCallIds = new Set<string>();
+    for (const item of input) {
+      const inputItem = this.toRecord(item);
+      const type = inputItem ? this.responsesInputItemType(inputItem) : null;
+      if (
+        inputItem &&
+        (type === 'function_call' || type === 'local_shell_call' || type === 'web_search_call')
+      ) {
+        normalizedToolCallIds.add(this.responsesCallId(inputItem));
+      }
+    }
+
+    for (const [index, item] of input.entries()) {
+      const inputItem = this.toRecord(item);
+      if (
+        inputItem &&
+        this.responsesInputItemType(inputItem) === 'function_call_output' &&
+        !normalizedToolCallIds.has(this.responsesCallId(inputItem))
+      ) {
+        throw this.invalidRequest(
+          'function_call_output must reference a function_call in input',
+          `input[${index}].call_id`,
+        );
+      }
+    }
   }
 
   private validateResponsesOptions(body: OpenAIResponsesRequest): void {
@@ -994,9 +1066,14 @@ export class ProxyController {
   }
 
   private requireResponsesCallId(item: Record<string, unknown>): void {
+    this.responsesCallId(item);
+  }
+
+  private responsesCallId(item: Record<string, unknown>): string {
     // Some existing clients use the legacy item id as the Responses call id.
     const callId = this.asString(item.call_id) ?? this.asString(item.id);
     this.requireNonEmptyString(callId, 'input.call_id');
+    return callId;
   }
 
   private validateResponsesOutput(output: unknown): void {

@@ -1301,6 +1301,69 @@ describe('ProxyController Integration', () => {
     expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [
+      'a malformed tool call entry',
+      {
+        model: 'gpt-4o',
+        messages: [{ role: 'assistant', content: null, tool_calls: [{}] }],
+      },
+      'messages[0].tool_calls[0].type',
+    ],
+    [
+      'a tool result without a tool call id',
+      {
+        model: 'gpt-4o',
+        messages: [{ role: 'tool', content: 'result' }],
+      },
+      'messages[0].tool_call_id',
+    ],
+    [
+      'a tool result with an empty tool call id',
+      {
+        model: 'gpt-4o',
+        messages: [{ role: 'tool', tool_call_id: '   ', content: 'result' }],
+      },
+      'messages[0].tool_call_id',
+    ],
+  ])(
+    'rejects chat completions containing %s before an upstream call',
+    async (_caseName, body, param) => {
+      const proxyService = { handleChatCompletions: vi.fn() };
+      const controller = new ProxyController(proxyService as any);
+      const reply = createReplyMock();
+
+      await expect(controller.chatCompletions(body as any, reply as any)).rejects.toMatchObject({
+        status: 400,
+        protocolError: { param },
+      });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects orphan Responses function-call output before an upstream call', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await expect(
+      controller.responses(
+        {
+          model: 'gpt-4o',
+          input: [
+            { type: 'message', role: 'user', content: 'Use a tool.' },
+            { type: 'function_call_output', call_id: 'call_missing', output: 'result' },
+          ],
+        },
+        reply as any,
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      protocolError: { param: 'input[1].call_id' },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('supports OpenAI responses compatibility endpoint in stream mode with SSE headers', async () => {
     const stream = of('data: {"id":"chatcmpl_resp_stream"}\n\n');
     const proxyService = {

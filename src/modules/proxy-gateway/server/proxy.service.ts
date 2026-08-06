@@ -1930,7 +1930,7 @@ export class ProxyService {
           const toolResultText = this.extractOpenAITextContent(toolMessage.content) || '';
           toolResults.push({
             type: 'tool_result',
-            tool_use_id: toolMessage.tool_call_id || toolMessage.name || `tool-result-${uuidv4()}`,
+            tool_use_id: toolMessage.tool_call_id ?? '',
             content: toolResultText,
             is_error: false,
           });
