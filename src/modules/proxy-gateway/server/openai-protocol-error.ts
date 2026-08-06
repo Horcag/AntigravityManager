@@ -49,7 +49,10 @@ export function sendOpenAIProtocolError(res: FastifyReply, error: unknown): void
   res.status(mapped.status).send({ error: mapped.error });
 }
 
-export function mapOpenAIProtocolError(error: unknown): {
+export function mapOpenAIProtocolError(
+  error: unknown,
+  options: { preserveUnexpected5xxMessage?: boolean } = {},
+): {
   status: HttpStatus;
   retryAfter?: string;
   error: { message: string; type: OpenAIErrorType; param: string | null; code: string | null };
@@ -61,16 +64,16 @@ export function mapOpenAIProtocolError(error: unknown): {
     : exception
       ? exception.getStatus()
       : HttpStatus.INTERNAL_SERVER_ERROR;
-  const options = error instanceof OpenAIProtocolException ? error.protocolError : {};
+  const protocolError = error instanceof OpenAIProtocolException ? error.protocolError : {};
 
   return {
     status,
     retryAfter: upstream?.headers?.retryAfter,
     error: {
-      message: sanitizeMessage(error),
+      message: sanitizeMessage(error, status, options),
       type: mapOpenAIErrorType(status),
-      param: options.param ?? null,
-      code: options.code ?? null,
+      param: protocolError.param ?? null,
+      code: protocolError.code ?? null,
     },
   };
 }
@@ -84,7 +87,7 @@ export class ProxyProtocolExceptionFilter implements ExceptionFilter {
     const reply = context.getResponse<FastifyReply>();
 
     if (request.method === 'POST' && request.url.split('?')[0] === '/v1/messages') {
-      const mapped = mapOpenAIProtocolError(exception);
+      const mapped = mapOpenAIProtocolError(exception, { preserveUnexpected5xxMessage: true });
       reply.status(mapped.status).send({
         type: 'error',
         error: {
@@ -123,7 +126,20 @@ function mapOpenAIErrorType(status: HttpStatus): OpenAIErrorType {
   return 'server_error';
 }
 
-function sanitizeMessage(error: unknown): string {
+function sanitizeMessage(
+  error: unknown,
+  status: HttpStatus,
+  options: { preserveUnexpected5xxMessage?: boolean },
+): string {
+  if (
+    status >= HttpStatus.INTERNAL_SERVER_ERROR &&
+    !options.preserveUnexpected5xxMessage &&
+    !(error instanceof OpenAIProtocolException) &&
+    !(error instanceof UpstreamRequestError)
+  ) {
+    return 'Internal Server Error';
+  }
+
   const message = error instanceof Error ? error.message : 'Internal Server Error';
   return isString(message)
     ? message

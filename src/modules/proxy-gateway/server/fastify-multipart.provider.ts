@@ -1,4 +1,12 @@
-import { ArgumentsHost, Catch, Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import {
+  ArgumentsHost,
+  Catch,
+  HttpException,
+  HttpStatus,
+  Inject,
+  Injectable,
+  OnModuleInit,
+} from '@nestjs/common';
 import { BaseExceptionFilter, HttpAdapterHost } from '@nestjs/core';
 import multipart from '@fastify/multipart';
 import { FastifyInstance } from 'fastify';
@@ -61,12 +69,32 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
       .switchToHttp()
       .getRequest<{ url?: string; headers?: { 'content-type'?: string } }>();
     const contentType = request.headers?.['content-type']?.toLowerCase() ?? '';
+    const pathname = this.getPathname(request.url);
+    const response = host.switchToHttp().getResponse();
+
+    if (pathname.startsWith('/v1/') && isOpenAIJsonWireError(error, contentType)) {
+      response.status(this.getHttpStatus(error)).send({
+        error: {
+          message:
+            this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+              ? 'Request body too large.'
+              : 'Malformed JSON request body.',
+          type: 'invalid_request_error',
+          param: null,
+          code:
+            this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+              ? 'request_body_too_large'
+              : 'invalid_json',
+        },
+      });
+      return;
+    }
+
     if (
       isMultipartMediaEndpoint(request.url) &&
       contentType.includes('multipart/form-data') &&
       isMultipartParserOrLimitError(error)
     ) {
-      const response = host.switchToHttp().getResponse();
       response.status(400).send({
         error: {
           message: error instanceof Error ? error.message : 'Malformed multipart request.',
@@ -80,6 +108,47 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
     super.catch(error, host);
   }
+  private getHttpStatus(error: unknown): HttpStatus {
+    return error instanceof HttpException ? error.getStatus() : HttpStatus.BAD_REQUEST;
+  }
+
+  private getPathname(url: string | undefined): string {
+    return url?.split('?', 1)[0] ?? '';
+  }
+}
+
+function isOpenAIJsonWireError(error: unknown, contentType: string): boolean {
+  if (!contentType.includes('application/json')) {
+    return false;
+  }
+
+  if (error instanceof HttpException && error.getStatus() === HttpStatus.PAYLOAD_TOO_LARGE) {
+    return true;
+  }
+
+  const code = (error as { code?: unknown })?.code;
+  if (code === 'FST_ERR_CTP_INVALID_JSON_BODY') {
+    return true;
+  }
+
+  return (
+    error instanceof HttpException &&
+    error.getStatus() === HttpStatus.BAD_REQUEST &&
+    getExceptionMessage(error).startsWith('Body is not valid JSON')
+  );
+}
+
+function getExceptionMessage(error: HttpException): string {
+  const response = error.getResponse();
+  if (typeof response === 'string') {
+    return response;
+  }
+
+  if (!('message' in response)) {
+    return '';
+  }
+
+  return typeof response.message === 'string' ? response.message : '';
 }
 
 @Injectable()

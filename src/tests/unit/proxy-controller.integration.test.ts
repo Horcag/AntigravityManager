@@ -1,4 +1,4 @@
-import { Module, UnauthorizedException } from '@nestjs/common';
+import { HttpStatus, Module, UnauthorizedException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +15,7 @@ import { transformClaudeRequestIn } from '../../modules/proxy-gateway/antigravit
 import {
   AccountPoolUnavailableException,
   mapOpenAIProtocolError,
+  OpenAIProtocolException,
   ProxyProtocolExceptionFilter,
 } from '../../modules/proxy-gateway/server/openai-protocol-error';
 
@@ -379,6 +380,21 @@ describe('ProxyController Integration', () => {
         ),
       ).status,
     ).toBe(429);
+  });
+
+  it('does not expose unexpected 5xx implementation details while preserving protocol exceptions', () => {
+    expect(mapOpenAIProtocolError(new Error('e is not iterable'))).toMatchObject({
+      status: 500,
+      error: { message: 'Internal Server Error', type: 'server_error' },
+    });
+    expect(
+      mapOpenAIProtocolError(
+        new OpenAIProtocolException('Safe protocol message', HttpStatus.SERVICE_UNAVAILABLE),
+      ),
+    ).toMatchObject({
+      status: 503,
+      error: { message: 'Safe protocol message', type: 'server_error' },
+    });
   });
 
   it('preserves structured status and retry headers when an error message is overridden', () => {
@@ -1443,7 +1459,7 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('writes a valid sequenced Responses error event for a transport-level stream failure', () => {
+  it('writes a safe sequenced Responses error event for a transport-level stream failure', () => {
     const controller = new ProxyController({} as any);
     const raw = {
       end: vi.fn(),
@@ -1461,7 +1477,7 @@ describe('ProxyController Integration', () => {
     (controller as any).writeSseResponse(reply, stream, true);
 
     expect(raw.write).toHaveBeenLastCalledWith(
-      'event: error\ndata: {"code":"server_error","message":"transport broke","param":null,"sequence_number":5,"type":"error"}\n\n',
+      'event: error\ndata: {"code":"server_error","message":"Internal Server Error","param":null,"sequence_number":5,"type":"error"}\n\n',
     );
     expect(raw.end).toHaveBeenCalledOnce();
   });

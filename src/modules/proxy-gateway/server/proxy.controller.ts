@@ -2555,7 +2555,7 @@ export class ProxyController {
     overrideMessage?: string,
   ): void {
     const responseError = this.withOverriddenErrorMessage(error, overrideMessage);
-    const mapped = mapOpenAIProtocolError(responseError);
+    const mapped = mapOpenAIProtocolError(responseError, { preserveUnexpected5xxMessage: true });
     this.logProxyEndpointError(endpoint, mapped.status, mapped.error.message, error);
     res.status(mapped.status).send({
       type: 'error',

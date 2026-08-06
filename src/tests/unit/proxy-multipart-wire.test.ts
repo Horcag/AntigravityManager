@@ -77,10 +77,10 @@ function multipartBody(
 describe('OpenAI multipart media endpoints', () => {
   let app: NestFastifyApplication;
 
-  async function createApp(): Promise<NestFastifyApplication> {
+  async function createApp(bodyLimit?: number): Promise<NestFastifyApplication> {
     return NestFactory.create<NestFastifyApplication>(
       MultipartWireTestModule,
-      new FastifyAdapter(),
+      new FastifyAdapter(bodyLimit ? { bodyLimit } : undefined),
       { logger: false },
     );
   }
@@ -143,6 +143,56 @@ describe('OpenAI multipart media endpoints', () => {
       message: 'Cannot GET /unmatched-non-v1-route',
       error: 'Not Found',
       statusCode: 404,
+    });
+  });
+
+  it('returns the OpenAI envelope for malformed JSON on a real /v1 request', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { 'content-type': 'application/json' },
+        payload: '{"model":"gemini-3-flash",',
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Malformed JSON request body.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'invalid_json',
+      },
+    });
+  });
+
+  it('returns the OpenAI envelope when Fastify rejects an oversized /v1 body', async () => {
+    app = await createApp(64);
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ model: 'gemini-3-flash', messages: 'x'.repeat(128) }),
+      });
+
+    expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Request body too large.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'request_body_too_large',
+      },
     });
   });
 
