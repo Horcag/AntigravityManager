@@ -168,6 +168,7 @@ export class ProxyController {
     this.requireNonEmptyString(body.model, 'model');
     this.validateCompletionPrompt(body.prompt);
     this.validateUnsupportedSamplingOptions(body);
+    this.validateUnsupportedIdentityOptions(body);
     this.validateLegacyOnlyOptions(body);
     const stop = this.normalizeStopSequences(body.stop);
     const request: OpenAIChatRequest = {
@@ -541,6 +542,7 @@ export class ProxyController {
     }
     this.validateTools(body.tools, body.tool_choice);
     this.validateUnsupportedSamplingOptions(body);
+    this.validateUnsupportedIdentityOptions(body);
     this.validateChatOnlyOptions(body);
     this.validateResponseFormat(body.response_format);
     this.normalizeStopSequences(body.stop);
@@ -681,7 +683,7 @@ export class ProxyController {
       throw this.invalidRequest('response_format must be an object', 'response_format');
     }
     const type = format.type;
-    if (isNil(type) || type === 'text' || type === 'json_object') {
+    if (type === 'text' || type === 'json_object') {
       return;
     }
     if (type === 'json_schema') {
@@ -690,10 +692,26 @@ export class ProxyController {
         "response_format type 'json_schema' is not supported; use 'json_object'",
       );
     }
-    throw this.invalidRequest(
-      `response_format type '${isString(type) ? type : String(type)}' is not supported`,
-      'response_format',
-    );
+    // An object with no usable type is a malformed request. Treating it as text would
+    // silently accept a shape the caller never asked for.
+    if (!isString(type) || isEmpty(type.trim())) {
+      throw this.invalidRequest(
+        "response_format.type is required and must be one of 'text' or 'json_object'",
+        'response_format',
+      );
+    }
+    throw this.invalidRequest(`response_format type '${type}' is not supported`, 'response_format');
+  }
+
+  /**
+   * `user` is accepted by the OpenAI schema but this gateway has no end-user channel to
+   * forward it on. Rejecting up front beats silently dropping a field callers rely on for
+   * abuse attribution, and it happens before any account is leased.
+   */
+  private validateUnsupportedIdentityOptions(body: { user?: unknown }): void {
+    if (!isNil(body.user)) {
+      throw this.unsupportedParameter('user', 'end-user identifiers are not forwarded upstream');
+    }
   }
 
   /** Validates and normalizes `stop` into the Gemini stopSequences shape. */
@@ -912,7 +930,7 @@ export class ProxyController {
     const content = choice?.message?.content;
     const text = isString(content) ? content : '';
 
-    return {
+    const payload: Record<string, unknown> = {
       id: response.id,
       object: 'text_completion',
       created: response.created,
@@ -925,8 +943,13 @@ export class ProxyController {
           finish_reason: choice?.finish_reason ?? null,
         },
       ],
-      usage: response.usage,
     };
+    // Omit rather than zero-fill: the legacy surface has no way to say "unknown" other
+    // than leaving the key out.
+    if (response.usage) {
+      payload.usage = response.usage;
+    }
+    return payload;
   }
 
   private toResponsesResponse(response: OpenAIChatResponse): Record<string, unknown> {
@@ -972,17 +995,21 @@ export class ProxyController {
       model: response.model,
       output,
       parallel_tool_calls: true,
-      usage: {
-        input_tokens: response.usage?.prompt_tokens ?? 0,
-        input_tokens_details: {
-          cached_tokens: 0,
-        },
-        output_tokens: response.usage?.completion_tokens ?? 0,
-        output_tokens_details: {
-          reasoning_tokens: 0,
-        },
-        total_tokens: response.usage?.total_tokens ?? 0,
-      },
+      // The Responses contract types usage as nullable, so an unknown usage is reported
+      // as null instead of a fabricated zero breakdown.
+      usage: response.usage
+        ? {
+            input_tokens: response.usage.prompt_tokens,
+            input_tokens_details: {
+              cached_tokens: 0,
+            },
+            output_tokens: response.usage.completion_tokens,
+            output_tokens_details: {
+              reasoning_tokens: 0,
+            },
+            total_tokens: response.usage.total_tokens,
+          }
+        : null,
     };
   }
 

@@ -841,6 +841,7 @@ export class ProxyService {
             const openaiResponse = this.convertClaudeToOpenAIResponse(
               claudeResponse,
               request.model,
+              response.usageMetadata,
             );
             return outputProtocol === 'responses'
               ? this.createSyntheticResponsesStream(openaiResponse)
@@ -861,7 +862,11 @@ export class ProxyService {
           this.logger.log(
             `Transformed Claude response snippet: ${JSON.stringify(claudeResponse).substring(0, 500)}`,
           );
-          return this.convertClaudeToOpenAIResponse(claudeResponse, request.model);
+          return this.convertClaudeToOpenAIResponse(
+            claudeResponse,
+            request.model,
+            response.usageMetadata,
+          );
         }
       } catch (err) {
         if (err instanceof Error && this.isProjectContextError(err.message)) {
@@ -901,7 +906,11 @@ export class ProxyService {
               extraHeaders,
             );
             const claudeResponse = transformResponse(response, signatureContext);
-            return this.convertClaudeToOpenAIResponse(claudeResponse, request.model);
+            return this.convertClaudeToOpenAIResponse(
+              claudeResponse,
+              request.model,
+              response.usageMetadata,
+            );
           } catch (fallbackErr) {
             lastError = fallbackErr;
           }
@@ -1062,13 +1071,26 @@ export class ProxyService {
     };
   }
 
-  private mapGeminiUsageMetadata(usage: unknown): OpenAIStreamUsage {
-    const record = this.toUnknownRecord(usage) ?? {};
-    const promptTokens = isNumber(record.promptTokenCount) ? record.promptTokenCount : 0;
+  /**
+   * Maps upstream Gemini usage metadata onto the OpenAI usage shape, and only that.
+   * Both the prompt and the candidates counters have to be real numbers before any
+   * usage can be reported: empty or partial metadata returns null so no caller can put
+   * an invented 0/0/0 on the wire. `thoughtsTokenCount` stays optional because upstreams
+   * omit it for non-thinking models, where it is genuinely zero rather than unknown.
+   */
+  private mapGeminiUsageMetadata(usage: unknown): OpenAIStreamUsage | null {
+    const record = this.toUnknownRecord(usage);
+    if (!record) {
+      return null;
+    }
+
+    const promptTokens = record.promptTokenCount;
+    const candidatesTokens = record.candidatesTokenCount;
+    if (!isNumber(promptTokens) || !isNumber(candidatesTokens)) {
+      return null;
+    }
+
     const thoughtsTokens = isNumber(record.thoughtsTokenCount) ? record.thoughtsTokenCount : 0;
-    const candidatesTokens = isNumber(record.candidatesTokenCount)
-      ? record.candidatesTokenCount
-      : 0;
     const completionTokens = candidatesTokens + thoughtsTokens;
     const totalTokens = isNumber(record.totalTokenCount)
       ? record.totalTokenCount
@@ -1493,8 +1515,11 @@ export class ProxyService {
           const candidate = json?.candidates?.[0];
           const parts = candidate?.content?.parts || [];
 
-          if (json?.usageMetadata) {
-            lastUsage = this.mapGeminiUsageMetadata(json.usageMetadata);
+          // Partial metadata leaves the previously reported usage untouched rather than
+          // downgrading it to zeros.
+          const mappedUsage = this.mapGeminiUsageMetadata(json?.usageMetadata);
+          if (mappedUsage) {
+            lastUsage = mappedUsage;
           }
 
           for (const part of parts) {
@@ -1975,16 +2000,24 @@ export class ProxyService {
       return undefined;
     }
     const type = responseFormat.type;
-    if (isNil(type) || type === 'text') {
+    if (type === 'text') {
       return undefined;
     }
     if (type === 'json_object') {
       return 'application/json';
     }
+    // A response_format object without a usable type is a malformed request, not an
+    // implicit "text": silently defaulting it would hide the caller's mistake.
+    if (!isString(type) || isEmpty(type)) {
+      throw this.invalidOpenAIRequest(
+        "response_format.type is required and must be one of 'text' or 'json_object'",
+        'response_format',
+      );
+    }
     // json_schema (and anything unknown) is rejected rather than silently dropped
     // until real schema passthrough exists.
     throw this.invalidOpenAIRequest(
-      `response_format type '${isString(type) ? type : String(type)}' is not supported`,
+      `response_format type '${type}' is not supported`,
       'response_format',
     );
   }
@@ -2170,10 +2203,18 @@ export class ProxyService {
     }
   }
 
-  // Convert Claude response to OpenAI format
+  /**
+   * Converts the Claude-shaped intermediate response to the OpenAI Chat wire shape.
+   *
+   * Usage is resolved from the raw upstream Gemini payload first because it is the only
+   * source that carries thinking tokens; the Claude intermediate is a fallback for the
+   * callers that only hold that shape. Neither is defaulted: an upstream that reported
+   * nothing yields a response with no usage key rather than a fabricated 0/0/0.
+   */
   private convertClaudeToOpenAIResponse(
     claudeResponse: ClaudeResponse,
     model: string,
+    upstreamUsageMetadata?: unknown,
   ): OpenAIChatResponse {
     const contentBlocks = Array.isArray(claudeResponse?.content) ? claudeResponse.content : [];
 
@@ -2217,6 +2258,12 @@ export class ProxyService {
         },
       }));
 
+    // Raw upstream metadata is the richest source (it carries thinking tokens); the
+    // Claude intermediate is the fallback and now only carries usage when it was real.
+    const usage =
+      this.mapGeminiUsageMetadata(upstreamUsageMetadata) ??
+      this.toOpenAIUsageFromClaudeUsage(claudeResponse.usage);
+
     return {
       id: `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -2231,17 +2278,24 @@ export class ProxyService {
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
             reasoning_content: reasoningContent || undefined,
           },
+          logprobs: null,
           finish_reason: this.mapAnthropicStopReasonToOpenAIFinishReason(
             claudeResponse.stop_reason,
           ),
         },
       ],
-      usage: {
-        prompt_tokens: claudeResponse.usage?.input_tokens || 0,
-        completion_tokens: claudeResponse.usage?.output_tokens || 0,
-        total_tokens:
-          (claudeResponse.usage?.input_tokens || 0) + (claudeResponse.usage?.output_tokens || 0),
-      },
+      ...(usage ? { usage } : {}),
+    };
+  }
+
+  private toOpenAIUsageFromClaudeUsage(usage: ClaudeResponse['usage']): OpenAIStreamUsage | null {
+    if (!usage || !isNumber(usage.input_tokens) || !isNumber(usage.output_tokens)) {
+      return null;
+    }
+    return {
+      prompt_tokens: usage.input_tokens,
+      completion_tokens: usage.output_tokens,
+      total_tokens: usage.input_tokens + usage.output_tokens,
     };
   }
 

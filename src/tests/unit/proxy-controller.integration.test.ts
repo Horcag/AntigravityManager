@@ -1428,6 +1428,144 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('rejects an explicit user identifier on both chat and legacy completions without upstream calls', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const [url, payload] of [
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gemini-3.5-flash-medium',
+            messages: [{ role: 'user', content: 'hi' }],
+            user: 'end-user-42',
+          },
+        ],
+        [
+          '/v1/completions',
+          { model: 'gemini-3.5-flash-medium', prompt: 'hi', user: 'end-user-42' },
+        ],
+      ] as Array<[string, Record<string, unknown>]>) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode, `expected 400 for ${url}`).toBe(400);
+        expect(response.json().error).toEqual({
+          message:
+            'user is not supported by this gateway: end-user identifiers are not forwarded upstream',
+          type: 'invalid_request_error',
+          param: 'user',
+          code: 'unsupported_parameter',
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects a response_format object without a usable type instead of treating it as text', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const baseChat = {
+      model: 'gemini-3.5-flash-medium',
+      messages: [{ role: 'user', content: 'hi' }],
+    };
+
+    try {
+      for (const responseFormat of [
+        {},
+        { json_schema: { name: 'x' } },
+        { type: '  ' },
+        { type: 7 },
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers,
+          payload: { ...baseChat, response_format: responseFormat },
+        });
+        expect(response.statusCode, `expected 400 for ${JSON.stringify(responseFormat)}`).toBe(400);
+        expect(response.json().error).toMatchObject({
+          message: "response_format.type is required and must be one of 'text' or 'json_object'",
+          type: 'invalid_request_error',
+          param: 'response_format',
+          code: null,
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+
+      // The supported types keep working untouched.
+      proxyService.handleChatCompletions.mockResolvedValue({ ok: true });
+      for (const type of ['text', 'json_object']) {
+        const accepted = await server.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers,
+          payload: { ...baseChat, response_format: { type } },
+        });
+        expect(accepted.statusCode, `expected 200 for ${type}`).toBe(200);
+      }
+
+      const jsonSchema = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers,
+        payload: { ...baseChat, response_format: { type: 'json_schema', json_schema: {} } },
+      });
+      expect(jsonSchema.statusCode).toBe(400);
+      expect(jsonSchema.json().error).toMatchObject({
+        param: 'response_format',
+        code: 'unsupported_parameter',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('omits legacy usage and nulls Responses usage when the service reports none', async () => {
+    const chatResponse = {
+      id: 'chatcmpl_no_usage',
+      object: 'chat.completion',
+      created: 1700000003,
+      model: 'gpt-4o',
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content: 'no usage here' },
+          logprobs: null,
+          finish_reason: 'stop',
+        },
+      ],
+    };
+    const proxyService = { handleChatCompletions: vi.fn().mockResolvedValue(chatResponse) };
+    const controller = new ProxyController(proxyService as any);
+    const legacyReply = createReplyMock();
+    const responsesReply = createReplyMock();
+
+    await controller.completions(
+      { model: 'gpt-4o', prompt: 'hi', stream: false },
+      legacyReply as any,
+    );
+    await controller.responses({ model: 'gpt-4o', input: 'hi' }, responsesReply as any);
+
+    const legacyBody = legacyReply.send.mock.calls[0][0];
+    expect(legacyBody).toEqual({
+      id: 'chatcmpl_no_usage',
+      object: 'text_completion',
+      created: 1700000003,
+      model: 'gpt-4o',
+      choices: [{ text: 'no usage here', index: 0, logprobs: null, finish_reason: 'stop' }],
+    });
+    expect(Object.keys(legacyBody)).not.toContain('usage');
+    expect(responsesReply.send.mock.calls[0][0].usage).toBeNull();
+  });
+
   it('forwards legacy completion stop sequences and streams through the legacy protocol', async () => {
     const legacyStream = of(
       'data: {"object":"text_completion","choices":[{"text":"hi","index":0,"logprobs":null,"finish_reason":null}]}\n\n',

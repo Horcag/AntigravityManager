@@ -386,7 +386,8 @@ export interface ClaudeResponse {
   content: ContentBlock[];
   stop_reason: string;
   stop_sequence?: string | null;
-  usage: Usage;
+  /** Absent when the upstream response reported no usable token counts. */
+  usage?: Usage;
 }
 
 export interface Usage {

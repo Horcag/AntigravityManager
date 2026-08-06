@@ -243,12 +243,7 @@ class NonStreamingProcessor {
       stopReason = 'max_tokens';
     }
 
-    const usage: Usage = {
-      input_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
-      output_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-    };
+    const usage = this.buildUsage(geminiResponse);
 
     return {
       id: geminiResponse.responseId || `msg_${uuidv4()}`,
@@ -257,7 +252,27 @@ class NonStreamingProcessor {
       model: geminiResponse.modelVersion || '',
       content: this.contentBlocks,
       stop_reason: stopReason,
-      usage: usage,
+      ...(usage ? { usage } : {}),
+    };
+  }
+
+  /**
+   * Reports usage only when the upstream actually supplied both counters. Defaulting the
+   * missing ones to 0 would hand downstream mappers a fabricated token count they cannot
+   * tell apart from a real one.
+   */
+  private buildUsage(geminiResponse: GeminiResponse): Usage | undefined {
+    const promptTokens = geminiResponse.usageMetadata?.promptTokenCount;
+    const outputTokens = geminiResponse.usageMetadata?.candidatesTokenCount;
+    if (typeof promptTokens !== 'number' || typeof outputTokens !== 'number') {
+      return undefined;
+    }
+
+    return {
+      input_tokens: promptTokens,
+      output_tokens: outputTokens,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
     };
   }
 }

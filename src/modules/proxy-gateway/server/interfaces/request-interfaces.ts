@@ -223,11 +223,17 @@ export interface OpenAIChatResponse {
   created: number;
   model: string;
   choices: OpenAIChoice[];
-  usage: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  /**
+   * Omitted when the upstream response carried no usable token counts. A missing key is
+   * the only honest way to say "unknown"; zero-filled usage would be a fabricated number.
+   */
+  usage?: OpenAIUsage;
+}
+
+export interface OpenAIUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
 }
 
 export interface OpenAIChoice {
@@ -238,6 +244,8 @@ export interface OpenAIChoice {
     tool_calls?: OpenAIToolCall[];
     reasoning_content?: string;
   };
+  /** Required by the Chat contract; always null because this gateway has no logprobs. */
+  logprobs: null;
   finish_reason: string | null;
 }
 

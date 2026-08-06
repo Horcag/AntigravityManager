@@ -229,6 +229,96 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     );
   });
 
+  it('never turns empty or partial upstream usage metadata into a usage frame', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const observable = invokePrivate<Observable<string>>(
+      service,
+      'processStreamResponse',
+      stream,
+      'gpt-4o-mini',
+      undefined,
+      { variant: 'chat', includeUsage: true },
+    );
+
+    const outcome = await collectStream(
+      observable,
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [{ text: 'hello' }] } }],
+            usageMetadata: {},
+          }),
+        );
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [] }, finishReason: 'STOP' }],
+            // Only a total: neither prompt nor completion can be told truthfully.
+            usageMetadata: { totalTokenCount: 20 },
+          }),
+        );
+      },
+      stream,
+    );
+
+    const events = parseSseData(outcome.chunks);
+    expect(events.at(-1)).toBe('[DONE]');
+    const payloads = events.filter((event): event is Record<string, unknown> => event !== '[DONE]');
+    // Opting in still marks every normal chunk with usage:null, but no usage-only frame
+    // is invented and no zero-filled counters reach the wire.
+    expect(payloads.every((payload) => payload.usage === null)).toBe(true);
+    expect(payloads.every((payload) => (payload.choices as unknown[]).length === 1)).toBe(true);
+    expect(outcome.chunks.join('')).not.toContain('prompt_tokens');
+  });
+
+  it('keeps the last real usage when a later upstream chunk reports partial metadata', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const observable = invokePrivate<Observable<string>>(
+      service,
+      'processStreamResponse',
+      stream,
+      'gpt-4o-mini',
+      undefined,
+      { variant: 'chat', includeUsage: true },
+    );
+
+    const outcome = await collectStream(
+      observable,
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [{ text: 'hello' }] } }],
+            usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3, totalTokenCount: 8 },
+          }),
+        );
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [] }, finishReason: 'STOP' }],
+            usageMetadata: { trafficType: 'ON_DEMAND' },
+          }),
+        );
+      },
+      stream,
+    );
+
+    const payloads = parseSseData(outcome.chunks).filter(
+      (event): event is Record<string, unknown> => event !== '[DONE]',
+    );
+    expect(payloads.at(-1)).toEqual({
+      id: expect.any(String),
+      object: 'chat.completion.chunk',
+      created: expect.any(Number),
+      model: 'gpt-4o-mini',
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    });
+  });
+
   it('never fabricates usage chunks when include_usage is absent', async () => {
     const service = createService();
     const stream = new EventEmitter();
@@ -750,6 +840,138 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
 
     const body = mockGeminiClient.generateInternal.mock.calls[0][0];
     expect(body.request.generationConfig.responseMimeType).toBeUndefined();
+  });
+
+  it('omits usage from the assembled non-stream chat body when upstream reported none', async () => {
+    const service = createService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+    });
+
+    const response = (await service.handleChatCompletions({
+      model: 'gpt-4o',
+      stream: false,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as never)) as unknown as Record<string, unknown>;
+
+    // Exact assembled wire body: no usage key at all, and the required nullable logprobs.
+    expect(response).toEqual({
+      id: expect.stringMatching(/^chatcmpl-/),
+      object: 'chat.completion',
+      created: expect.any(Number),
+      model: 'gpt-4o',
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: 'ok',
+            tool_calls: undefined,
+            reasoning_content: undefined,
+          },
+          logprobs: null,
+          finish_reason: 'stop',
+        },
+      ],
+    });
+    expect(Object.keys(response)).not.toContain('usage');
+    expect(JSON.stringify(response)).not.toContain('usage');
+  });
+
+  it('reports real upstream usage on the assembled non-stream chat body', async () => {
+    const service = createService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      usageMetadata: {
+        promptTokenCount: 12,
+        candidatesTokenCount: 6,
+        thoughtsTokenCount: 2,
+        totalTokenCount: 20,
+      },
+    });
+
+    const response = (await service.handleChatCompletions({
+      model: 'gpt-4o',
+      stream: false,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as never)) as unknown as Record<string, unknown>;
+
+    expect(response.usage).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 8,
+      total_tokens: 20,
+    });
+    expect((response.choices as Array<Record<string, unknown>>)[0].logprobs).toBeNull();
+  });
+
+  it('emits no usage frame on the real fallback stream when upstream reported no usage', async () => {
+    const service = createService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.streamGenerateInternal.mockRejectedValue(new Error('stream path unavailable'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'fallback body' }] }, finishReason: 'STOP' }],
+    });
+
+    const result = await service.handleChatCompletions({
+      model: 'gpt-4o',
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: 'user', content: 'hello' }],
+    } as never);
+
+    const outcome = await collectStream(result as Observable<string>);
+    const events = parseSseData(outcome.chunks);
+    expect(events.at(-1)).toBe('[DONE]');
+    const payloads = events.filter((event): event is Record<string, unknown> => event !== '[DONE]');
+    expect(payloads.every((payload) => payload.usage === null)).toBe(true);
+    expect(payloads.every((payload) => (payload.choices as unknown[]).length === 1)).toBe(true);
+    expect(outcome.chunks.join('')).not.toContain('prompt_tokens');
+  });
+
+  it('replays real upstream usage on the fallback stream when include_usage is set', async () => {
+    const service = createService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.streamGenerateInternal.mockRejectedValue(new Error('stream path unavailable'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'fallback body' }] }, finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2, totalTokenCount: 6 },
+    });
+
+    const result = await service.handleChatCompletions({
+      model: 'gpt-4o',
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: 'user', content: 'hello' }],
+    } as never);
+
+    const payloads = parseSseData(
+      (await collectStream(result as Observable<string>)).chunks,
+    ).filter((event): event is Record<string, unknown> => event !== '[DONE]');
+    expect(payloads.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+    });
+  });
+
+  it('rejects a response_format object without a usable type before any account is leased', async () => {
+    const service = createService();
+
+    for (const responseFormat of [{}, { json_schema: { name: 'x' } }, { type: '' }, { type: 7 }]) {
+      await expect(
+        service.handleChatCompletions({
+          model: 'gpt-4o',
+          stream: false,
+          response_format: responseFormat,
+          messages: [{ role: 'user', content: 'hello' }],
+        } as never),
+      ).rejects.toBeInstanceOf(OpenAIProtocolException);
+    }
+
+    expect(mockAccountLeaseService.getNextToken).not.toHaveBeenCalled();
+    expect(mockGeminiClient.generateInternal).not.toHaveBeenCalled();
+    expect(mockGeminiClient.streamGenerateInternal).not.toHaveBeenCalled();
   });
 
   it('rejects local mapping failures without selecting or penalizing any account', async () => {
