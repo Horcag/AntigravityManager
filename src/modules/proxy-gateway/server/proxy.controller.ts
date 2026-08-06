@@ -601,6 +601,7 @@ export class ProxyController {
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       throw this.invalidRequest('messages must be a non-empty array', 'messages');
     }
+    const declaredToolCallIds = new Set<string>();
     for (const [index, message] of body.messages.entries()) {
       if (
         !message ||
@@ -608,8 +609,8 @@ export class ProxyController {
       ) {
         throw this.invalidRequest('messages contains an unsupported role', 'messages');
       }
-      this.validateChatMessageContent(message.content);
-      this.validateChatToolMessage(message, index);
+      this.validateChatToolMessage(message, index, declaredToolCallIds);
+      this.validateChatMessageContent(message, index);
     }
     this.validateTools(body.tools, body.tool_choice);
     this.validateUnsupportedSamplingOptions(body);
@@ -856,46 +857,53 @@ export class ProxyController {
   private validateChatToolMessage(
     message: OpenAIChatRequest['messages'][number],
     index: number,
+    declaredToolCallIds: Set<string>,
   ): void {
-    if (message.role === 'tool') {
-      this.requireNonEmptyString(message.tool_call_id, `messages[${index}].tool_call_id`);
-    }
-
-    if (message.tool_calls === undefined) {
-      return;
-    }
-    if (message.role !== 'assistant') {
-      throw this.invalidRequest(
-        'tool_calls is only supported on assistant messages',
-        `messages[${index}].tool_calls`,
-      );
-    }
-    if (!Array.isArray(message.tool_calls)) {
-      throw this.invalidRequest('tool_calls must be an array', `messages[${index}].tool_calls`);
-    }
-
-    for (const [toolCallIndex, toolCall] of message.tool_calls.entries()) {
-      const param = `messages[${index}].tool_calls[${toolCallIndex}]`;
-      const toolCallRecord = this.toRecord(toolCall);
-      if (!toolCallRecord) {
-        throw this.invalidRequest('tool_calls entries must be objects', param);
-      }
-      if (toolCallRecord.type !== 'function') {
-        throw this.invalidRequest('tool_calls entries must have type function', `${param}.type`);
-      }
-      this.requireNonEmptyString(toolCallRecord.id, `${param}.id`);
-      const functionRecord = this.toRecord(toolCallRecord.function);
-      if (!functionRecord) {
+    if (message.tool_calls !== undefined) {
+      if (message.role !== 'assistant') {
         throw this.invalidRequest(
-          'tool_calls entries must include a function object',
-          `${param}.function`,
+          'tool_calls is only supported on assistant messages',
+          `messages[${index}].tool_calls`,
         );
       }
-      this.requireNonEmptyString(functionRecord.name, `${param}.function.name`);
-      if (!isString(functionRecord.arguments)) {
+      if (!Array.isArray(message.tool_calls)) {
+        throw this.invalidRequest('tool_calls must be an array', `messages[${index}].tool_calls`);
+      }
+
+      for (const [toolCallIndex, toolCall] of message.tool_calls.entries()) {
+        const param = `messages[${index}].tool_calls[${toolCallIndex}]`;
+        const toolCallRecord = this.toRecord(toolCall);
+        if (!toolCallRecord) {
+          throw this.invalidRequest('tool_calls entries must be objects', param);
+        }
+        if (toolCallRecord.type !== 'function') {
+          throw this.invalidRequest('tool_calls entries must have type function', `${param}.type`);
+        }
+        this.requireNonEmptyString(toolCallRecord.id, `${param}.id`);
+        const functionRecord = this.toRecord(toolCallRecord.function);
+        if (!functionRecord) {
+          throw this.invalidRequest(
+            'tool_calls entries must include a function object',
+            `${param}.function`,
+          );
+        }
+        this.requireNonEmptyString(functionRecord.name, `${param}.function.name`);
+        if (!isString(functionRecord.arguments)) {
+          throw this.invalidRequest(
+            'tool_calls function arguments must be a string',
+            `${param}.function.arguments`,
+          );
+        }
+        declaredToolCallIds.add(toolCallRecord.id);
+      }
+    }
+
+    if (message.role === 'tool') {
+      this.requireNonEmptyString(message.tool_call_id, `messages[${index}].tool_call_id`);
+      if (!declaredToolCallIds.has(message.tool_call_id)) {
         throw this.invalidRequest(
-          'tool_calls function arguments must be a string',
-          `${param}.function.arguments`,
+          'tool_call_id must reference an earlier assistant tool_calls id',
+          `messages[${index}].tool_call_id`,
         );
       }
     }
@@ -1146,8 +1154,16 @@ export class ProxyController {
   }
 
   private validateChatMessageContent(
-    content: OpenAIChatRequest['messages'][number]['content'],
+    message: OpenAIChatRequest['messages'][number],
+    index: number,
   ): void {
+    const { content } = message;
+    if (content === undefined) {
+      if (message.role === 'assistant' && message.tool_calls !== undefined) {
+        return;
+      }
+      throw this.invalidRequest('messages content is required', `messages[${index}].content`);
+    }
     if (isString(content) || content === null) {
       return;
     }

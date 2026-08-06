@@ -171,6 +171,81 @@ describe('ProxyController Integration', () => {
     },
   );
 
+  it('accepts an assistant tool-call loop with omitted content through the assembled Fastify pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { authorization: 'Bearer test-key' },
+        payload: {
+          model: 'gpt-4o',
+          messages: [
+            { role: 'user', content: 'What is the weather?' },
+            {
+              role: 'assistant',
+              tool_calls: [
+                {
+                  id: 'call_weather',
+                  type: 'function',
+                  function: { name: 'get_weather', arguments: '{"city":"Paris"}' },
+                },
+              ],
+            },
+            { role: 'tool', tool_call_id: 'call_weather', content: 'Sunny' },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([
+    [
+      'an assistant message without content or tool calls',
+      { model: 'gpt-4o', messages: [{ role: 'assistant' }] },
+      'messages[0].content',
+    ],
+    [
+      'a tool result that does not reference an earlier assistant tool call',
+      {
+        model: 'gpt-4o',
+        messages: [{ role: 'tool', tool_call_id: 'call_missing', content: 'Sunny' }],
+      },
+      'messages[0].tool_call_id',
+    ],
+  ])('rejects %s through the assembled Fastify pipeline before an upstream call', async (_caseName, payload, param) => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { authorization: 'Bearer test-key' },
+        payload,
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toMatchObject({ type: 'invalid_request_error', param });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {
