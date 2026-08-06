@@ -3,7 +3,7 @@ import { isEmpty, isPlainObject, isString } from 'lodash-es';
 import { mapClaudeModelToGemini, normalizeGeminiModelAlias } from './ModelMapping';
 import { getMaxOutputTokens, getThinkingBudget } from './ModelSpecs';
 import { cleanJsonSchema, normalizeObjectJsonSchema } from './JsonSchemaUtils';
-import { SignatureStore } from './SignatureStore';
+import { SignatureContext, SignatureStore } from './SignatureStore';
 import { logger } from '@/shared/logging/logger';
 import {
   ClaudeRequest,
@@ -42,6 +42,28 @@ interface ResolvedRequestConfig {
 
 type RequestType = 'agent' | 'web_search' | 'image_gen';
 
+/**
+ * Resolves a previously captured signature for one tool-use id.
+ * Returns null when no per-request signature context is available.
+ */
+type SignatureLookup = (toolCallId: string) => string | null;
+
+const NO_SIGNATURE_LOOKUP: SignatureLookup = () => null;
+
+function createSignatureLookup(context: SignatureContext | undefined): SignatureLookup {
+  if (!context?.accountId || !context?.model) {
+    return NO_SIGNATURE_LOOKUP;
+  }
+  return (toolCallId: string) =>
+    toolCallId
+      ? SignatureStore.get({
+          accountId: context.accountId,
+          model: context.model,
+          toolCallId,
+        })
+      : null;
+}
+
 const AGENT_CREDIT_TYPES = ['GOOGLE_ONE_AI'];
 const SAFETY_SETTINGS: SafetySetting[] = [
   { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'OFF' },
@@ -55,13 +77,17 @@ const SAFETY_SETTINGS: SafetySetting[] = [
  * Transforms Claude request into Gemini internal request format
  * @param claudeReq Claude API request
  * @param projectId Gemini Project ID
+ * @param userAgent Upstream user agent
+ * @param signatureContext Account + effective upstream model used to replay captured signatures
  * @returns Gemini internal request format
  */
 export function transformClaudeRequestIn(
   claudeReq: ClaudeRequest,
   projectId?: string,
   userAgent?: string,
+  signatureContext?: SignatureContext,
 ): GeminiInternalRequest {
+  const lookupSignature = createSignatureLookup(signatureContext);
   // Check for networking tools (server tool or built-in tool)
   const hasWebSearchTool = detectsNetworkingTool(claudeReq.tools);
 
@@ -99,7 +125,6 @@ export function transformClaudeRequestIn(
   }
 
   if (isThinkingEnabled) {
-    const globalSig = SignatureStore.get();
     const hasFunctionCalls = claudeReq.messages.some((m) => {
       if (Array.isArray(m.content)) {
         return m.content.some((b) => b.type === 'tool_use');
@@ -107,7 +132,10 @@ export function transformClaudeRequestIn(
       return false;
     });
 
-    if (hasFunctionCalls && !hasValidSignatureForFunctionCalls(claudeReq.messages, globalSig)) {
+    if (
+      hasFunctionCalls &&
+      !hasValidSignatureForFunctionCalls(claudeReq.messages, lookupSignature)
+    ) {
       if (!isGeminiFlashModel(requestConfig.finalModel)) {
         isThinkingEnabled = false;
       }
@@ -132,6 +160,7 @@ export function transformClaudeRequestIn(
     isThinkingEnabled,
     allowDummyThought,
     requestConfig.finalModel,
+    lookupSignature,
   );
 
   // 3. Tools
@@ -519,16 +548,27 @@ const MIN_SIGNATURE_LENGTH = 10;
 /**
  * Check if we have any valid signature available for function calls
  * @param messages  Messages from ClaudeRequest
- * @param globalSig  Global signature from SignatureStore
+ * @param lookupSignature  Per-request keyed lookup into SignatureStore
  * @returns  True if any valid signature is available for function calls
  */
 function hasValidSignatureForFunctionCalls(
   messages: Message[],
-  globalSig: string | null | undefined,
+  lookupSignature: SignatureLookup,
 ): boolean {
-  // 1. Check global store
-  if (globalSig && globalSig.length >= MIN_SIGNATURE_LENGTH) {
-    return true;
+  // 1. Check explicit or captured signatures for the exact tool calls in this request
+  for (const msg of messages) {
+    if (!Array.isArray(msg.content)) {
+      continue;
+    }
+    for (const block of msg.content) {
+      if (block.type !== 'tool_use') {
+        continue;
+      }
+      const signature = block.signature ?? lookupSignature(block.id);
+      if (signature && signature.length >= MIN_SIGNATURE_LENGTH) {
+        return true;
+      }
+    }
   }
 
   // 2. Check if any message has a thinking block with valid signature
@@ -562,9 +602,13 @@ function buildContents(
   isThinkingEnabled: boolean,
   allowDummyThought: boolean,
   mappedModel: string,
+  lookupSignature: SignatureLookup = NO_SIGNATURE_LOOKUP,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
+  /** Signature carried by explicit request content only, never by replayed store state. */
   let lastThoughtSignature: string | null = null;
+  /** Signature effectively attached to each tool_use id, replayed onto its tool_result. */
+  const toolIdToSignature = new Map<string, string>();
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -600,10 +644,14 @@ function buildContents(
         };
         cleanJsonSchema(part);
         toolIdToName.set(block.id, block.name);
+        // Explicit signatures win; otherwise replay only what was captured for THIS tool call.
         const finalSig: string | null =
-          block.signature ?? lastThoughtSignature ?? SignatureStore.get();
+          block.signature ?? lastThoughtSignature ?? lookupSignature(block.id);
         if (finalSig) {
-          lastThoughtSignature = finalSig;
+          if (block.signature) {
+            lastThoughtSignature = block.signature;
+          }
+          toolIdToSignature.set(block.id, finalSig);
           part.thoughtSignature = finalSig;
           part.thought_signature = finalSig;
         } else if (isThinkingEnabled && isGeminiFlashModel(mappedModel)) {
@@ -631,9 +679,10 @@ function buildContents(
             id: block.tool_use_id,
           },
         };
-        if (lastThoughtSignature) {
-          part.thoughtSignature = lastThoughtSignature;
-          part.thought_signature = lastThoughtSignature;
+        const resultSig = toolIdToSignature.get(block.tool_use_id) ?? lastThoughtSignature;
+        if (resultSig) {
+          part.thoughtSignature = resultSig;
+          part.thought_signature = resultSig;
         }
         parts.push(part);
       } else if (block.type === 'redacted_thinking') {

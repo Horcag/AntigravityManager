@@ -1,4 +1,4 @@
-import { SignatureStore } from './SignatureStore';
+import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 
 export interface GeminiResponsesStreamPart {
@@ -52,6 +52,8 @@ type ResponsesOutputItem = ResponsesMessageOutputItem | ResponsesFunctionCallOut
 interface OpenAIResponsesStreamingMapperOptions {
   model: string;
   responseId: string;
+  /** Account + effective upstream model this stream belongs to; required to capture signatures. */
+  signatureContext?: SignatureContext;
 }
 
 export class OpenAIResponsesStreamingMapper {
@@ -63,6 +65,8 @@ export class OpenAIResponsesStreamingMapper {
   private messageOutputItem: ResponsesMessageOutputItem | null = null;
   private nextOutputIndex = 0;
   private textOutputIndex: number | null = null;
+  /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
+  private streamSignature: string | null = null;
 
   constructor(private readonly options: OpenAIResponsesStreamingMapperOptions) {
     this.messageItemId = `msg_${options.responseId}`;
@@ -88,11 +92,11 @@ export class OpenAIResponsesStreamingMapper {
 
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
     if (signature) {
-      SignatureStore.store(signature);
+      this.streamSignature = signature;
     }
 
     if (part.functionCall) {
-      return this.processFunctionCall(part.functionCall);
+      return this.processFunctionCall(part.functionCall, signature ?? this.streamSignature);
     }
 
     if (part.thought) {
@@ -237,6 +241,7 @@ export class OpenAIResponsesStreamingMapper {
 
   private processFunctionCall(
     functionCall: NonNullable<GeminiResponsesStreamPart['functionCall']>,
+    signature?: string | null,
   ): string[] {
     const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
     if (functionCall.id && this.emittedToolCallIds.has(callId)) {
@@ -244,6 +249,20 @@ export class OpenAIResponsesStreamingMapper {
     }
     if (functionCall.id) {
       this.emittedToolCallIds.add(callId);
+    }
+
+    // Capture for replay under the id the client actually sees (upstream id when Gemini
+    // supplies one, otherwise the generated call id), keyed by the account/model that produced it.
+    const signatureContext = this.options.signatureContext;
+    if (signature && signatureContext) {
+      SignatureStore.store(
+        {
+          accountId: signatureContext.accountId,
+          model: signatureContext.model,
+          toolCallId: callId,
+        },
+        signature,
+      );
     }
 
     const argumentsString = JSON.stringify(

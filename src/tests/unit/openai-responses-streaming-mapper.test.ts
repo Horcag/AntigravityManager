@@ -7,10 +7,13 @@ function parseEvent(serializedEvent: string): Record<string, unknown> {
   return JSON.parse(serializedEvent.slice('data: '.length)) as Record<string, unknown>;
 }
 
+const SIGNATURE_CONTEXT = { accountId: 'account-a', model: 'gemini-3-pro' };
+
 function createMapper(): OpenAIResponsesStreamingMapper {
   return new OpenAIResponsesStreamingMapper({
     model: 'gemini-3-pro',
     responseId: 'resp_test',
+    signatureContext: SIGNATURE_CONTEXT,
   });
 }
 
@@ -132,7 +135,9 @@ describe('OpenAIResponsesStreamingMapper', () => {
       'response.function_call_arguments.done',
       'response.output_item.done',
     ]);
-    expect(SignatureStore.get()).toBe('stored thought signature');
+    expect(SignatureStore.get({ ...SIGNATURE_CONTEXT, toolCallId: 'call_thought_1' })).toBe(
+      'stored thought signature',
+    );
   });
 
   it('emits grounding metadata as visible Responses text', () => {

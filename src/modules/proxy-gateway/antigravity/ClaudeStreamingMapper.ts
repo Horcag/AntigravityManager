@@ -1,5 +1,5 @@
 import { GeminiPart, Usage, UsageMetadata } from './types';
-import { SignatureStore } from './SignatureStore';
+import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
 
@@ -302,11 +302,20 @@ export class StreamingState {
  * Part Processor
  */
 export class PartProcessor {
-  constructor(private state: StreamingState) {}
+  /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
+  private streamSignature: string | null = null;
+
+  constructor(
+    private state: StreamingState,
+    private readonly signatureContext?: SignatureContext,
+  ) {}
 
   public process(part: GeminiPart): string[] {
     const chunks: string[] = [];
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
+    if (signature) {
+      this.streamSignature = signature;
+    }
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
@@ -466,8 +475,20 @@ export class PartProcessor {
 
     if (signature) {
       toolUse.signature = signature;
-      // Store signature to global storage for replay in subsequent requests
-      SignatureStore.store(signature);
+    }
+
+    // Capture for replay under the id the client actually sees (upstream id when Gemini
+    // supplies one, otherwise the generated id), keyed by the account/model that produced it.
+    const capturedSignature = signature ?? this.streamSignature;
+    if (capturedSignature && this.signatureContext) {
+      SignatureStore.store(
+        {
+          accountId: this.signatureContext.accountId,
+          model: this.signatureContext.model,
+          toolCallId: toolId,
+        },
+        capturedSignature,
+      );
     }
 
     chunks.push(...this.state.startBlock('Function', toolUse));

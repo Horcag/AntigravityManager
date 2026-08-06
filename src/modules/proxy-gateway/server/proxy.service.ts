@@ -8,7 +8,7 @@ import { Observable } from 'rxjs';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
 import { transformResponse } from '../antigravity/ClaudeResponseMapper';
 import { StreamingState, PartProcessor } from '../antigravity/ClaudeStreamingMapper';
-import { SignatureStore } from '../antigravity/SignatureStore';
+import { type SignatureContext, SignatureStore } from '../antigravity/SignatureStore';
 import { decodeSignature } from '../antigravity/signature-utils';
 import {
   type GeminiResponsesGroundingMetadata,
@@ -191,6 +191,11 @@ export class ProxyService {
         targetModel,
       );
 
+      const signatureContext: SignatureContext = {
+        accountId: token.id,
+        model: effectiveTargetModel,
+      };
+
       try {
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
@@ -198,6 +203,7 @@ export class ProxyService {
           this.toClaudeRequest(request),
           projectId,
           requestUserAgent,
+          signatureContext,
         );
         geminiBody.model = effectiveTargetModel;
         this.applyInternalGenerationConstraints(geminiBody, effectiveTargetModel, token.id);
@@ -209,7 +215,7 @@ export class ProxyService {
             token.token.upstream_proxy_url,
             extraHeaders,
           );
-          return this.processAnthropicInternalStream(stream, geminiBody.model);
+          return this.processAnthropicInternalStream(stream, geminiBody.model, signatureContext);
         } else {
           const response = await this.generateInternalWithStreamFallback(
             geminiBody,
@@ -217,7 +223,7 @@ export class ProxyService {
             token.token.upstream_proxy_url,
             extraHeaders,
           );
-          return this.toAnthropicChatResponse(transformResponse(response));
+          return this.toAnthropicChatResponse(transformResponse(response, signatureContext));
         }
       } catch (error) {
         if (error instanceof Error && this.isProjectContextError(error.message)) {
@@ -230,6 +236,7 @@ export class ProxyService {
               this.toClaudeRequest(request),
               '',
               requestUserAgent,
+              signatureContext,
             );
             fallbackBody.model = effectiveTargetModel;
             this.applyInternalGenerationConstraints(fallbackBody, effectiveTargetModel, token.id);
@@ -240,7 +247,11 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              return this.processAnthropicInternalStream(stream, fallbackBody.model);
+              return this.processAnthropicInternalStream(
+                stream,
+                fallbackBody.model,
+                signatureContext,
+              );
             } else {
               const response = await this.generateInternalWithStreamFallback(
                 fallbackBody,
@@ -248,7 +259,7 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              return this.toAnthropicChatResponse(transformResponse(response));
+              return this.toAnthropicChatResponse(transformResponse(response, signatureContext));
             }
           } catch (fallbackErr) {
             lastError = fallbackErr;
@@ -265,10 +276,15 @@ export class ProxyService {
               model: 'gemini-3-flash',
             };
             const requestUserAgent = await resolveRequestUserAgent();
+            const downgradedSignatureContext: SignatureContext = {
+              accountId: token.id,
+              model: 'gemini-3-flash',
+            };
             const downgradedBody = transformClaudeRequestIn(
               downgradedRequest,
               token.token.project_id ?? '',
               requestUserAgent,
+              downgradedSignatureContext,
             );
             this.applyInternalGenerationConstraints(downgradedBody, 'gemini-3-flash', token.id);
             if (request.stream) {
@@ -278,7 +294,11 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              return this.processAnthropicInternalStream(stream, downgradedBody.model);
+              return this.processAnthropicInternalStream(
+                stream,
+                downgradedBody.model,
+                downgradedSignatureContext,
+              );
             } else {
               const response = await this.generateInternalWithStreamFallback(
                 downgradedBody,
@@ -286,7 +306,9 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              const transformed = this.toAnthropicChatResponse(transformResponse(response));
+              const transformed = this.toAnthropicChatResponse(
+                transformResponse(response, downgradedSignatureContext),
+              );
               return {
                 ...transformed,
                 model: request.model,
@@ -310,13 +332,14 @@ export class ProxyService {
   private processAnthropicInternalStream(
     upstreamStream: NodeJS.ReadableStream,
     _model: string,
+    signatureContext?: SignatureContext,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
 
       const state = new StreamingState();
-      const processor = new PartProcessor(state);
+      const processor = new PartProcessor(state, signatureContext);
 
       let lastFinishReason: string | undefined;
       let lastUsageMetadata: Record<string, unknown> | undefined;
@@ -732,11 +755,21 @@ export class ProxyService {
         targetModel,
       );
 
+      const signatureContext: SignatureContext = {
+        accountId: token.id,
+        model: effectiveTargetModel,
+      };
+
       try {
         const claudeRequest = this.convertOpenAIToClaude(request);
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
-        const geminiBody = transformClaudeRequestIn(claudeRequest, projectId, requestUserAgent);
+        const geminiBody = transformClaudeRequestIn(
+          claudeRequest,
+          projectId,
+          requestUserAgent,
+          signatureContext,
+        );
         geminiBody.model = effectiveTargetModel;
         this.applyInternalGenerationConstraints(geminiBody, effectiveTargetModel, token.id);
 
@@ -749,7 +782,12 @@ export class ProxyService {
               token.token.upstream_proxy_url,
               extraHeaders,
             );
-            return this.createOpenAIProtocolStream(stream, request.model, outputProtocol);
+            return this.createOpenAIProtocolStream(
+              stream,
+              request.model,
+              outputProtocol,
+              signatureContext,
+            );
           } catch (streamError) {
             this.logger.warn(
               `Stream path failed for model=${request.model}; falling back to non-stream generation: ${
@@ -766,7 +804,7 @@ export class ProxyService {
             this.logger.log(
               `Upstream response snippet after stream fallback: ${JSON.stringify(response).substring(0, 500)}`,
             );
-            const claudeResponse = transformResponse(response);
+            const claudeResponse = transformResponse(response, signatureContext);
             const openaiResponse = this.convertClaudeToOpenAIResponse(
               claudeResponse,
               request.model,
@@ -786,7 +824,7 @@ export class ProxyService {
             `Upstream response snippet (non-stream): ${JSON.stringify(response).substring(0, 500)}`,
           );
           // Transform Gemini response to OpenAI format
-          const claudeResponse = transformResponse(response);
+          const claudeResponse = transformResponse(response, signatureContext);
           this.logger.log(
             `Transformed Claude response snippet: ${JSON.stringify(claudeResponse).substring(0, 500)}`,
           );
@@ -800,7 +838,12 @@ export class ProxyService {
           try {
             const claudeRequest = this.convertOpenAIToClaude(request);
             const requestUserAgent = await resolveRequestUserAgent();
-            const fallbackBody = transformClaudeRequestIn(claudeRequest, '', requestUserAgent);
+            const fallbackBody = transformClaudeRequestIn(
+              claudeRequest,
+              '',
+              requestUserAgent,
+              signatureContext,
+            );
             fallbackBody.model = effectiveTargetModel;
             this.applyInternalGenerationConstraints(fallbackBody, effectiveTargetModel, token.id);
             if (request.stream) {
@@ -810,7 +853,12 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              return this.createOpenAIProtocolStream(stream, request.model, outputProtocol);
+              return this.createOpenAIProtocolStream(
+                stream,
+                request.model,
+                outputProtocol,
+                signatureContext,
+              );
             }
 
             const response = await this.generateInternalWithStreamFallback(
@@ -819,7 +867,7 @@ export class ProxyService {
               token.token.upstream_proxy_url,
               extraHeaders,
             );
-            const claudeResponse = transformResponse(response);
+            const claudeResponse = transformResponse(response, signatureContext);
             return this.convertClaudeToOpenAIResponse(claudeResponse, request.model);
           } catch (fallbackErr) {
             lastError = fallbackErr;
@@ -962,16 +1010,18 @@ export class ProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     outputProtocol: OpenAIOutputProtocol,
+    signatureContext?: SignatureContext,
   ): Observable<string> {
     if (outputProtocol === 'responses') {
-      return this.processResponsesStreamResponse(upstreamStream, model);
+      return this.processResponsesStreamResponse(upstreamStream, model, signatureContext);
     }
-    return this.processStreamResponse(upstreamStream, model);
+    return this.processStreamResponse(upstreamStream, model, signatureContext);
   }
 
   private processResponsesStreamResponse(
     upstreamStream: NodeJS.ReadableStream,
     model: string,
+    signatureContext?: SignatureContext,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
@@ -980,6 +1030,7 @@ export class ProxyService {
       const mapper = new OpenAIResponsesStreamingMapper({
         model,
         responseId: `resp_${uuidv4()}`,
+        signatureContext,
       });
       let heartbeatTimer: NodeJS.Timeout | undefined;
 
@@ -1175,6 +1226,7 @@ export class ProxyService {
   private processStreamResponse(
     upstreamStream: NodeJS.ReadableStream,
     model: string,
+    signatureContext?: SignatureContext,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
@@ -1182,6 +1234,8 @@ export class ProxyService {
       let hasEmittedChunk = false;
       let hasSentDone = false;
       const toolCallIndices = new Map<string, number>();
+      /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
+      let streamSignature: string | null = null;
 
       const streamId = `chatcmpl-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
@@ -1225,7 +1279,7 @@ export class ProxyService {
             for (const part of parts) {
               const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
               if (signature) {
-                SignatureStore.store(signature);
+                streamSignature = signature;
               }
 
               if (part.thought && part.text) {
@@ -1251,6 +1305,20 @@ export class ProxyService {
                   part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
                 const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
                 toolCallIndices.set(toolCallId, toolCallIndex);
+                // Capture for replay under the id the client actually sees (upstream id when
+                // Gemini supplies one, otherwise the generated id), keyed by the account/model
+                // that produced it.
+                const capturedSignature = signature ?? streamSignature;
+                if (capturedSignature && signatureContext) {
+                  SignatureStore.store(
+                    {
+                      accountId: signatureContext.accountId,
+                      model: signatureContext.model,
+                      toolCallId: toolCallId,
+                    },
+                    capturedSignature,
+                  );
+                }
                 const toolCallChunk = {
                   id: streamId,
                   object: 'chat.completion.chunk',

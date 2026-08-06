@@ -30,10 +30,16 @@ class TestableProxyService extends ProxyService {
     return (this as any).convertClaudeToOpenAIResponse(response, model);
   }
 
-  public streamToOpenAI(upstreamStream: any, model: string): Observable<string> {
-    return (this as any).processStreamResponse(upstreamStream, model);
+  public streamToOpenAI(
+    upstreamStream: any,
+    model: string,
+    signatureContext?: { accountId: string; model: string },
+  ): Observable<string> {
+    return (this as any).processStreamResponse(upstreamStream, model, signatureContext);
   }
 }
+
+const SIGNATURE_CONTEXT = { accountId: 'account-parity', model: 'gemini-3.6-flash-high' };
 
 function readFixture<T>(relativePath: string): T {
   const fullPath = path.join(process.cwd(), 'src/tests/fixtures/proxy-parity', relativePath);
@@ -264,7 +270,7 @@ describe('Proxy Parity Fixtures', () => {
     const outputChunks: string[] = [];
 
     const promise = new Promise<void>((resolve, reject) => {
-      service.streamToOpenAI(stream, 'gemini-3.6-flash-high').subscribe({
+      service.streamToOpenAI(stream, 'gemini-3.6-flash-high', SIGNATURE_CONTEXT).subscribe({
         next: (chunk) => outputChunks.push(chunk),
         error: reject,
         complete: resolve,
@@ -314,7 +320,7 @@ describe('Proxy Parity Fixtures', () => {
         { role: 'tool', tool_call_id: 'call_weather', content: '18 C and cloudy' },
       ],
     });
-    const body = transformClaudeRequestIn(followUp);
+    const body = transformClaudeRequestIn(followUp, undefined, undefined, SIGNATURE_CONTEXT);
     const [functionCallPart] = body.request.contents[0].parts;
     const [functionResponsePart] = body.request.contents[1].parts;
 

@@ -8,6 +8,7 @@ import {
   GroundingMetadata,
 } from './types';
 import { decodeSignature } from './signature-utils';
+import { SignatureContext, SignatureStore } from './SignatureStore';
 
 /**
  * Non-streaming response processor (Gemini -> Claude)
@@ -20,8 +21,10 @@ class NonStreamingProcessor {
   private thinkingSignature: string | null = null;
   private trailingSignature: string | null = null;
   private hasToolCall: boolean = false;
+  /** Signature seen earlier in THIS response, used only for tool calls of this same response. */
+  private responseSignature: string | null = null;
 
-  constructor() {}
+  constructor(private readonly signatureContext?: SignatureContext) {}
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
     const candidate = geminiResponse.candidates?.[0];
@@ -57,6 +60,9 @@ class NonStreamingProcessor {
 
   private processPart(part: GeminiPart) {
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature) || null;
+    if (signature) {
+      this.responseSignature = signature;
+    }
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
@@ -85,6 +91,20 @@ class NonStreamingProcessor {
         input: fc.args || {},
         signature: signature || undefined,
       };
+
+      // Capture for replay under the id the client actually sees (upstream id when Gemini
+      // supplies one, otherwise the generated id), keyed by the account/model that produced it.
+      const capturedSignature = signature ?? this.responseSignature;
+      if (capturedSignature && this.signatureContext) {
+        SignatureStore.store(
+          {
+            accountId: this.signatureContext.accountId,
+            model: this.signatureContext.model,
+            toolCallId: toolId,
+          },
+          capturedSignature,
+        );
+      }
 
       this.contentBlocks.push(toolUse);
       return;
@@ -245,7 +265,10 @@ class NonStreamingProcessor {
 /**
  * Public API: Transform Gemini Response to Claude Response
  */
-export function transformResponse(geminiResponse: GeminiResponse): ClaudeResponse {
-  const processor = new NonStreamingProcessor();
+export function transformResponse(
+  geminiResponse: GeminiResponse,
+  signatureContext?: SignatureContext,
+): ClaudeResponse {
+  const processor = new NonStreamingProcessor(signatureContext);
   return processor.process(geminiResponse);
 }
