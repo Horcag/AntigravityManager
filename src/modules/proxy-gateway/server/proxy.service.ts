@@ -368,8 +368,7 @@ export class ProxyService {
 
       let receivedData = false;
       const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
-        subscriber.next('data: {"type": "message_stop"}\n\ndata: [DONE]\n\n');
-        subscriber.complete();
+        subscriber.error(new Error('Upstream stream idle timeout after 300s'));
       });
 
       idleTimer.reset();

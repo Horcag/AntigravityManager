@@ -14,6 +14,7 @@ import { FastifyInstance } from 'fastify';
 const MEDIA_ENDPOINTS = new Set(['/v1/audio/transcriptions', '/v1/images/edits']);
 const JSON_MEDIA_ENDPOINTS = new Set([
   '/v1/chat/completions',
+  '/v1/messages',
   '/v1/responses',
   '/v1/images/edits',
   '/v1/audio/transcriptions',

@@ -450,6 +450,29 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(errorMessage).toBe('upstream interrupted');
   });
 
+  it('fails an idle Anthropic stream without emitting a success stop or OpenAI terminator', () => {
+    vi.useFakeTimers();
+    const service = new TestableProxyService();
+    (service as any).streamIdleTimeoutMs = 1;
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    let errorMessage = '';
+
+    service.testProcessStream(stream).subscribe({
+      next: (chunk) => chunks.push(chunk),
+      error: (error: Error) => {
+        errorMessage = error.message;
+      },
+    });
+
+    vi.advanceTimersByTime(1);
+    vi.useRealTimers();
+
+    expect(errorMessage).toBe('Upstream stream idle timeout after 300s');
+    expect(chunks.join('')).not.toContain('message_stop');
+    expect(chunks.join('')).not.toContain('[DONE]');
+  });
+
   it('propagates Gemini passthrough interruption errors', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();

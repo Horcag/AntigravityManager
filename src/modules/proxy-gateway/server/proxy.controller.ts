@@ -259,7 +259,7 @@ export class ProxyController {
         configuration,
       );
       if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result, true);
+        this.writeSseResponse(res, result, 'responses');
         return;
       }
 
@@ -550,7 +550,7 @@ export class ProxyController {
       const result = await this.proxyService.handleAnthropicMessages(body);
 
       if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result);
+        this.writeSseResponse(res, result, 'anthropic');
         return;
       } else {
         res.status(HttpStatus.OK).send(result);
@@ -2336,7 +2336,7 @@ export class ProxyController {
   private writeSseResponse(
     res: FastifyReply,
     stream: Observable<unknown>,
-    responsesProtocol = false,
+    wireProtocol: 'openai' | 'responses' | 'anthropic' = 'openai',
   ): void {
     if (!res.raw || !isFunction(res.raw.writeHead) || !isFunction(res.raw.write)) {
       res.header('Content-Type', 'text/event-stream');
@@ -2363,7 +2363,7 @@ export class ProxyController {
           return;
         }
         const payload = isString(chunk) ? chunk : String(chunk ?? '');
-        if (responsesProtocol) {
+        if (wireProtocol === 'responses') {
           const sequenceNumber = this.responsesSequenceNumber(payload);
           if (sequenceNumber !== null) {
             nextResponsesSequenceNumber = Math.max(nextResponsesSequenceNumber, sequenceNumber + 1);
@@ -2376,17 +2376,29 @@ export class ProxyController {
           return;
         }
         const mapped = mapOpenAIProtocolError(error);
-        const payload = responsesProtocol
-          ? {
-              code: mapped.error.code ?? 'server_error',
-              message: mapped.error.message,
-              param: mapped.error.param,
-              sequence_number: nextResponsesSequenceNumber,
-              type: 'error',
-            }
-          : { error: mapped.error };
+        const payload =
+          wireProtocol === 'responses'
+            ? {
+                code: mapped.error.code ?? 'server_error',
+                message: mapped.error.message,
+                param: mapped.error.param,
+                sequence_number: nextResponsesSequenceNumber,
+                type: 'error',
+              }
+            : wireProtocol === 'anthropic'
+              ? {
+                  type: 'error',
+                  error: {
+                    type:
+                      mapped.error.type === 'invalid_request_error'
+                        ? 'invalid_request_error'
+                        : 'api_error',
+                    message: mapped.error.message,
+                  },
+                }
+              : { error: mapped.error };
         res.raw.write(
-          responsesProtocol
+          wireProtocol === 'responses' || wireProtocol === 'anthropic'
             ? `event: error\ndata: ${JSON.stringify(payload)}\n\n`
             : `data: ${JSON.stringify(payload)}\n\n`,
         );

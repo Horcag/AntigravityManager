@@ -2,6 +2,7 @@ import { ConflictException, Controller, Module, Post, UnauthorizedException } fr
 import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import { APP_FILTER } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
+import { concat, of, throwError } from 'rxjs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FastifyMultipartProvider,
@@ -174,6 +175,7 @@ describe('OpenAI multipart media endpoints', () => {
 
   it.each([
     '/v1/chat/completions',
+    '/v1/messages',
     '/v1/responses',
     '/v1/images/edits',
     '/v1/audio/transcriptions',
@@ -222,7 +224,8 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
-  it('keeps unrelated OpenAI routes at Fastify default body limit', async () => {
+  it('accepts a valid 2 MiB Anthropic JSON request through the route-scoped media limit', async () => {
+    proxyService.handleAnthropicMessages.mockResolvedValue({ id: 'msg_1', type: 'message' });
     app = await createApp();
     await app.init();
 
@@ -233,10 +236,71 @@ describe('OpenAI multipart media endpoints', () => {
         method: 'POST',
         url: '/v1/messages',
         headers: { 'content-type': 'application/json' },
-        payload: JSON.stringify({ padding: 'x'.repeat(2 * 1024 * 1024) }),
+        payload: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: 'hi' }],
+          padding: 'x'.repeat(2 * 1024 * 1024),
+        }),
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+  });
+
+  it('keeps Anthropic JSON media requests bounded at 64 MiB with an Anthropic 413 envelope', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: 'hi' }],
+          padding: 'x'.repeat(MAX_JSON_MEDIA_BODY_BYTES),
+        }),
       });
 
     expect(response.statusCode).toBe(413);
+    expect(response.json()).toEqual({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'Request body too large.' },
+    });
+  });
+
+  it('emits an Anthropic SSE error event after a stream frame fails', async () => {
+    proxyService.handleAnthropicMessages.mockResolvedValue(
+      concat(
+        of('event: message_start\ndata: {"type":"message_start"}\n\n'),
+        throwError(() => new Error('upstream transport details')),
+      ),
+    );
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: true,
+        },
+      });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('event: message_start');
+    expect(response.body).toContain(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}\n\n',
+    );
+    expect(response.body).not.toContain('{"error":{"message":"Internal Server Error"');
   });
 
   it('preserves Anthropic errors through the assembled Nest and Fastify pipeline', async () => {

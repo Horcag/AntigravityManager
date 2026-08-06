@@ -1829,7 +1829,7 @@ describe('ProxyController Integration', () => {
       throwError(() => new Error('transport broke')),
     );
 
-    (controller as any).writeSseResponse(reply, stream, true);
+    (controller as any).writeSseResponse(reply, stream, 'responses');
 
     expect(raw.write).toHaveBeenLastCalledWith(
       'event: error\ndata: {"code":"server_error","message":"Internal Server Error","param":null,"sequence_number":5,"type":"error"}\n\n',
