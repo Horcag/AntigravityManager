@@ -135,17 +135,21 @@ export class OpenAIResponsesStreamingMapper {
     return groundingText ? this.processText(groundingText) : [];
   }
 
-  public complete(): string[] {
+  public complete(finishReason?: string | null): string[] {
     if (this.completed) {
       return [];
     }
     this.completed = true;
+    const incomplete = this.isMaxOutputTokensFinishReason(finishReason);
     const events = this.completeTextItem();
     for (const functionCall of this.pendingFunctionCalls) {
       events.push(...this.emitFunctionCall(functionCall));
     }
     events.push(
-      this.serialize({ response: this.response('completed'), type: 'response.completed' }),
+      this.serialize({
+        response: this.response(incomplete ? 'incomplete' : 'completed'),
+        type: incomplete ? 'response.incomplete' : 'response.completed',
+      }),
     );
     return events;
   }
@@ -329,23 +333,33 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private response(
-    status: 'completed' | 'failed' | 'in_progress',
+    status: 'completed' | 'failed' | 'in_progress' | 'incomplete',
     error: { code: string; message: string } | null = null,
   ): Record<string, unknown> {
-    const completedAt = status === 'completed' ? Math.floor(Date.now() / 1000) : null;
+    const completedAt =
+      status === 'completed' || status === 'incomplete' ? Math.floor(Date.now() / 1000) : null;
     return {
       id: this.options.responseId,
       object: 'response',
       created_at: this.createdAt,
       completed_at: completedAt,
       error,
-      incomplete_details: null,
+      incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
       model: this.options.model,
       output: status === 'failed' ? this.failedOutputItems() : this.outputItems,
       parallel_tool_calls: true,
       status,
-      usage: status === 'completed' ? this.usage() : null,
+      usage: status === 'completed' || status === 'incomplete' ? this.usage() : null,
     };
+  }
+
+  private isMaxOutputTokensFinishReason(finishReason?: string | null): boolean {
+    if (!finishReason) {
+      return false;
+    }
+
+    const normalized = finishReason.toUpperCase();
+    return normalized === 'MAX_TOKENS' || normalized === 'LENGTH';
   }
 
   private failedOutputItems(): ResponsesOutputItem[] {

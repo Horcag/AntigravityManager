@@ -136,6 +136,19 @@ describe('OpenAIResponsesStreamingMapper', () => {
     });
   });
 
+  it('emits an incomplete terminal response when Gemini reaches MAX_TOKENS case-insensitively', () => {
+    const mapper = createMapper();
+    const completed = mapper.complete('max_tokens').map(parseEvent).at(-1);
+
+    expect(completed).toMatchObject({
+      response: {
+        incomplete_details: { reason: 'max_output_tokens' },
+        status: 'incomplete',
+      },
+      type: 'response.incomplete',
+    });
+  });
+
   it('preserves real usage when later Gemini metadata has no counters', () => {
     const mapper = createMapper();
     mapper.setUsageMetadata({

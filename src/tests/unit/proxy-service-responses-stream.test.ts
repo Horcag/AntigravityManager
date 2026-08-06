@@ -125,6 +125,36 @@ describe('ProxyService Responses streaming', () => {
     });
   });
 
+  it('reports incomplete MAX_TOKENS Responses streams for live and synthetic paths', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"cut off"}]},"finishReason":"mAx_ToKeNs"}]}}\n\n',
+      ),
+    ]);
+    const liveEvents = (
+      await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+    const syntheticEvents = (
+      await lastValueFrom(
+        createSyntheticResponsesStream(service, {
+          choices: [{ finish_reason: 'length', message: { content: 'cut off' } }],
+          model: 'gemini-3-pro',
+        }).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    for (const events of [liveEvents, syntheticEvents]) {
+      expect(events.at(-1)).toMatchObject({
+        response: {
+          incomplete_details: { reason: 'max_output_tokens' },
+          status: 'incomplete',
+        },
+        type: 'response.incomplete',
+      });
+    }
+  });
+
   it('preserves Responses usage parity for live and synthetic Gemini thinking output', async () => {
     const service = new ProxyService({} as never, {} as never);
     const liveUpstream = Readable.from([

@@ -752,6 +752,34 @@ describe('ProxyController Integration', () => {
     );
   });
 
+  it('marks non-stream Responses output as incomplete when Chat reaches its length limit', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_length',
+        created: 1700000005,
+        model: 'gpt-4o',
+        choices: [
+          {
+            index: 0,
+            finish_reason: 'length',
+            message: { content: 'cut off' },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses({ model: 'gpt-4o', input: 'hi' }, reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        incomplete_details: { reason: 'max_output_tokens' },
+        status: 'incomplete',
+      }),
+    );
+  });
+
   it('accepts type-omitted Responses messages and valid function calls', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({

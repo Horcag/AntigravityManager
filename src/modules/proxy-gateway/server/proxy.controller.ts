@@ -1203,6 +1203,7 @@ export class ProxyController {
     const choice = response.choices?.[0];
     const content = choice?.message?.content;
     const text = isString(content) ? content : '';
+    const incomplete = choice?.finish_reason?.toLowerCase() === 'length';
     const output: Array<Record<string, unknown>> = [];
 
     if (text) {
@@ -1236,9 +1237,9 @@ export class ProxyController {
       id: this.normalizeResponsesId('resp', response.id),
       object: 'response',
       created_at: response.created,
-      status: 'completed',
+      status: incomplete ? 'incomplete' : 'completed',
       error: null,
-      incomplete_details: null,
+      incomplete_details: incomplete ? { reason: 'max_output_tokens' } : null,
       model: response.model,
       output,
       parallel_tool_calls: true,

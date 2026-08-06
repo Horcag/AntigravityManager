@@ -1135,13 +1135,13 @@ export class ProxyService {
         }
       };
 
-      const complete = (): void => {
+      const complete = (finishReason?: string): void => {
         if (completed) {
           return;
         }
         completed = true;
         clearHeartbeat();
-        for (const event of mapper.complete()) {
+        for (const event of mapper.complete(finishReason)) {
           subscriber.next(event);
         }
         subscriber.complete();
@@ -1240,7 +1240,7 @@ export class ProxyService {
             }
           }
           if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
-            complete();
+            complete(candidate.finishReason);
           }
         } catch (error) {
           const message =
@@ -1825,7 +1825,7 @@ export class ProxyService {
         }
       }
 
-      for (const event of mapper.complete()) {
+      for (const event of mapper.complete(choice?.finish_reason)) {
         subscriber.next(event);
       }
       subscriber.complete();
