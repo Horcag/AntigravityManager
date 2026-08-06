@@ -103,6 +103,21 @@ function parseSseData(chunks: string[]): Array<Record<string, unknown> | '[DONE]
     });
 }
 
+function parseResponsesSseData(chunks: string[]): Array<Record<string, unknown>> {
+  return chunks
+    .join('')
+    .split('\n\n')
+    .map((frame) => frame.trim())
+    .filter((frame) => frame.startsWith('event: '))
+    .map((frame) => {
+      const dataLine = frame.split('\n').find((line) => line.startsWith('data: '));
+      if (!dataLine) {
+        throw new Error('Responses SSE frame did not contain data');
+      }
+      return JSON.parse(dataLine.slice('data: '.length)) as Record<string, unknown>;
+    });
+}
+
 function isStringValue(value: unknown): value is string {
   return typeof value === 'string';
 }
@@ -423,7 +438,7 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(parseSseData(withoutUsage.chunks).at(-1)).toBe('[DONE]');
   });
 
-  it('deduplicates repeated tool call ids while preserving the first call and tool_calls finish', async () => {
+  it('suppresses same-frame exact tool call replays without shifting distinct call indices', async () => {
     const service = createService();
     const stream = new EventEmitter();
     const observable = invokePrivate<Observable<string>>(
@@ -445,7 +460,7 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
                   parts: [
                     { functionCall: { id: 'call_a', name: 'alpha', args: { a: 1 } } },
                     { functionCall: { id: 'call_b', name: 'beta', args: {} } },
-                    { functionCall: { id: 'call_a', name: 'alpha', args: { a: 2 } } },
+                    { functionCall: { id: 'call_a', name: 'alpha', args: { a: 1 } } },
                   ],
                 },
                 finishReason: 'STOP',
@@ -478,6 +493,97 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(payloads.at(-1)?.choices).toEqual([
       { index: 0, delta: {}, finish_reason: 'tool_calls' },
     ]);
+  });
+
+  it('fails a cross-frame conflicting explicit tool call id without emitting [DONE]', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const observable = invokePrivate<Observable<string>>(
+      service,
+      'processStreamResponse',
+      stream,
+      'gpt-4o-mini',
+    );
+
+    const outcome = await collectStream(
+      observable,
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { args: { city: 'London' }, id: 'call_1', name: 'weather' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        );
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { args: { city: 'Paris' }, id: 'call_1', name: 'weather' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        );
+        source.emit('end');
+      },
+      stream,
+    );
+
+    expect(outcome.completed).toBe(false);
+    expect(outcome.error?.message).toContain('Conflicting function call reuse');
+    expect(outcome.chunks.join('')).not.toContain('[DONE]');
+  });
+
+  it('emits terminal Responses error and failed events for a same-frame conflicting tool call id', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const observable = invokePrivate<Observable<string>>(
+      service,
+      'processResponsesStreamResponse',
+      stream,
+      'gpt-4o-mini',
+    );
+
+    const outcome = await collectStream(
+      observable,
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { functionCall: { args: { city: 'London' }, id: 'call_1', name: 'weather' } },
+                    { functionCall: { args: { city: 'Paris' }, id: 'call_1', name: 'weather' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        );
+        source.emit('end');
+      },
+      stream,
+    );
+    const events = parseResponsesSseData(outcome.chunks);
+
+    expect(outcome.completed).toBe(true);
+    expect(events.map((event) => event.type).slice(-2)).toEqual(['error', 'response.failed']);
+    expect(events.some((event) => event.type === 'response.completed')).toBe(false);
+    expect(events.map((event) => event.sequence_number)).toEqual(events.map((_, index) => index));
   });
 
   it('surfaces one terminal stream error for malformed upstream chat SSE', async () => {

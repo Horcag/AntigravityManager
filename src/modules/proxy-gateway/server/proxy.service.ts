@@ -12,6 +12,10 @@ import { StreamingState, PartProcessor } from '../antigravity/ClaudeStreamingMap
 import { type SignatureContext, SignatureStore } from '../antigravity/SignatureStore';
 import { decodeSignature } from '../antigravity/signature-utils';
 import {
+  ToolCallIdConflictError,
+  ToolCallIdIntegrityTracker,
+} from '../antigravity/tool-call-id-integrity';
+import {
   type GeminiResponsesGroundingMetadata,
   type GeminiResponsesStreamPart,
   type GeminiResponsesUsageMetadata,
@@ -434,6 +438,10 @@ export class ProxyService {
             // Reset error state on successful parse
             state.resetErrorState();
           } catch (e) {
+            if (e instanceof ToolCallIdConflictError) {
+              failStream(e);
+              return;
+            }
             this.logger.error('Stream parse error', e);
             const errorChunks = state.handleParseError(dataStr);
             errorChunks.forEach((c) => subscriber.next(c));
@@ -1499,6 +1507,7 @@ export class ProxyService {
       let emittedToolCall = false;
       let lastUsage: OpenAIStreamUsage | null = null;
       const toolCallIndices = new Map<string, number>();
+      const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
       /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
       let streamSignature: string | null = null;
 
@@ -1620,8 +1629,23 @@ export class ProxyService {
             if (part.functionCall) {
               const toolCallId =
                 part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
-              if (part.functionCall.id && toolCallIndices.has(toolCallId)) {
-                continue;
+              try {
+                if (
+                  toolCallIdIntegrity.record(
+                    part.functionCall.id,
+                    part.functionCall.name,
+                    part.functionCall.args,
+                  ) === 'replay'
+                ) {
+                  continue;
+                }
+              } catch (error) {
+                failStream(
+                  error instanceof Error
+                    ? error
+                    : new Error('Conflicting explicit function call id'),
+                );
+                return;
               }
               const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
               toolCallIndices.set(toolCallId, toolCallIndex);

@@ -81,6 +81,48 @@ describe('StreamingState', () => {
       expect(output).toContain('"message_stop"');
     });
 
+    it('suppresses an exact explicit tool call replay', () => {
+      const processor = new PartProcessor(state);
+      const first = processor.process({
+        functionCall: {
+          args: { query: 'gemini docs' },
+          id: 'call_stream_1',
+          name: 'builtin_web_search',
+        },
+      });
+      const replay = processor.process({
+        functionCall: {
+          args: { query: 'gemini docs' },
+          id: 'call_stream_1',
+          name: 'builtin_web_search',
+        },
+      });
+
+      expect(first.join('')).toContain('"type":"tool_use"');
+      expect(replay).toEqual([]);
+    });
+
+    it('rejects a conflicting explicit tool call id across frames', () => {
+      const processor = new PartProcessor(state);
+      processor.process({
+        functionCall: {
+          args: { query: 'gemini docs' },
+          id: 'call_stream_1',
+          name: 'builtin_web_search',
+        },
+      });
+
+      expect(() =>
+        processor.process({
+          functionCall: {
+            args: { query: 'other docs' },
+            id: 'call_stream_1',
+            name: 'builtin_web_search',
+          },
+        }),
+      ).toThrow('Conflicting function call reuse');
+    });
+
     it('aggregates grounding metadata into final text block', () => {
       state.webSearchQuery = 'gemini api';
       state.groundingChunks = [

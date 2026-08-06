@@ -1,5 +1,6 @@
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: { args: Record<string, unknown>; id?: string; name: string };
@@ -76,7 +77,7 @@ interface OpenAIResponsesStreamingMapperOptions {
 export class OpenAIResponsesStreamingMapper {
   private readonly createdAt = Math.floor(Date.now() / 1000);
   private readonly emittedToolCallIds = new Set<string>();
-  private readonly seenToolCallIds = new Set<string>();
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private readonly messageItemId: string;
   private readonly outputItems: ResponsesOutputItem[] = [];
   private readonly pendingFunctionCalls: PendingFunctionCall[] = [];
@@ -256,13 +257,13 @@ export class OpenAIResponsesStreamingMapper {
     signature?: string | null,
   ): string[] {
     const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
-    if (functionCall.id && this.seenToolCallIds.has(callId)) {
+    if (
+      this.toolCallIdIntegrity.record(functionCall.id, functionCall.name, functionCall.args) ===
+      'replay'
+    ) {
       return [];
     }
     const outputIndex = this.nextOutputIndex++;
-    if (functionCall.id) {
-      this.seenToolCallIds.add(callId);
-    }
     if (signature && this.options.signatureContext) {
       SignatureStore.store({ ...this.options.signatureContext, toolCallId: callId }, signature);
     }

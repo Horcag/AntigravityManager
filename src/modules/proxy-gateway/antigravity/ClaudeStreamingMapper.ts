@@ -1,6 +1,7 @@
 import { GeminiPart, Usage, UsageMetadata } from './types';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 import { logger } from '@/shared/logging/logger';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
@@ -291,6 +292,7 @@ export class StreamingState {
 export class PartProcessor {
   /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
   private streamSignature: string | null = null;
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
 
   constructor(
     private state: StreamingState,
@@ -448,6 +450,10 @@ export class PartProcessor {
     signature?: string,
   ): string[] {
     const chunks: string[] = [];
+
+    if (this.toolCallIdIntegrity.record(fc.id, fc.name, fc.args) === 'replay') {
+      return chunks;
+    }
 
     this.state.markToolUsed();
 

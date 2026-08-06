@@ -218,14 +218,14 @@ describe('OpenAIResponsesStreamingMapper', () => {
     });
   });
 
-  it('does not leave an output-index gap for a continued function call', () => {
+  it('does not leave an output-index gap for an exact function call replay', () => {
     const mapper = createMapper();
     const events = [
       ...mapper.processPart({
         functionCall: { args: { page: 1 }, id: 'call_search', name: 'search' },
       }),
       ...mapper.processPart({
-        functionCall: { args: { page: 2 }, id: 'call_search', name: 'search' },
+        functionCall: { args: { page: 1 }, id: 'call_search', name: 'search' },
       }),
       ...mapper.processPart({ text: 'Results ready' }),
       ...mapper.complete(),
@@ -242,6 +242,17 @@ describe('OpenAIResponsesStreamingMapper', () => {
       expect.objectContaining({ type: 'message' }),
     ]);
     expect(messageDone).toMatchObject({ output_index: 1 });
+  });
+
+  it('rejects a cross-frame explicit tool call id with different arguments', () => {
+    const mapper = createMapper();
+    mapper.processPart({ functionCall: { args: { page: 1 }, id: 'call_search', name: 'search' } });
+
+    expect(() =>
+      mapper.processPart({
+        functionCall: { args: { page: 2 }, id: 'call_search', name: 'search' },
+      }),
+    ).toThrow('Conflicting function call reuse');
   });
 
   it('terminates once with official-shaped error and failed events', () => {
