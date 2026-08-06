@@ -48,6 +48,14 @@ class TestableProxyService extends ProxyService {
     return (this as any).processAnthropicInternalStream(stream, model);
   }
 
+  public testOpenAIStream(stream: any, model: string = 'model'): Observable<string> {
+    return (this as any).processStreamResponse(stream, model);
+  }
+
+  public testResponsesStream(stream: any, model: string = 'model'): Observable<string> {
+    return (this as any).processResponsesStreamResponse(stream, model);
+  }
+
   public testPassthroughStream(stream: any): Observable<string> {
     return (this as any).passthroughSseStream(stream);
   }
@@ -374,6 +382,144 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       delta: { stop_reason: 'tool_use' },
     });
     expect(events.filter((event) => event.type === 'message_stop')).toHaveLength(1);
+  });
+
+  it('suppresses an exact same-frame tool replay on the assembled Anthropic wire', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    const payload = JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { functionCall: { args: { city: 'Samara' }, id: 'call_weather', name: 'weather' } },
+              { functionCall: { args: { city: 'Samara' }, id: 'call_weather', name: 'weather' } },
+            ],
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    stream.emit('data', Buffer.from(`data: ${payload}\n\n`));
+    stream.emit('end');
+    await completed;
+
+    const events = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+    expect(events.filter((event) => event.content_block?.type === 'tool_use')).toEqual([
+      expect.objectContaining({
+        content_block: expect.objectContaining({ id: 'call_weather', name: 'weather' }),
+      }),
+    ]);
+    expect(events.filter((event) => event.type === 'message_delta')).toEqual([
+      expect.objectContaining({ delta: expect.objectContaining({ stop_reason: 'tool_use' }) }),
+    ]);
+    expect(events.filter((event) => event.type === 'message_stop')).toHaveLength(1);
+  });
+
+  it('emits one Anthropic wire error for a same-frame conflicting tool id without success terminators', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+
+    (controller as any).writeSseResponse(
+      { hijack: vi.fn(), raw },
+      service.testProcessStream(stream),
+      'anthropic',
+    );
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":{"city":"Samara"},"id":"call_weather","name":"weather"}},{"functionCall":{"args":{"city":"Tolyatti"},"id":"call_weather","name":"weather"}}]}}]}\n\n',
+      ),
+    );
+
+    const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(output.match(/event: error/g)).toHaveLength(1);
+    expect(output).not.toContain('message_delta');
+    expect(output).not.toContain('message_stop');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
+  it('emits one OpenAI wire error and no DONE for a same-frame conflicting tool id', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+
+    (controller as any).writeSseResponse(
+      { hijack: vi.fn(), raw },
+      service.testOpenAIStream(stream),
+    );
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":{"city":"Samara"},"id":"call_weather","name":"weather"}},{"functionCall":{"args":{"city":"Tolyatti"},"id":"call_weather","name":"weather"}}]}}]}\n\n',
+      ),
+    );
+
+    const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
+    expect(output.match(/"error":\{/g)).toHaveLength(1);
+    expect(output).not.toContain('[DONE]');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
+  it('ends the assembled Responses wire with error then failed for a same-frame conflicting tool id', () => {
+    const service = new TestableProxyService();
+    const controller = new ProxyController({} as any);
+    const stream = new EventEmitter();
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+
+    (controller as any).writeSseResponse(
+      { hijack: vi.fn(), raw },
+      service.testResponsesStream(stream),
+      'responses',
+    );
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":{"city":"Samara"},"id":"call_weather","name":"weather"}},{"functionCall":{"args":{"city":"Tolyatti"},"id":"call_weather","name":"weather"}}]}}]}\n\n',
+      ),
+    );
+
+    const events = raw.write.mock.calls
+      .map(([chunk]) => String(chunk))
+      .filter((chunk) => chunk.startsWith('event: '))
+      .map((chunk) => JSON.parse(chunk.split('\n')[1].slice('data: '.length)));
+    expect(events.map((event) => event.type).slice(-2)).toEqual(['error', 'response.failed']);
+    expect(events.map((event) => event.sequence_number)).toEqual(events.map((_, index) => index));
+    expect(events.some((event) => event.type === 'response.completed')).toBe(false);
+    expect(raw.end).toHaveBeenCalledOnce();
   });
 
   it('emits one Anthropic wire error when only a done marker arrives', () => {
