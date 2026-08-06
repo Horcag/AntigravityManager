@@ -87,10 +87,8 @@ export class OpenAIResponsesStreamingMapper {
   public setUsageMetadata(usageMetadata: GeminiResponsesUsageMetadata | undefined): void {
     if (
       usageMetadata &&
-      (usageMetadata.promptTokenCount !== undefined ||
-        usageMetadata.candidatesTokenCount !== undefined ||
-        usageMetadata.thoughtsTokenCount !== undefined ||
-        usageMetadata.totalTokenCount !== undefined)
+      Number.isFinite(usageMetadata.promptTokenCount) &&
+      Number.isFinite(usageMetadata.candidatesTokenCount)
     ) {
       this.usageMetadata = usageMetadata;
     }
@@ -364,17 +362,27 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private usage(): Record<string, unknown> | null {
-    if (!this.usageMetadata) {
+    const usageMetadata = this.usageMetadata;
+    const inputTokens = usageMetadata?.promptTokenCount;
+    const candidateTokens = usageMetadata?.candidatesTokenCount;
+    if (
+      typeof inputTokens !== 'number' ||
+      !Number.isFinite(inputTokens) ||
+      typeof candidateTokens !== 'number' ||
+      !Number.isFinite(candidateTokens)
+    ) {
       return null;
     }
-    const inputTokens = this.usageMetadata.promptTokenCount ?? 0;
-    const outputTokens = this.usageMetadata.candidatesTokenCount ?? 0;
+    const thoughtsTokens = usageMetadata?.thoughtsTokenCount;
+    const reasoningTokens =
+      typeof thoughtsTokens === 'number' && Number.isFinite(thoughtsTokens) ? thoughtsTokens : 0;
+    const outputTokens = candidateTokens + reasoningTokens;
     return {
       input_tokens: inputTokens,
       input_tokens_details: { cached_tokens: 0 },
       output_tokens: outputTokens,
-      output_tokens_details: { reasoning_tokens: this.usageMetadata.thoughtsTokenCount ?? 0 },
-      total_tokens: this.usageMetadata.totalTokenCount ?? inputTokens + outputTokens,
+      output_tokens_details: { reasoning_tokens: reasoningTokens },
+      total_tokens: usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
     };
   }
 

@@ -2010,6 +2010,43 @@ describe('ProxyController Integration', () => {
     expect(responsesReply.send.mock.calls[0][0].usage).toBeNull();
   });
 
+  it('maps Chat reasoning-token details to Responses usage without changing totals', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_usage',
+        object: 'chat.completion',
+        created: 1700000004,
+        model: 'gpt-4o',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'done' },
+            logprobs: null,
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 3,
+          completion_tokens: 7,
+          completion_tokens_details: { reasoning_tokens: 2 },
+          total_tokens: 10,
+        },
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses({ model: 'gpt-4o', input: 'hi' }, reply as any);
+
+    expect(reply.send.mock.calls[0][0].usage).toEqual({
+      input_tokens: 3,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 7,
+      output_tokens_details: { reasoning_tokens: 2 },
+      total_tokens: 10,
+    });
+  });
+
   it('forwards legacy completion stop sequences and streams through the legacy protocol', async () => {
     const legacyStream = of(
       'data: {"object":"text_completion","choices":[{"text":"hi","index":0,"logprobs":null,"finish_reason":null}]}\n\n',

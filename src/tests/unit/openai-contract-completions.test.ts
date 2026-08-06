@@ -255,6 +255,7 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(usageChunk?.usage).toEqual({
       prompt_tokens: 11,
       completion_tokens: 9,
+      completion_tokens_details: { reasoning_tokens: 2 },
       total_tokens: 20,
     });
     expect(payloads.filter((payload) => (payload.choices as unknown[]).length === 0).length).toBe(
@@ -976,6 +977,7 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(response.usage).toEqual({
       prompt_tokens: 12,
       completion_tokens: 8,
+      completion_tokens_details: { reasoning_tokens: 2 },
       total_tokens: 20,
     });
     expect((response.choices as Array<Record<string, unknown>>)[0].logprobs).toBeNull();

@@ -27,7 +27,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
       candidatesTokenCount: 5,
       promptTokenCount: 3,
       thoughtsTokenCount: 2,
-      totalTokenCount: 8,
+      totalTokenCount: 10,
     });
     const events = [
       mapper.createResponseCreatedEvent(),
@@ -101,9 +101,9 @@ describe('OpenAIResponsesStreamingMapper', () => {
         usage: {
           input_tokens: 3,
           input_tokens_details: { cached_tokens: 0 },
-          output_tokens: 5,
+          output_tokens: 7,
           output_tokens_details: { reasoning_tokens: 2 },
-          total_tokens: 8,
+          total_tokens: 10,
         },
       },
     });
@@ -152,6 +152,28 @@ describe('OpenAIResponsesStreamingMapper', () => {
           input_tokens: 100,
           output_tokens: 50,
           total_tokens: 150,
+        },
+      },
+    });
+  });
+
+  it('keeps complete Gemini usage when later metadata is partial and counts reasoning once', () => {
+    const mapper = createMapper();
+    mapper.setUsageMetadata({
+      candidatesTokenCount: 5,
+      promptTokenCount: 3,
+      thoughtsTokenCount: 2,
+    });
+    mapper.setUsageMetadata({ totalTokenCount: 10 });
+    const completed = mapper.complete().map(parseEvent).at(-1);
+
+    expect(completed).toMatchObject({
+      response: {
+        usage: {
+          input_tokens: 3,
+          output_tokens: 7,
+          output_tokens_details: { reasoning_tokens: 2 },
+          total_tokens: 10,
         },
       },
     });

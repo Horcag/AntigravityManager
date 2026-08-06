@@ -1105,6 +1105,9 @@ export class ProxyService {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
       total_tokens: totalTokens,
+      ...(thoughtsTokens > 0
+        ? { completion_tokens_details: { reasoning_tokens: thoughtsTokens } }
+        : {}),
     };
   }
 
@@ -1796,9 +1799,11 @@ export class ProxyService {
       subscriber.next(mapper.createResponseCreatedEvent());
       subscriber.next(mapper.createResponseInProgressEvent());
       if (response.usage) {
+        const reasoningTokens = response.usage.completion_tokens_details?.reasoning_tokens ?? 0;
         mapper.setUsageMetadata({
-          candidatesTokenCount: response.usage.completion_tokens,
+          candidatesTokenCount: response.usage.completion_tokens - reasoningTokens,
           promptTokenCount: response.usage.prompt_tokens,
+          thoughtsTokenCount: reasoningTokens,
           totalTokenCount: response.usage.total_tokens,
         });
       }

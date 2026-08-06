@@ -1252,7 +1252,7 @@ export class ProxyController {
             },
             output_tokens: response.usage.completion_tokens,
             output_tokens_details: {
-              reasoning_tokens: 0,
+              reasoning_tokens: response.usage.completion_tokens_details?.reasoning_tokens ?? 0,
             },
             total_tokens: response.usage.total_tokens,
           }

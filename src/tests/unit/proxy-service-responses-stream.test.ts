@@ -100,6 +100,42 @@ describe('ProxyService Responses streaming', () => {
     });
   });
 
+  it('preserves Responses usage parity for live and synthetic Gemini thinking output', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const liveUpstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":10}}}\n',
+      ),
+    ]);
+    const liveEvents = (
+      await lastValueFrom(createResponsesStream(service, liveUpstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+    const syntheticEvents = (
+      await lastValueFrom(
+        createSyntheticResponsesStream(service, {
+          choices: [{ message: { content: 'ok' } }],
+          model: 'gemini-3-pro',
+          usage: {
+            completion_tokens: 7,
+            completion_tokens_details: { reasoning_tokens: 2 },
+            prompt_tokens: 3,
+            total_tokens: 10,
+          },
+        }).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    const expectedUsage = {
+      input_tokens: 3,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 7,
+      output_tokens_details: { reasoning_tokens: 2 },
+      total_tokens: 10,
+    };
+    expect(liveEvents.at(-1)).toMatchObject({ response: { usage: expectedUsage } });
+    expect(syntheticEvents.at(-1)).toMatchObject({ response: { usage: expectedUsage } });
+  });
+
   it('reports null usage rather than fabricated counters when synthetic usage is unavailable', async () => {
     const stream = createSyntheticResponsesStream(new ProxyService({} as never, {} as never), {
       choices: [{ message: { content: 'ok' } }],
