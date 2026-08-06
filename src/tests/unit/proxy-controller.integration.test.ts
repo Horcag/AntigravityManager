@@ -2,7 +2,7 @@ import { Module, UnauthorizedException } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter } from '@nestjs/platform-fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { of } from 'rxjs';
+import { concat, of, throwError } from 'rxjs';
 
 import { getServerConfig } from '../../server/server-config';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/account-lease.service';
@@ -819,7 +819,20 @@ describe('ProxyController Integration', () => {
         id: 'resp_resp',
         object: 'response',
         model: 'gpt-4o',
+        instructions: 'Follow the tool protocol',
+        max_output_tokens: null,
+        metadata: {},
+        parallel_tool_calls: true,
+        previous_response_id: null,
+        reasoning: null,
         status: 'completed',
+        store: false,
+        temperature: 1,
+        text: { format: { type: 'text' } },
+        tool_choice: { type: 'function', function: { name: 'search_docs' } },
+        tools: [],
+        top_p: 1,
+        truncation: 'disabled',
         output: [
           expect.objectContaining({
             id: 'msg_resp',
@@ -1162,6 +1175,31 @@ describe('ProxyController Integration', () => {
     );
   });
 
+  it.each(['content_filter', 'SAFETY', 'recitation'])(
+    'maps non-stream Responses finish reason %s to content_filter',
+    async (finishReason) => {
+      const proxyService = {
+        handleChatCompletions: vi.fn().mockResolvedValue({
+          id: 'chatcmpl_filtered',
+          created: 1700000006,
+          model: 'gpt-4o',
+          choices: [{ finish_reason: finishReason, message: { content: '' } }],
+        }),
+      };
+      const controller = new ProxyController(proxyService as any);
+      const reply = createReplyMock();
+
+      await controller.responses({ model: 'gpt-4o', input: 'hi' }, reply as any);
+
+      expect(reply.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          incomplete_details: { reason: 'content_filter' },
+          status: 'incomplete',
+        }),
+      );
+    },
+  );
+
   it('accepts type-omitted Responses messages and valid function calls', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({
@@ -1211,6 +1249,11 @@ describe('ProxyController Integration', () => {
         ]),
       }),
       'responses',
+      expect.objectContaining({
+        parallel_tool_calls: true,
+        tool_choice: 'auto',
+        tools: [],
+      }),
     );
   });
 
@@ -1284,7 +1327,35 @@ describe('ProxyController Integration', () => {
     expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
       expect.any(Object),
       'responses',
+      expect.objectContaining({
+        instructions: 'stream output',
+        temperature: 1,
+        top_p: 1,
+      }),
     );
+  });
+
+  it('writes a valid sequenced Responses error event for a transport-level stream failure', () => {
+    const controller = new ProxyController({} as any);
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const reply = { hijack: vi.fn(), raw };
+    const stream = concat(
+      of('event: response.in_progress\ndata: {"sequence_number":4}\n\n'),
+      throwError(() => new Error('transport broke')),
+    );
+
+    (controller as any).writeSseResponse(reply, stream, true);
+
+    expect(raw.write).toHaveBeenLastCalledWith(
+      'event: error\ndata: {"code":"server_error","message":"transport broke","param":null,"sequence_number":5,"type":"error"}\n\n',
+    );
+    expect(raw.end).toHaveBeenCalledOnce();
   });
 
   it('normalizes web_search_call in /v1/responses into builtin_web_search tool messages', async () => {
@@ -2266,6 +2337,11 @@ describe('ProxyController Integration', () => {
           ],
         }),
         'responses',
+        expect.objectContaining({
+          parallel_tool_calls: true,
+          tool_choice: 'auto',
+          tools: [],
+        }),
       );
     } finally {
       await app.close();

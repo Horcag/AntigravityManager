@@ -22,6 +22,22 @@ export interface GeminiResponsesUsageMetadata {
   totalTokenCount?: number;
 }
 
+export interface OpenAIResponsesConfiguration {
+  instructions: string | null;
+  max_output_tokens: number | null;
+  metadata: Record<string, never>;
+  parallel_tool_calls: true;
+  previous_response_id: null;
+  reasoning: null;
+  store: false;
+  temperature: number;
+  text: { format: { type: 'text' } };
+  tool_choice: unknown;
+  tools: unknown[];
+  top_p: number;
+  truncation: 'disabled';
+}
+
 interface ResponsesMessageOutputItem {
   content: Array<{ annotations: []; text: string; type: 'output_text' }>;
   id: string;
@@ -50,6 +66,7 @@ interface PendingFunctionCall {
 type ResponsesOutputItem = ResponsesMessageOutputItem | ResponsesFunctionCallOutputItem;
 
 interface OpenAIResponsesStreamingMapperOptions {
+  configuration?: OpenAIResponsesConfiguration;
   model: string;
   responseId: string;
   signatureContext?: SignatureContext;
@@ -59,6 +76,7 @@ interface OpenAIResponsesStreamingMapperOptions {
 export class OpenAIResponsesStreamingMapper {
   private readonly createdAt = Math.floor(Date.now() / 1000);
   private readonly emittedToolCallIds = new Set<string>();
+  private readonly seenToolCallIds = new Set<string>();
   private readonly messageItemId: string;
   private readonly outputItems: ResponsesOutputItem[] = [];
   private readonly pendingFunctionCalls: PendingFunctionCall[] = [];
@@ -140,14 +158,15 @@ export class OpenAIResponsesStreamingMapper {
       return [];
     }
     this.completed = true;
-    const incomplete = this.isMaxOutputTokensFinishReason(finishReason);
+    const incompleteReason = this.incompleteReason(finishReason);
+    const incomplete = incompleteReason !== null;
     const events = this.completeTextItem(incomplete);
     for (const functionCall of this.pendingFunctionCalls) {
       events.push(...this.emitFunctionCall(functionCall));
     }
     events.push(
       this.serialize({
-        response: this.response(incomplete ? 'incomplete' : 'completed'),
+        response: this.response(incomplete ? 'incomplete' : 'completed', null, incompleteReason),
         type: incomplete ? 'response.incomplete' : 'response.completed',
       }),
     );
@@ -237,12 +256,12 @@ export class OpenAIResponsesStreamingMapper {
     signature?: string | null,
   ): string[] {
     const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
-    if (functionCall.id && this.emittedToolCallIds.has(callId)) {
+    if (functionCall.id && this.seenToolCallIds.has(callId)) {
       return [];
     }
     const outputIndex = this.nextOutputIndex++;
     if (functionCall.id) {
-      this.emittedToolCallIds.add(callId);
+      this.seenToolCallIds.add(callId);
     }
     if (signature && this.options.signatureContext) {
       SignatureStore.store({ ...this.options.signatureContext, toolCallId: callId }, signature);
@@ -275,6 +294,7 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private emitFunctionCall(functionCall: PendingFunctionCall): string[] {
+    this.emittedToolCallIds.add(functionCall.callId);
     const inProgressItem = {
       arguments: '',
       call_id: functionCall.callId,
@@ -336,6 +356,7 @@ export class OpenAIResponsesStreamingMapper {
   private response(
     status: 'completed' | 'failed' | 'in_progress' | 'incomplete',
     error: { code: string; message: string } | null = null,
+    incompleteReason: 'content_filter' | 'max_output_tokens' | null = null,
   ): Record<string, unknown> {
     const completedAt = status === 'completed' ? Math.floor(Date.now() / 1000) : null;
     return {
@@ -344,35 +365,68 @@ export class OpenAIResponsesStreamingMapper {
       created_at: this.createdAt,
       completed_at: completedAt,
       error,
-      incomplete_details: status === 'incomplete' ? { reason: 'max_output_tokens' } : null,
+      incomplete_details: incompleteReason ? { reason: incompleteReason } : null,
       model: this.options.model,
       output: status === 'failed' ? this.failedOutputItems() : this.outputItems,
-      parallel_tool_calls: true,
+      ...this.configuration(),
       status,
       usage: status === 'completed' || status === 'incomplete' ? this.usage() : null,
     };
   }
 
-  private isMaxOutputTokensFinishReason(finishReason?: string | null): boolean {
+  private incompleteReason(
+    finishReason?: string | null,
+  ): 'content_filter' | 'max_output_tokens' | null {
     if (!finishReason) {
-      return false;
+      return null;
     }
 
     const normalized = finishReason.toUpperCase();
-    return normalized === 'MAX_TOKENS' || normalized === 'LENGTH';
+    if (normalized === 'MAX_TOKENS' || normalized === 'LENGTH') {
+      return 'max_output_tokens';
+    }
+    if (normalized === 'SAFETY' || normalized === 'RECITATION') {
+      return 'content_filter';
+    }
+    return null;
   }
 
   private failedOutputItems(): ResponsesOutputItem[] {
-    return this.outputItems.map((item) => {
-      if (item.type !== 'message') {
-        return item;
+    return this.outputItems.reduce<ResponsesOutputItem[]>((items, item) => {
+      if (item.type === 'function_call' && !this.emittedToolCallIds.has(item.call_id)) {
+        return items;
       }
-      return {
+      if (item.type !== 'message') {
+        items.push(item);
+        return items;
+      }
+      items.push({
         ...item,
         content: [{ annotations: [], text: this.accumulatedText, type: 'output_text' }],
         status: 'in_progress',
-      };
-    });
+      });
+      return items;
+    }, []);
+  }
+
+  private configuration(): OpenAIResponsesConfiguration {
+    return (
+      this.options.configuration ?? {
+        instructions: null,
+        max_output_tokens: null,
+        metadata: {},
+        parallel_tool_calls: true,
+        previous_response_id: null,
+        reasoning: null,
+        store: false,
+        temperature: 1,
+        text: { format: { type: 'text' } },
+        tool_choice: 'auto',
+        tools: [],
+        top_p: 1,
+        truncation: 'disabled',
+      }
+    );
   }
 
   private usage(): Record<string, unknown> | null {

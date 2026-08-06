@@ -55,6 +55,7 @@ import {
   sendOpenAIProtocolError,
 } from './openai-protocol-error';
 import { isMultipartParserOrLimitError } from './fastify-multipart.provider';
+import { type OpenAIResponsesConfiguration } from '../antigravity/OpenAIResponsesStreamingMapper';
 
 type InlineInput = string | { data?: string; mimeType?: string };
 
@@ -247,16 +248,21 @@ export class ProxyController {
     this.validateTools(body.tools, body.tool_choice);
     this.validateResponsesOptions(body);
     const request = this.buildResponsesChatRequest(body);
+    const configuration = this.createResponsesConfiguration(body);
 
     try {
-      const result = await this.proxyService.handleChatCompletions(request, 'responses');
+      const result = await this.proxyService.handleChatCompletions(
+        request,
+        'responses',
+        configuration,
+      );
       if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result);
+        this.writeSseResponse(res, result, true);
         return;
       }
 
       const response = result as OpenAIChatResponse;
-      res.status(HttpStatus.OK).send(this.toResponsesResponse(response));
+      res.status(HttpStatus.OK).send(this.toResponsesResponse(response, configuration));
     } catch (error) {
       this.sendOpenAIErrorResponse(res, '/v1/responses', error);
     }
@@ -1316,11 +1322,23 @@ export class ProxyController {
     return payload;
   }
 
-  private toResponsesResponse(response: OpenAIChatResponse): Record<string, unknown> {
+  private toResponsesResponse(
+    response: OpenAIChatResponse,
+    configuration: OpenAIResponsesConfiguration,
+  ): Record<string, unknown> {
     const choice = response.choices?.[0];
     const content = choice?.message?.content;
     const text = isString(content) ? content : '';
-    const incomplete = choice?.finish_reason?.toLowerCase() === 'length';
+    const finishReason = choice?.finish_reason?.toLowerCase();
+    const incompleteReason =
+      finishReason === 'length'
+        ? 'max_output_tokens'
+        : finishReason === 'content_filter' ||
+            finishReason === 'safety' ||
+            finishReason === 'recitation'
+          ? 'content_filter'
+          : null;
+    const incomplete = incompleteReason !== null;
     const output: Array<Record<string, unknown>> = [];
     const allocatedOutputIds = new Set<string>();
 
@@ -1357,10 +1375,10 @@ export class ProxyController {
       created_at: response.created,
       status: incomplete ? 'incomplete' : 'completed',
       error: null,
-      incomplete_details: incomplete ? { reason: 'max_output_tokens' } : null,
+      incomplete_details: incompleteReason ? { reason: incompleteReason } : null,
       model: response.model,
       output,
-      parallel_tool_calls: true,
+      ...configuration,
       // The Responses contract types usage as nullable, so an unknown usage is reported
       // as null instead of a fabricated zero breakdown.
       usage: response.usage
@@ -1586,6 +1604,27 @@ export class ProxyController {
       temperature: body.temperature,
       top_p: body.top_p,
       stream: body.stream,
+    };
+  }
+
+  private createResponsesConfiguration(body: OpenAIResponsesRequest): OpenAIResponsesConfiguration {
+    return {
+      instructions:
+        isString(body.instructions) && !isEmpty(body.instructions.trim())
+          ? body.instructions
+          : null,
+      max_output_tokens: body.max_output_tokens ?? null,
+      metadata: {},
+      parallel_tool_calls: true,
+      previous_response_id: null,
+      reasoning: null,
+      store: false,
+      temperature: body.temperature ?? 1,
+      text: { format: { type: 'text' } },
+      tool_choice: body.tool_choice ?? 'auto',
+      tools: body.tools ? [...body.tools] : [],
+      top_p: body.top_p ?? 1,
+      truncation: 'disabled',
     };
   }
 
@@ -2034,7 +2073,11 @@ export class ProxyController {
     return isObjectLike(value) && isFunction((value as { subscribe?: unknown }).subscribe);
   }
 
-  private writeSseResponse(res: FastifyReply, stream: Observable<unknown>): void {
+  private writeSseResponse(
+    res: FastifyReply,
+    stream: Observable<unknown>,
+    responsesProtocol = false,
+  ): void {
     if (!res.raw || !isFunction(res.raw.writeHead) || !isFunction(res.raw.write)) {
       res.header('Content-Type', 'text/event-stream');
       res.header('Cache-Control', 'no-cache');
@@ -2053,12 +2096,19 @@ export class ProxyController {
       Connection: 'keep-alive',
     });
 
+    let nextResponsesSequenceNumber = 0;
     const subscription = stream.subscribe({
       next: (chunk) => {
         if (res.raw.writableEnded) {
           return;
         }
         const payload = isString(chunk) ? chunk : String(chunk ?? '');
+        if (responsesProtocol) {
+          const sequenceNumber = this.responsesSequenceNumber(payload);
+          if (sequenceNumber !== null) {
+            nextResponsesSequenceNumber = Math.max(nextResponsesSequenceNumber, sequenceNumber + 1);
+          }
+        }
         res.raw.write(payload);
       },
       error: (error) => {
@@ -2066,10 +2116,19 @@ export class ProxyController {
           return;
         }
         const mapped = mapOpenAIProtocolError(error);
+        const payload = responsesProtocol
+          ? {
+              code: mapped.error.code ?? 'server_error',
+              message: mapped.error.message,
+              param: mapped.error.param,
+              sequence_number: nextResponsesSequenceNumber,
+              type: 'error',
+            }
+          : { error: mapped.error };
         res.raw.write(
-          `data: ${JSON.stringify({
-            error: mapped.error,
-          })}\n\n`,
+          responsesProtocol
+            ? `event: error\ndata: ${JSON.stringify(payload)}\n\n`
+            : `data: ${JSON.stringify(payload)}\n\n`,
         );
         res.raw.end();
       },
@@ -2083,6 +2142,19 @@ export class ProxyController {
     res.raw.on('close', () => {
       subscription.unsubscribe();
     });
+  }
+
+  private responsesSequenceNumber(payload: string): number | null {
+    const dataLine = payload.split('\n').find((line) => line.startsWith('data:'));
+    if (!dataLine) {
+      return null;
+    }
+    try {
+      const parsed = this.toRecord(JSON.parse(dataLine.slice('data:'.length).trim()));
+      return isNumber(parsed?.sequence_number) ? parsed.sequence_number : null;
+    } catch {
+      return null;
+    }
   }
 
   private async sendOpenAIImageGenerationResponse(

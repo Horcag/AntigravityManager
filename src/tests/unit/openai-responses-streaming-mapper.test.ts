@@ -162,6 +162,19 @@ describe('OpenAIResponsesStreamingMapper', () => {
     expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
   });
 
+  it.each(['SAFETY', 'recitation'])('maps %s to content-filter incompleteness', (finishReason) => {
+    const mapper = createMapper();
+    const terminal = mapper.complete(finishReason).map(parseEvent).at(-1);
+
+    expect(terminal).toMatchObject({
+      response: {
+        incomplete_details: { reason: 'content_filter' },
+        status: 'incomplete',
+      },
+      type: 'response.incomplete',
+    });
+  });
+
   it('preserves real usage when later Gemini metadata has no counters', () => {
     const mapper = createMapper();
     mapper.setUsageMetadata({
@@ -250,11 +263,23 @@ describe('OpenAIResponsesStreamingMapper', () => {
           error: { code: 'upstream_error', message: 'bad upstream' },
           id: 'resp_test',
           incomplete_details: null,
+          instructions: null,
+          max_output_tokens: null,
+          metadata: {},
           model: 'gemini-3-pro',
           object: 'response',
           output: [],
           parallel_tool_calls: true,
+          previous_response_id: null,
+          reasoning: null,
           status: 'failed',
+          store: false,
+          temperature: 1,
+          text: { format: { type: 'text' } },
+          tool_choice: 'auto',
+          tools: [],
+          top_p: 1,
+          truncation: 'disabled',
           usage: null,
         },
         sequence_number: 1,
@@ -279,5 +304,16 @@ describe('OpenAIResponsesStreamingMapper', () => {
         ],
       },
     });
+  });
+
+  it('drops buffered tool calls from a failed response until their lifecycle was emitted', () => {
+    const mapper = createMapper();
+    mapper.processPart({ text: 'partial' });
+    mapper.processPart({ functionCall: { args: {}, id: 'call_late', name: 'search' } });
+    const failedResponse = mapper.fail('upstream disconnected').map(parseEvent)[1];
+
+    expect((failedResponse.response as Record<string, unknown>).output).toEqual([
+      expect.objectContaining({ type: 'message' }),
+    ]);
   });
 });

@@ -15,6 +15,7 @@ import {
   type GeminiResponsesGroundingMetadata,
   type GeminiResponsesStreamPart,
   type GeminiResponsesUsageMetadata,
+  type OpenAIResponsesConfiguration,
   OpenAIResponsesStreamingMapper,
 } from '../antigravity/OpenAIResponsesStreamingMapper';
 import {
@@ -749,6 +750,7 @@ export class ProxyService {
   async handleChatCompletions(
     request: OpenAIChatRequest,
     outputProtocol: OpenAIOutputProtocol = 'chat-completions',
+    responsesConfiguration?: OpenAIResponsesConfiguration,
   ): Promise<OpenAIChatResponse | Observable<string>> {
     const sessionKey = this.extractOpenAISessionKey(request);
 
@@ -821,6 +823,7 @@ export class ProxyService {
               outputProtocol,
               streamOptions,
               signatureContext,
+              responsesConfiguration,
             );
           } catch (streamError) {
             this.logger.warn(
@@ -846,7 +849,7 @@ export class ProxyService {
               outputProtocol,
             );
             return outputProtocol === 'responses'
-              ? this.createSyntheticResponsesStream(openaiResponse)
+              ? this.createSyntheticResponsesStream(openaiResponse, responsesConfiguration)
               : this.createSyntheticOpenAIStream(openaiResponse, streamOptions);
           }
         } else {
@@ -899,6 +902,7 @@ export class ProxyService {
                 outputProtocol,
                 streamOptions,
                 signatureContext,
+                responsesConfiguration,
               );
             }
 
@@ -1058,9 +1062,15 @@ export class ProxyService {
     outputProtocol: OpenAIOutputProtocol,
     streamOptions: OpenAIStreamOptions,
     signatureContext?: SignatureContext,
+    responsesConfiguration?: OpenAIResponsesConfiguration,
   ): Observable<string> {
     if (outputProtocol === 'responses') {
-      return this.processResponsesStreamResponse(upstreamStream, model, signatureContext);
+      return this.processResponsesStreamResponse(
+        upstreamStream,
+        model,
+        signatureContext,
+        responsesConfiguration,
+      );
     }
     return this.processStreamResponse(upstreamStream, model, signatureContext, streamOptions);
   }
@@ -1115,6 +1125,7 @@ export class ProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     signatureContext?: SignatureContext,
+    responsesConfiguration?: OpenAIResponsesConfiguration,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
@@ -1125,6 +1136,7 @@ export class ProxyService {
         model,
         responseId: `resp_${uuidv4()}`,
         signatureContext,
+        configuration: responsesConfiguration,
       });
       let heartbeatTimer: NodeJS.Timeout | undefined;
 
@@ -1786,11 +1798,15 @@ export class ProxyService {
     });
   }
 
-  private createSyntheticResponsesStream(response: OpenAIChatResponse): Observable<string> {
+  private createSyntheticResponsesStream(
+    response: OpenAIChatResponse,
+    configuration?: OpenAIResponsesConfiguration,
+  ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const mapper = new OpenAIResponsesStreamingMapper({
         model: response.model,
         responseId: `resp_${uuidv4()}`,
+        configuration,
       });
       const choice = response.choices?.[0];
       const content =
