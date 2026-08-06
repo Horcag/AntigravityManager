@@ -2309,6 +2309,29 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
   });
 
+  it('returns the OpenAI multipart parse error shape for an image edit without a boundary', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      {},
+      { headers: { 'content-type': 'multipart/form-data' } } as any,
+      reply as any,
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'Invalid boundary for multipart/form-data request.',
+        type: 'invalid_request_error',
+        param: null,
+        code: 'multipart_parse_error',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('defaults the image edit model when it is omitted', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({

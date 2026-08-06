@@ -2188,7 +2188,7 @@ export class ProxyController {
       error: {
         message,
         type: 'invalid_request_error',
-        ...(param ? { param } : {}),
+        param: param ?? null,
         code,
       },
     });
