@@ -258,8 +258,16 @@ describe('Proxy Parity Fixtures', () => {
     const chunks = outputChunks
       .filter((chunk) => chunk.startsWith('data: {'))
       .map((chunk) => JSON.parse(chunk.slice('data: '.length)));
-    expect(chunks.map((chunk) => chunk.choices[0].index)).toEqual([0, 0, 0]);
-    expect(chunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].index)).toEqual([0, 1, 0]);
+    expect(chunks[0]?.choices).toEqual([
+      { index: 0, delta: { role: 'assistant' }, finish_reason: null },
+    ]);
+    expect(chunks.filter((chunk) => chunk.choices[0].delta.role === 'assistant')).toHaveLength(1);
+
+    const toolCallChunks = chunks.filter((chunk) => chunk.choices[0].delta.tool_calls);
+    expect(toolCallChunks.map((chunk) => chunk.choices[0].index)).toEqual([0, 0, 0]);
+    expect(toolCallChunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].index)).toEqual([
+      0, 1, 0,
+    ]);
     expect(outputChunks.at(-1)).toBe('data: [DONE]\n\n');
   });
 
