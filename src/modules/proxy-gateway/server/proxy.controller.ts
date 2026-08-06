@@ -57,6 +57,14 @@ interface MediaInput {
   quality?: string;
   n?: string;
   responseFormat?: string;
+  outputFormat?: string;
+  background?: string;
+  moderation?: string;
+  outputCompression?: string;
+  partialImages?: string;
+  stream?: string;
+  style?: string;
+  inputFidelity?: string;
   language?: string;
   temperature?: number;
   invalidTemperature: boolean;
@@ -66,6 +74,26 @@ interface MediaInput {
   mask?: InlineInput;
   file?: InlineInput;
   audio?: InlineInput;
+}
+
+interface ImageOptionInput {
+  n?: number | string;
+  response_format?: string;
+  responseFormat?: string;
+  output_format?: string;
+  outputFormat?: string;
+  size?: string;
+  quality?: string;
+  background?: string;
+  moderation?: string;
+  output_compression?: number | string;
+  outputCompression?: string;
+  partial_images?: number | string;
+  partialImages?: string;
+  stream?: boolean | string;
+  style?: string;
+  input_fidelity?: string;
+  inputFidelity?: string;
 }
 
 @Controller('v1')
@@ -203,10 +231,24 @@ export class ProxyController {
       prompt?: string;
       size?: string;
       quality?: string;
+      n?: number | string;
+      response_format?: string;
+      output_format?: string;
+      background?: string;
+      moderation?: string;
+      output_compression?: number | string;
+      partial_images?: number | string;
+      stream?: boolean | string;
+      style?: string;
+      input_fidelity?: string;
+      user?: string;
     },
     @Res() res: FastifyReply,
   ) {
     this.requireNonEmptyString(body.prompt, 'prompt');
+    if (!this.validateImageOptions(body, res)) {
+      return;
+    }
     const request: OpenAIChatRequest = {
       model: body.model ?? 'gemini-3-pro-image',
       messages: [
@@ -233,6 +275,15 @@ export class ProxyController {
       quality?: string;
       n?: number | string;
       response_format?: string;
+      output_format?: string;
+      background?: string;
+      moderation?: string;
+      output_compression?: number | string;
+      partial_images?: number | string;
+      stream?: boolean | string;
+      style?: string;
+      input_fidelity?: string;
+      user?: string;
       image?: InlineInput;
       reference_images?: InlineInput[];
       mask?: InlineInput;
@@ -247,30 +298,19 @@ export class ProxyController {
     const input = this.mergeMediaInput(body ?? {}, multipart);
     this.requireNonEmptyString(input.prompt, 'prompt');
 
-    if (input.n && input.n !== '1') {
-      this.sendInvalidRequest(
-        res,
-        'Only n=1 is supported by this proxy.',
-        'n',
-        'unsupported_option',
-      );
+    if (!this.validateImageOptions(input, res)) {
       return;
     }
-    if (input.responseFormat && input.responseFormat !== 'b64_json') {
-      this.sendInvalidRequest(
+    if (input.mask) {
+      this.sendUnsupportedImageOption(
         res,
-        'Only response_format=b64_json is supported by this proxy.',
-        'response_format',
-        'unsupported_option',
+        'mask is not supported because this proxy cannot preserve mask semantics.',
+        'mask',
       );
       return;
     }
 
-    const imageParts = this.collectImageContentParts([
-      ...input.images,
-      input.mask,
-      ...input.referenceImages,
-    ]);
+    const imageParts = this.collectImageContentParts([...input.images, ...input.referenceImages]);
     if (imageParts.length === 0) {
       this.sendInvalidRequest(
         res,
@@ -373,26 +413,23 @@ export class ProxyController {
     }
 
     try {
-      const result = await this.proxyService.handleGeminiGenerateContent(
-        input.model,
-        {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: this.buildTranscriptionPrompt(input.prompt, input.language),
-                },
-                {
-                  inlineData: inlineAudio,
-                },
-              ],
-            },
-          ],
-          generationConfig:
-            input.temperature === undefined ? undefined : { temperature: input.temperature },
-        },
-      );
+      const result = await this.proxyService.handleGeminiGenerateContent(input.model, {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: this.buildTranscriptionPrompt(input.prompt, input.language),
+              },
+              {
+                inlineData: inlineAudio,
+              },
+            ],
+          },
+        ],
+        generationConfig:
+          input.temperature === undefined ? undefined : { temperature: input.temperature },
+      });
 
       const text = result.candidates?.[0]?.content?.parts
         ?.map((part) => part.text ?? '')
@@ -564,6 +601,109 @@ export class ProxyController {
 
   private invalidRequest(message: string, param?: string): OpenAIProtocolException {
     return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param });
+  }
+
+  private validateImageOptions(input: ImageOptionInput, res: FastifyReply): boolean {
+    const responseFormat = input.response_format ?? input.responseFormat;
+    const outputFormat = input.output_format ?? input.outputFormat;
+    const outputCompression = input.output_compression ?? input.outputCompression;
+    const partialImages = input.partial_images ?? input.partialImages;
+    const inputFidelity = input.input_fidelity ?? input.inputFidelity;
+
+    if (input.n !== undefined && input.n !== 1 && input.n !== '1') {
+      this.sendUnsupportedImageOption(res, 'Only n=1 is supported by this proxy.', 'n');
+      return false;
+    }
+    if (responseFormat !== undefined && responseFormat !== 'b64_json') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only response_format=b64_json is supported by this proxy.',
+        'response_format',
+      );
+      return false;
+    }
+    if (outputFormat !== undefined && outputFormat !== 'png') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only output_format=png is supported by this proxy.',
+        'output_format',
+      );
+      return false;
+    }
+    if (input.size !== undefined && input.size !== 'auto' && input.size !== '1024x1024') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only size=auto and size=1024x1024 are supported by this proxy.',
+        'size',
+      );
+      return false;
+    }
+    if (input.quality !== undefined && input.quality !== 'auto') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only quality=auto is supported by this proxy.',
+        'quality',
+      );
+      return false;
+    }
+    if (input.background !== undefined && input.background !== 'auto') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only background=auto is supported by this proxy.',
+        'background',
+      );
+      return false;
+    }
+    if (input.moderation !== undefined && input.moderation !== 'auto') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only moderation=auto is supported by this proxy.',
+        'moderation',
+      );
+      return false;
+    }
+    if (outputCompression !== undefined) {
+      this.sendUnsupportedImageOption(
+        res,
+        'output_compression is not supported by this proxy.',
+        'output_compression',
+      );
+      return false;
+    }
+    if (partialImages !== undefined && partialImages !== 0 && partialImages !== '0') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Only partial_images=0 is supported by this proxy.',
+        'partial_images',
+      );
+      return false;
+    }
+    if (input.stream === true || input.stream === 'true') {
+      this.sendUnsupportedImageOption(
+        res,
+        'Streaming image generation is not supported by this endpoint.',
+        'stream',
+      );
+      return false;
+    }
+    if (input.style !== undefined) {
+      this.sendUnsupportedImageOption(res, 'style is not supported by this proxy.', 'style');
+      return false;
+    }
+    if (inputFidelity !== undefined) {
+      this.sendUnsupportedImageOption(
+        res,
+        'input_fidelity is not supported by this proxy.',
+        'input_fidelity',
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  private sendUnsupportedImageOption(res: FastifyReply, message: string, param: string): void {
+    this.sendInvalidRequest(res, message, param, 'unsupported_parameter');
   }
 
   private toLegacyTextCompletionsResponse(response: OpenAIChatResponse): Record<string, unknown> {
@@ -1053,6 +1193,14 @@ export class ProxyController {
       quality?: string;
       n?: number | string;
       response_format?: string;
+      output_format?: string;
+      background?: string;
+      moderation?: string;
+      output_compression?: number | string;
+      partial_images?: number | string;
+      stream?: boolean | string;
+      style?: string;
+      input_fidelity?: string;
       language?: string;
       temperature?: number | string;
       timestamp_granularities?: string[];
@@ -1089,6 +1237,18 @@ export class ProxyController {
       quality: field('quality') ?? body.quality,
       n: field('n') ?? (body.n === undefined ? undefined : String(body.n)),
       responseFormat: field('response_format') ?? body.response_format,
+      outputFormat: field('output_format') ?? body.output_format,
+      background: field('background') ?? body.background,
+      moderation: field('moderation') ?? body.moderation,
+      outputCompression:
+        field('output_compression') ??
+        (body.output_compression === undefined ? undefined : String(body.output_compression)),
+      partialImages:
+        field('partial_images') ??
+        (body.partial_images === undefined ? undefined : String(body.partial_images)),
+      stream: field('stream') ?? (body.stream === undefined ? undefined : String(body.stream)),
+      style: field('style') ?? body.style,
+      inputFidelity: field('input_fidelity') ?? body.input_fidelity,
       language: field('language') ?? body.language,
       temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
       invalidTemperature:
@@ -1304,6 +1464,7 @@ export class ProxyController {
             b64_json: image.data,
           },
         ],
+        ...this.toOpenAIImageUsage(result.usage),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Internal Server Error';
@@ -1358,6 +1519,27 @@ export class ProxyController {
     return {
       mimeType: matched.groups.mime,
       data: matched.groups.data,
+    };
+  }
+
+  private toOpenAIImageUsage(usage: OpenAIChatResponse['usage'] | undefined): {
+    usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
+  } {
+    if (
+      !usage ||
+      !Number.isFinite(usage.prompt_tokens) ||
+      !Number.isFinite(usage.completion_tokens) ||
+      !Number.isFinite(usage.total_tokens)
+    ) {
+      return {};
+    }
+
+    return {
+      usage: {
+        input_tokens: usage.prompt_tokens,
+        output_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+      },
     };
   }
 

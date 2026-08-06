@@ -226,7 +226,7 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
-  it('accepts sixteen image files and an optional mask', async () => {
+  it('accepts sixteen image files without altering multipart parser limits', async () => {
     proxyService.handleChatCompletions.mockResolvedValue({
       choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
     });
@@ -251,13 +251,6 @@ describe('OpenAI multipart media endpoints', () => {
         payload: multipartBody(boundary, [
           { headers: ['Content-Disposition: form-data; name="prompt"'], value: 'combine images' },
           ...images,
-          {
-            headers: [
-              'Content-Disposition: form-data; name="mask"; filename="mask.png"',
-              'Content-Type: image/png',
-            ],
-            value: Buffer.from([255]),
-          },
         ]),
       });
 
@@ -271,6 +264,61 @@ describe('OpenAI multipart media endpoints', () => {
             ]),
           }),
         ],
+      }),
+    );
+  });
+
+  it('rejects unsupported image options through the assembled Nest and Fastify pipeline', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        payload: { prompt: 'draw a cat', output_format: 'jpeg' },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Only output_format=png is supported by this proxy.',
+        type: 'invalid_request_error',
+        param: 'output_format',
+        code: 'unsupported_parameter',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it('returns a b64_json image for default image generation options through Fastify', async () => {
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        payload: { prompt: 'draw a cat' },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json()).toEqual({
+      created: expect.any(Number),
+      data: [{ b64_json: 'UkVTVUxU' }],
+    });
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-3-pro-image',
+        size: undefined,
+        quality: undefined,
       }),
     );
   });

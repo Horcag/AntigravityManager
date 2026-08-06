@@ -716,8 +716,129 @@ describe('ProxyController Integration', () => {
     await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
 
     expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
-      expect.objectContaining({ model: 'gemini-3-pro-image' }),
+      expect.objectContaining({
+        model: 'gemini-3-pro-image',
+        size: undefined,
+        quality: undefined,
+      }),
     );
+  });
+
+  it('returns truthful image usage when the upstream response reports token counts', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'data:image/png;base64,AAAABBBB' } }],
+        usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
+      }),
+    );
+  });
+
+  it('omits image usage when upstream token counts are incomplete', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'data:image/png;base64,AAAABBBB' } }],
+        usage: { prompt_tokens: 3, total_tokens: 3 },
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
+
+    expect(reply.send.mock.calls[0][0]).not.toHaveProperty('usage');
+  });
+
+  it('rejects unsupported image generation options before invoking upstream work', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+
+    const unsupportedOptions: Array<{
+      option: string;
+      value: string | number | boolean;
+      message: string;
+    }> = [
+      { option: 'n', value: 2, message: 'Only n=1 is supported by this proxy.' },
+      {
+        option: 'response_format',
+        value: 'url',
+        message: 'Only response_format=b64_json is supported by this proxy.',
+      },
+      {
+        option: 'output_format',
+        value: 'jpeg',
+        message: 'Only output_format=png is supported by this proxy.',
+      },
+      {
+        option: 'size',
+        value: '1536x1024',
+        message: 'Only size=auto and size=1024x1024 are supported by this proxy.',
+      },
+      {
+        option: 'quality',
+        value: 'high',
+        message: 'Only quality=auto is supported by this proxy.',
+      },
+      {
+        option: 'stream',
+        value: true,
+        message: 'Streaming image generation is not supported by this endpoint.',
+      },
+      {
+        option: 'background',
+        value: 'transparent',
+        message: 'Only background=auto is supported by this proxy.',
+      },
+      {
+        option: 'moderation',
+        value: 'low',
+        message: 'Only moderation=auto is supported by this proxy.',
+      },
+      {
+        option: 'output_compression',
+        value: 50,
+        message: 'output_compression is not supported by this proxy.',
+      },
+      {
+        option: 'partial_images',
+        value: 1,
+        message: 'Only partial_images=0 is supported by this proxy.',
+      },
+      { option: 'style', value: 'vivid', message: 'style is not supported by this proxy.' },
+      {
+        option: 'input_fidelity',
+        value: 'high',
+        message: 'input_fidelity is not supported by this proxy.',
+      },
+    ];
+
+    for (const { option, value, message } of unsupportedOptions) {
+      const reply = createReplyMock();
+
+      await controller.imageGenerations(
+        { prompt: 'draw a cat', [option]: value } as never,
+        reply as any,
+      );
+
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      expect(reply.send).toHaveBeenCalledWith({
+        error: {
+          message,
+          type: 'invalid_request_error',
+          param: option,
+          code: 'unsupported_parameter',
+        },
+      });
+    }
   });
 
   it('does not infer upstream status from image generation error text', async () => {
@@ -909,7 +1030,33 @@ describe('ProxyController Integration', () => {
         message: 'Only n=1 is supported by this proxy.',
         type: 'invalid_request_error',
         param: 'n',
-        code: 'unsupported_option',
+        code: 'unsupported_parameter',
+      },
+    });
+  });
+
+  it('rejects image edit masks rather than treating them as ordinary image inputs', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      {
+        prompt: 'make it brighter',
+        image: 'data:image/png;base64,IMGBASE64',
+        mask: 'data:image/png;base64,MASKBASE64',
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'mask is not supported because this proxy cannot preserve mask semantics.',
+        type: 'invalid_request_error',
+        param: 'mask',
+        code: 'unsupported_parameter',
       },
     });
   });
