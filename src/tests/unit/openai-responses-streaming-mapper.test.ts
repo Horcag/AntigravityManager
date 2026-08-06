@@ -125,6 +125,64 @@ describe('OpenAIResponsesStreamingMapper', () => {
     ).toBe('signature');
   });
 
+  it('keeps usage unknown until Gemini provides at least one token counter', () => {
+    const mapper = createMapper();
+    mapper.setUsageMetadata({});
+    const completed = mapper.complete().map(parseEvent).at(-1);
+
+    expect(completed).toMatchObject({
+      response: { status: 'completed', usage: null },
+      type: 'response.completed',
+    });
+  });
+
+  it('preserves real usage when later Gemini metadata has no counters', () => {
+    const mapper = createMapper();
+    mapper.setUsageMetadata({
+      candidatesTokenCount: 50,
+      promptTokenCount: 100,
+      totalTokenCount: 150,
+    });
+    mapper.setUsageMetadata({});
+    const completed = mapper.complete().map(parseEvent).at(-1);
+
+    expect(completed).toMatchObject({
+      response: {
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          total_tokens: 150,
+        },
+      },
+    });
+  });
+
+  it('does not leave an output-index gap for a continued function call', () => {
+    const mapper = createMapper();
+    const events = [
+      ...mapper.processPart({
+        functionCall: { args: { page: 1 }, id: 'call_search', name: 'search' },
+      }),
+      ...mapper.processPart({
+        functionCall: { args: { page: 2 }, id: 'call_search', name: 'search' },
+      }),
+      ...mapper.processPart({ text: 'Results ready' }),
+      ...mapper.complete(),
+    ].map(parseEvent);
+    const completedResponse = events.at(-1)?.response as Record<string, unknown>;
+    const messageDone = events.find(
+      (event) =>
+        event.type === 'response.output_item.done' &&
+        (event.item as Record<string, unknown>).type === 'message',
+    );
+
+    expect(completedResponse.output).toEqual([
+      expect.objectContaining({ type: 'function_call' }),
+      expect.objectContaining({ type: 'message' }),
+    ]);
+    expect(messageDone).toMatchObject({ output_index: 1 });
+  });
+
   it('terminates once with official-shaped error and failed events', () => {
     const mapper = createMapper();
     const events = mapper.fail('bad upstream').map(parseEvent);

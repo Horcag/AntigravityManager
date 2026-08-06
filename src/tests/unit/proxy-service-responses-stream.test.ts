@@ -135,6 +135,49 @@ describe('ProxyService Responses streaming', () => {
     });
   });
 
+  it('does not fabricate or erase usage when later metadata has no counters', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]} }],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50,"totalTokenCount":150}}}\n\n',
+      ),
+      Buffer.from('data: {"response":{"usageMetadata":{"trafficType":"ON_DEMAND"}}}\n\n'),
+    ]);
+    const events = (
+      await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.at(-1)).toMatchObject({
+      response: {
+        status: 'completed',
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          total_tokens: 150,
+        },
+      },
+      type: 'response.completed',
+    });
+  });
+
+  it('keeps usage null when an upstream candidate has empty metadata', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{}}}\n\n',
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.at(-1)).toMatchObject({
+      response: { status: 'completed', usage: null },
+      type: 'response.completed',
+    });
+    expect(JSON.stringify(events.at(-1))).not.toContain('input_tokens');
+  });
+
   it.each([
     ['malformed JSON', Readable.from([Buffer.from('data: {oops\n\n')])],
     ['upstream error', Readable.from([Buffer.from('data: {"error":{"message":"nope"}}\n\n')])],

@@ -85,7 +85,13 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   public setUsageMetadata(usageMetadata: GeminiResponsesUsageMetadata | undefined): void {
-    if (usageMetadata) {
+    if (
+      usageMetadata &&
+      (usageMetadata.promptTokenCount !== undefined ||
+        usageMetadata.candidatesTokenCount !== undefined ||
+        usageMetadata.thoughtsTokenCount !== undefined ||
+        usageMetadata.totalTokenCount !== undefined)
+    ) {
       this.usageMetadata = usageMetadata;
     }
   }
@@ -227,11 +233,11 @@ export class OpenAIResponsesStreamingMapper {
     functionCall: NonNullable<GeminiResponsesStreamPart['functionCall']>,
     signature?: string | null,
   ): string[] {
-    const outputIndex = this.nextOutputIndex++;
-    const callId = functionCall.id || `call_${this.options.responseId}_${outputIndex}`;
+    const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
     if (functionCall.id && this.emittedToolCallIds.has(callId)) {
       return [];
     }
+    const outputIndex = this.nextOutputIndex++;
     if (functionCall.id) {
       this.emittedToolCallIds.add(callId);
     }
