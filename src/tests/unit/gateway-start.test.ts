@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_CONFIG } from '@/modules/config/types';
+import { bootstrapNestServer, getNestServerStatus, stopNestServer } from '@/server/main';
 
 const { mockCreate, mockLogger } = vi.hoisted(() => ({
   mockCreate: vi.fn(),
@@ -10,11 +11,17 @@ const { mockCreate, mockLogger } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@nestjs/core', () => ({
-  NestFactory: {
-    create: mockCreate,
-  },
-}));
+vi.mock('@nestjs/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@nestjs/core')>();
+
+  return {
+    ...actual,
+    NestFactory: {
+      ...actual.NestFactory,
+      create: mockCreate,
+    },
+  };
+});
 
 vi.mock('@nestjs/platform-fastify', () => ({
   FastifyAdapter: vi.fn(),
@@ -30,7 +37,6 @@ describe('gateway server startup', () => {
   });
 
   afterEach(async () => {
-    const { stopNestServer } = await import('@/server/main');
     await stopNestServer();
   });
 
@@ -47,7 +53,6 @@ describe('gateway server startup', () => {
       close,
     });
 
-    const { bootstrapNestServer, getNestServerStatus } = await import('@/server/main');
     const result = await bootstrapNestServer(DEFAULT_APP_CONFIG.proxy);
 
     expect(result).toEqual({
@@ -84,7 +89,6 @@ describe('gateway server startup', () => {
       })),
     });
 
-    const { bootstrapNestServer, getNestServerStatus } = await import('@/server/main');
     const result = await bootstrapNestServer({
       ...DEFAULT_APP_CONFIG.proxy,
       port: 8123,
