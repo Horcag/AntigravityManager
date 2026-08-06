@@ -199,7 +199,14 @@ test.describe.serial('Antigravity Manager', () => {
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
         },
         // Deliberately omit the terminal boundary so Fastify's parser fails before any upstream work.
-        body: `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\ngemini-3-flash\r\n`,
+        body: Buffer.concat([
+          Buffer.from(
+            `--${boundary}\r\n` +
+              'Content-Disposition: form-data; name="file"; filename="speech.wav"\r\n' +
+              'Content-Type: audio/wav\r\n\r\n',
+          ),
+          Buffer.from([0, 255, 16, 128]),
+        ]),
       },
     );
 
