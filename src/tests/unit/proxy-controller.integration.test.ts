@@ -560,7 +560,7 @@ describe('ProxyController Integration', () => {
     });
   });
 
-  it('lists Antigravity public presets alongside discovered chat models', () => {
+  it('lists Antigravity public catalog models alongside discovered chat models', () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
       handleAnthropicMessages: vi.fn(),
@@ -596,8 +596,18 @@ describe('ProxyController Integration', () => {
         'gpt-oss-120b-medium',
       ]),
     );
-    expect(ids).not.toContain('gemini-3-pro-image');
+    expect(ids).toContain('gemini-3-pro-image');
     expect(ids).toContain('gemini-imagecraft-chat');
+
+    for (const defaultModel of ['gemini-3-flash', 'gemini-3-pro-image']) {
+      const modelReply = createReplyMock();
+      controller.getModel(defaultModel, modelReply as any);
+
+      expect(modelReply.status).toHaveBeenCalledWith(200);
+      expect(modelReply.send).toHaveBeenCalledWith(
+        expect.objectContaining({ id: defaultModel, object: 'model' }),
+      );
+    }
   });
 
   it('routes Claude OpenAI requests to protocol parity path', async () => {

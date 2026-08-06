@@ -3,6 +3,8 @@ import { DEFAULT_APP_CONFIG, type ProxyConfig } from '@/modules/config/types';
 import { ProxyModelRoutingPolicy } from '@/modules/proxy-gateway/server/proxy-model-routing-policy';
 import { setServerConfig } from '../../server/server-config';
 import {
+  OPENAI_COMPATIBLE_DEFAULT_MODELS,
+  getSupportedModels,
   getOpenAICompatibleModels,
   updateDynamicForwardingRules,
 } from '@/modules/proxy-gateway/antigravity/ModelMapping';
@@ -46,7 +48,7 @@ describe('ProxyModelRoutingPolicy', () => {
     expect(policy.resolveTargetModel('gemini-deprecated-test')).toBe('gemini-future-test');
   });
 
-  it('lists each supported chat model exactly once in sorted OpenAI-compatible output', () => {
+  it('lists each supported catalog model exactly once in sorted OpenAI-compatible output', () => {
     const models = getOpenAICompatibleModels({}, [
       'gpt-4o',
       'dynamic-model',
@@ -58,10 +60,21 @@ describe('ProxyModelRoutingPolicy', () => {
     expect(models).toContain('claude-sonnet-4-6');
     expect(models).toContain('gemini-3-pro');
     expect(models).toContain('gemini-3-flash-preview');
+    expect(models).toContain('gemini-3-pro-image');
     expect(models).not.toContain('internal-background-task');
-    expect(models).not.toContain('gemini-3-pro-image');
     expect(models).not.toContain('gemini-3-pro-image-preview');
     expect(models).toEqual([...new Set(models)].sort());
+    expect(models).toEqual(expect.arrayContaining(getSupportedModels()));
+  });
+
+  it('lists and routes every declared OpenAI endpoint default to a supported target', () => {
+    const models = getOpenAICompatibleModels();
+    const policy = new ProxyModelRoutingPolicy();
+
+    for (const model of Object.values(OPENAI_COMPATIBLE_DEFAULT_MODELS)) {
+      expect(models).toContain(model);
+      expect(policy.resolveTargetModel(model)).toBe(model);
+    }
   });
 
   it('adds Claude beta headers only for Claude-compatible models', () => {

@@ -42,6 +42,7 @@ import {
   getOpenAICompatibleModels,
   MODEL_LIST_CREATED_AT,
   MODEL_LIST_OWNER,
+  OPENAI_COMPATIBLE_DEFAULT_MODELS,
 } from '../antigravity/ModelMapping';
 import { getServerConfig } from '../../../server/server-config';
 import { AccountLeaseService } from './account-lease.service';
@@ -288,7 +289,7 @@ export class ProxyController {
       return;
     }
     const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3-pro-image',
+      model: body.model ?? OPENAI_COMPATIBLE_DEFAULT_MODELS.images,
       messages: [
         {
           role: 'user',
@@ -366,7 +367,7 @@ export class ProxyController {
     }
 
     const request: OpenAIChatRequest = {
-      model: input.model ?? 'gemini-3-pro-image',
+      model: input.model ?? OPENAI_COMPATIBLE_DEFAULT_MODELS.images,
       messages: [
         {
           role: 'user',
@@ -1568,7 +1569,7 @@ export class ProxyController {
     }
 
     return {
-      model: body.model ?? 'gemini-3-flash',
+      model: body.model ?? OPENAI_COMPATIBLE_DEFAULT_MODELS.responses,
       messages,
       tools: body.tools,
       tool_choice: body.tool_choice,

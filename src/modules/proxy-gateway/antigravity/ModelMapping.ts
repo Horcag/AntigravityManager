@@ -19,9 +19,18 @@ const PUBLIC_MODEL_BY_DISPLAY_NAME = new Map(
   ]),
 );
 
+export const OPENAI_COMPATIBLE_DEFAULT_MODELS = {
+  responses: 'gemini-3-flash',
+  images: 'gemini-3-pro-image',
+} as const;
+
+const OPENAI_COMPATIBLE_DEFAULT_MODEL_IDS = new Set<string>(
+  Object.values(OPENAI_COMPATIBLE_DEFAULT_MODELS),
+);
+
 const PUBLIC_SUPPORTED_MODELS = [
   ...Object.keys(PUBLIC_MODEL_PRESET_DISPLAY_NAMES),
-  'gemini-3-flash',
+  ...new Set(Object.values(OPENAI_COMPATIBLE_DEFAULT_MODELS)),
 ] as const;
 
 const CLAUDE_TO_GEMINI: Record<string, string> = {
@@ -357,5 +366,5 @@ function shouldHideDeprecatedModelFromList(modelId: string): boolean {
 
 function shouldHideNonChatModelFromOpenAIList(modelId: string): boolean {
   const normalized = modelId.toLowerCase();
-  return /(^|-)image($|-)/.test(normalized);
+  return /(^|-)image($|-)/.test(normalized) && !OPENAI_COMPATIBLE_DEFAULT_MODEL_IDS.has(normalized);
 }
