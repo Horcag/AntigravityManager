@@ -8,10 +8,16 @@ export interface OpenAIChatRequest {
   size?: string;
   quality?: string;
   tools?: OpenAITool[];
-  tool_choice?: string | { type: string; function?: { name: string } };
+  tool_choice?: OpenAIToolChoice;
   response_format?: { type?: string };
   extra?: Record<string, unknown>;
 }
+
+export type OpenAIToolChoice =
+  | 'none'
+  | 'auto'
+  | 'required'
+  | { type: 'function'; function: { name: string } };
 
 export interface OpenAIMessage {
   role: string;

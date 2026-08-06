@@ -58,6 +58,72 @@ describe('Proxy Parity Fixtures', () => {
     expect(actual.messages[2].content[0]).toEqual(expected.messages[2].content[0]);
   });
 
+  it('preserves OpenAI tool_choice for the Gemini request mapper', () => {
+    const service = new TestableProxyService();
+    const tools = [
+      {
+        type: 'function',
+        function: { name: 'get_weather', parameters: { type: 'object' } },
+      },
+      {
+        type: 'function',
+        function: { name: 'get_time', parameters: { type: 'object' } },
+      },
+    ];
+    const choices = [
+      { choice: undefined, expected: { mode: 'VALIDATED' } },
+      { choice: 'none', expected: { mode: 'NONE' } },
+      { choice: 'auto', expected: { mode: 'AUTO' } },
+      { choice: 'required', expected: { mode: 'ANY' } },
+      {
+        choice: { type: 'function', function: { name: 'get_weather' } },
+        expected: { mode: 'ANY', allowedFunctionNames: ['get_weather'] },
+      },
+    ];
+
+    for (const { choice, expected } of choices) {
+      const claudeRequest = service.toAnthropic({
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'Use a tool' }],
+        tools,
+        tool_choice: choice,
+      });
+      const body = transformClaudeRequestIn(claudeRequest);
+
+      expect(body.request.toolConfig?.functionCallingConfig).toEqual(expected);
+    }
+  });
+
+  it('rejects malformed and unavailable named OpenAI tool choices', () => {
+    const service = new TestableProxyService();
+    const request = {
+      model: 'gemini-3-flash',
+      messages: [{ role: 'user', content: 'Use a tool' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'get_weather', parameters: { type: 'object' } },
+        },
+      ],
+    };
+
+    expect(() => service.toAnthropic({ ...request, tool_choice: { type: 'function' } })).toThrow(
+      'tool_choice.function.name',
+    );
+    expect(() =>
+      service.toAnthropic({
+        ...request,
+        tool_choice: { type: 'tool', function: { name: 'get_weather' } },
+      }),
+    ).toThrow('must be none, auto, required, or a named function selection');
+    expect(() =>
+      service.toAnthropic({
+        ...request,
+        tool_choice: { type: 'function', function: { name: 'get_time' } },
+      }),
+    ).toThrow('not among the provided tools');
+  });
+
   it('accepts a null assistant content field between tool calls and tool results', () => {
     const service = new TestableProxyService();
     const input = readFixture<any>('request/openai.chat-tools.input.json');
@@ -152,6 +218,43 @@ describe('Proxy Parity Fixtures', () => {
     for (const token of expected.contains) {
       expect(output).toContain(token);
     }
+  });
+
+  it('assigns stable distinct indices to streamed tool calls', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const outputChunks: string[] = [];
+    const promise = new Promise<void>((resolve, reject) => {
+      service.streamToOpenAI(stream, 'gemini-3-flash').subscribe({
+        next: (chunk) => outputChunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    for (const functionCall of [
+      { id: 'call_weather', name: 'get_weather', args: { city: 'Paris' } },
+      { id: 'call_time', name: 'get_time', args: { city: 'Tokyo' } },
+      { id: 'call_weather', name: 'get_weather', args: { city: 'London' } },
+    ]) {
+      stream.emit(
+        'data',
+        Buffer.from(
+          'data: ' +
+            JSON.stringify({ candidates: [{ content: { parts: [{ functionCall }] } }] }) +
+            '\n',
+        ),
+      );
+    }
+    stream.emit('end');
+    await promise;
+
+    const chunks = outputChunks
+      .filter((chunk) => chunk.startsWith('data: {'))
+      .map((chunk) => JSON.parse(chunk.slice('data: '.length)));
+    expect(chunks.map((chunk) => chunk.choices[0].index)).toEqual([0, 0, 0]);
+    expect(chunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].index)).toEqual([0, 1, 0]);
+    expect(outputChunks.at(-1)).toBe('data: [DONE]\n\n');
   });
 
   it('replays a streamed tool thought signature for an OpenAI null-content follow-up', async () => {

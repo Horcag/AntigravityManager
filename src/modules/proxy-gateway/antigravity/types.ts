@@ -51,6 +51,7 @@ export interface ClaudeRequest {
   messages: Message[];
   system?: SystemPrompt;
   tools?: Tool[];
+  tool_choice?: ClaudeToolChoice;
   stream?: boolean;
   max_tokens?: number;
   stop_sequences?: string[];
@@ -60,6 +61,8 @@ export interface ClaudeRequest {
   thinking?: ThinkingConfig;
   metadata?: Metadata;
 }
+
+export type ClaudeToolChoice = 'none' | 'auto' | 'required' | { type: 'tool'; name: string };
 
 export interface ThinkingConfig {
   type: 'enabled' | string;
@@ -269,6 +272,13 @@ export interface GeminiRequest {
   systemInstruction?: { parts: { text: string }[] };
   /** Generation config */
   generationConfig?: GenerationConfig;
+  /** Function-calling policy for declared Gemini tools. */
+  toolConfig?: { functionCallingConfig: FunctionCallingConfig };
+}
+
+export interface FunctionCallingConfig {
+  mode: 'VALIDATED' | 'NONE' | 'AUTO' | 'ANY';
+  allowedFunctionNames?: string[];
 }
 
 export interface GeminiInternalRequest {

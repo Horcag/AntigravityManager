@@ -1181,6 +1181,7 @@ export class ProxyService {
       let buffer = '';
       let hasEmittedChunk = false;
       let hasSentDone = false;
+      const toolCallIndices = new Map<string, number>();
 
       const streamId = `chatcmpl-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
@@ -1246,6 +1247,10 @@ export class ProxyService {
               }
 
               if (part.functionCall) {
+                const toolCallId =
+                  part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
+                const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
+                toolCallIndices.set(toolCallId, toolCallIndex);
                 const toolCallChunk = {
                   id: streamId,
                   object: 'chat.completion.chunk',
@@ -1257,8 +1262,8 @@ export class ProxyService {
                       delta: {
                         tool_calls: [
                           {
-                            index: 0,
-                            id: part.functionCall.id || `${part.functionCall.name}-${uuidv4()}`,
+                            index: toolCallIndex,
+                            id: toolCallId,
                             type: 'function',
                             function: {
                               name: part.functionCall.name,
@@ -1592,6 +1597,7 @@ export class ProxyService {
       messages: anthropicMessages,
       system: systemPrompt,
       tools: this.convertOpenAIToolsToAnthropicTools(request.tools),
+      tool_choice: this.convertOpenAIToolChoice(request.tool_choice, request.tools),
       max_tokens: request.max_tokens,
       temperature: request.temperature,
       top_p: request.top_p,
@@ -1601,6 +1607,37 @@ export class ProxyService {
         source: 'openai',
       },
     };
+  }
+
+  private convertOpenAIToolChoice(
+    toolChoice: unknown,
+    tools: OpenAIChatRequest['tools'],
+  ): ClaudeRequest['tool_choice'] {
+    if (toolChoice === undefined) {
+      return undefined;
+    }
+    if (toolChoice === 'none' || toolChoice === 'auto' || toolChoice === 'required') {
+      return toolChoice;
+    }
+
+    const namedChoice = this.toUnknownRecord(toolChoice);
+    if (namedChoice?.type !== 'function') {
+      throw new Error(
+        'OpenAI tool_choice must be none, auto, required, or a named function selection',
+      );
+    }
+
+    const functionChoice = this.toUnknownRecord(namedChoice.function);
+    const name = isString(functionChoice?.name) ? functionChoice.name.trim() : '';
+    if (!name) {
+      throw new Error('OpenAI tool_choice.function.name is required for named function selection');
+    }
+
+    const hasNamedTool = tools?.some((tool) => tool.function?.name === name);
+    if (!hasNamedTool) {
+      throw new Error('OpenAI tool_choice function "' + name + '" is not among the provided tools');
+    }
+    return { type: 'tool', name };
   }
 
   private convertOpenAIPartsToAnthropicContent(

@@ -16,6 +16,7 @@ import {
   GenerationConfig,
   ImageConfig,
   FunctionDeclaration,
+  FunctionCallingConfig,
   SafetySetting,
 } from './types';
 import {
@@ -143,7 +144,7 @@ export function transformClaudeRequestIn(
     systemInstruction?: { parts: { text: string }[] };
     generationConfig?: GenerationConfig;
     tools?: GeminiToolDeclaration[];
-    toolConfig?: { functionCallingConfig: { mode: string } };
+    toolConfig?: { functionCallingConfig: FunctionCallingConfig };
   } = {
     contents,
     safetySettings: [...SAFETY_SETTINGS],
@@ -161,7 +162,9 @@ export function transformClaudeRequestIn(
 
   if (tools) {
     innerRequest.tools = tools;
-    innerRequest.toolConfig = { functionCallingConfig: { mode: 'VALIDATED' } };
+    innerRequest.toolConfig = {
+      functionCallingConfig: resolveFunctionCallingConfig(claudeReq.tool_choice),
+    };
   }
 
   // Inject googleSearch tool if needed (and not already done by buildTools)
@@ -197,6 +200,24 @@ export function transformClaudeRequestIn(
   }
 
   return body;
+}
+
+function resolveFunctionCallingConfig(
+  toolChoice: ClaudeRequest['tool_choice'],
+): FunctionCallingConfig {
+  if (!toolChoice) {
+    return { mode: 'VALIDATED' };
+  }
+  if (toolChoice === 'none') {
+    return { mode: 'NONE' };
+  }
+  if (toolChoice === 'auto') {
+    return { mode: 'AUTO' };
+  }
+  if (toolChoice === 'required') {
+    return { mode: 'ANY' };
+  }
+  return { mode: 'ANY', allowedFunctionNames: [toolChoice.name] };
 }
 
 function buildInternalRequestBody(params: {
