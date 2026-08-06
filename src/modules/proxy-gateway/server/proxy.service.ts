@@ -59,6 +59,7 @@ type OpenAIStreamVariant = 'chat' | 'text';
 interface OpenAIStreamOptions {
   variant: OpenAIStreamVariant;
   includeUsage: boolean;
+  idPrefix?: 'chatcmpl' | 'cmpl';
 }
 
 interface OpenAIStreamUsage {
@@ -842,6 +843,7 @@ export class ProxyService {
               claudeResponse,
               request.model,
               response.usageMetadata,
+              outputProtocol,
             );
             return outputProtocol === 'responses'
               ? this.createSyntheticResponsesStream(openaiResponse)
@@ -866,6 +868,7 @@ export class ProxyService {
             claudeResponse,
             request.model,
             response.usageMetadata,
+            outputProtocol,
           );
         }
       } catch (err) {
@@ -910,6 +913,7 @@ export class ProxyService {
               claudeResponse,
               request.model,
               response.usageMetadata,
+              outputProtocol,
             );
           } catch (fallbackErr) {
             lastError = fallbackErr;
@@ -1068,6 +1072,7 @@ export class ProxyService {
     return {
       variant: outputProtocol === 'text-completions' ? 'text' : 'chat',
       includeUsage: request.stream_options?.include_usage === true,
+      idPrefix: outputProtocol === 'text-completions' ? 'cmpl' : 'chatcmpl',
     };
   }
 
@@ -1405,6 +1410,10 @@ export class ProxyService {
     return { index: 0, delta: { content: text }, finish_reason: null };
   }
 
+  private buildOpenAIAssistantRoleChoice(): Record<string, unknown> {
+    return { index: 0, delta: { role: 'assistant' }, finish_reason: null };
+  }
+
   private buildOpenAIFinishChoice(
     variant: OpenAIStreamVariant,
     finishReason: string | null,
@@ -1434,7 +1443,9 @@ export class ProxyService {
       /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
       let streamSignature: string | null = null;
 
-      const streamId = `chatcmpl-${uuidv4()}`;
+      const idPrefix =
+        streamOptions.idPrefix ?? (streamOptions.variant === 'text' ? 'cmpl' : 'chatcmpl');
+      const streamId = `${idPrefix}-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
       const identity = { streamId, created, model };
       const isTextVariant = streamOptions.variant === 'text';
@@ -1442,12 +1453,18 @@ export class ProxyService {
         subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
       }
 
-      const pushChoice = (choice: Record<string, unknown>): void => {
-        hasEmittedChunk = true;
+      const pushChoice = (choice: Record<string, unknown>, countsAsUsable = true): void => {
+        if (countsAsUsable) {
+          hasEmittedChunk = true;
+        }
         subscriber.next(
           `data: ${JSON.stringify(this.buildOpenAIStreamChunk(identity, streamOptions, [choice]))}\n\n`,
         );
       };
+
+      if (!isTextVariant) {
+        pushChoice(this.buildOpenAIAssistantRoleChoice(), false);
+      }
 
       const sendDone = (): void => {
         if (hasSentDone) {
@@ -1675,7 +1692,9 @@ export class ProxyService {
     streamOptions: OpenAIStreamOptions = { variant: 'chat', includeUsage: false },
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
-      const streamId = response.id || `chatcmpl-${uuidv4()}`;
+      const idPrefix =
+        streamOptions.idPrefix ?? (streamOptions.variant === 'text' ? 'cmpl' : 'chatcmpl');
+      const streamId = response.id || `${idPrefix}-${uuidv4()}`;
       const created = response.created || Math.floor(Date.now() / 1000);
       const model = response.model;
       const identity = { streamId, created, model };
@@ -1699,6 +1718,10 @@ export class ProxyService {
           )}\n\n`,
         );
       };
+
+      if (streamOptions.variant !== 'text') {
+        pushChoice(this.buildOpenAIAssistantRoleChoice());
+      }
 
       const sendDone = (): void => {
         // Never invent usage the upstream response did not carry.
@@ -2217,6 +2240,7 @@ export class ProxyService {
     claudeResponse: ClaudeResponse,
     model: string,
     upstreamUsageMetadata?: unknown,
+    outputProtocol: OpenAIOutputProtocol = 'chat-completions',
   ): OpenAIChatResponse {
     const contentBlocks = Array.isArray(claudeResponse?.content) ? claudeResponse.content : [];
 
@@ -2267,7 +2291,7 @@ export class ProxyService {
       this.toOpenAIUsageFromClaudeUsage(claudeResponse.usage);
 
     return {
-      id: `chatcmpl-${uuidv4()}`,
+      id: `${outputProtocol === 'text-completions' ? 'cmpl' : 'chatcmpl'}-${uuidv4()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
       model: model,

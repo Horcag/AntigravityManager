@@ -171,6 +171,39 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     ]);
   });
 
+  it('starts real chat streams with one assistant-role delta before content', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const outcome = await collectStream(
+      invokePrivate<Observable<string>>(service, 'processStreamResponse', stream, 'gpt-4o-mini'),
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [{ text: 'hello' }] }, finishReason: 'STOP' }],
+          }),
+        );
+      },
+      stream,
+    );
+
+    const payloads = parseSseData(outcome.chunks).filter(
+      (event): event is Record<string, unknown> => event !== '[DONE]',
+    );
+    expect(payloads[0]?.choices).toEqual([
+      { index: 0, delta: { role: 'assistant' }, finish_reason: null },
+    ]);
+    expect(
+      payloads.filter((payload) => {
+        const choice = (payload.choices as Array<Record<string, unknown>>)[0];
+        return (choice?.delta as Record<string, unknown> | undefined)?.role === 'assistant';
+      }),
+    ).toHaveLength(1);
+    expect(payloads[1]?.choices).toEqual([
+      { index: 0, delta: { content: 'hello' }, finish_reason: null },
+    ]);
+  });
+
   it('honours stream_options.include_usage on the live chat stream', async () => {
     const service = createService();
     const stream = new EventEmitter();
@@ -722,6 +755,15 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     const events = parseSseData(outcome.chunks);
     expect(events.at(-1)).toBe('[DONE]');
     const payloads = events.filter((event): event is Record<string, unknown> => event !== '[DONE]');
+    expect(payloads[0]?.choices).toEqual([
+      { index: 0, delta: { role: 'assistant' }, finish_reason: null },
+    ]);
+    expect(
+      payloads.filter((payload) => {
+        const choice = (payload.choices as Array<Record<string, unknown>>)[0];
+        return (choice?.delta as Record<string, unknown> | undefined)?.role === 'assistant';
+      }),
+    ).toHaveLength(1);
     const toolCalls = payloads.flatMap((payload) => {
       const choice = (payload.choices as Array<Record<string, unknown>>)[0];
       const delta = choice?.delta as Record<string, unknown> | undefined;
@@ -781,6 +823,39 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(payloads.at(-1)?.choices).toEqual([
       { text: 'legacy body', index: 0, logprobs: null, finish_reason: 'stop' },
     ]);
+  });
+
+  it('uses cmpl- ids for text-completions service responses and fallback streams', async () => {
+    const service = createService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'legacy body' }] }, finishReason: 'STOP' }],
+    });
+
+    const response = (await service.handleChatCompletions(
+      {
+        model: 'gpt-4o',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      } as never,
+      'text-completions',
+    )) as unknown as Record<string, unknown>;
+    expect(response.id).toMatch(/^cmpl-/);
+
+    mockGeminiClient.streamGenerateInternal.mockRejectedValue(new Error('stream unavailable'));
+    const stream = (await service.handleChatCompletions(
+      {
+        model: 'gpt-4o',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      } as never,
+      'text-completions',
+    )) as Observable<string>;
+    const payloads = parseSseData((await collectStream(stream)).chunks).filter(
+      (event): event is Record<string, unknown> => event !== '[DONE]',
+    );
+    expect(payloads.every((payload) => /^cmpl-/.test(String(payload.id)))).toBe(true);
+    expect(payloads.every((payload) => payload.object === 'text_completion')).toBe(true);
   });
 
   it('maps system and developer messages into the system prompt, never user content', () => {
