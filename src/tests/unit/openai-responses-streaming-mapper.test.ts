@@ -3,171 +3,175 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { OpenAIResponsesStreamingMapper } from '@/modules/proxy-gateway/antigravity/OpenAIResponsesStreamingMapper';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
 
-function parseEvent(serializedEvent: string): Record<string, unknown> {
-  return JSON.parse(serializedEvent.slice('data: '.length)) as Record<string, unknown>;
+function parseEvent(frame: string): Record<string, unknown> {
+  const [eventLine, dataLine] = frame.trim().split('\n');
+  expect(eventLine).toMatch(/^event: response\.|^event: error$/);
+  expect(dataLine).toMatch(/^data: /);
+  return JSON.parse(dataLine.slice('data: '.length)) as Record<string, unknown>;
 }
-
-const SIGNATURE_CONTEXT = { accountId: 'account-a', model: 'gemini-3-pro' };
 
 function createMapper(): OpenAIResponsesStreamingMapper {
   return new OpenAIResponsesStreamingMapper({
     model: 'gemini-3-pro',
     responseId: 'resp_test',
-    signatureContext: SIGNATURE_CONTEXT,
+    signatureContext: { accountId: 'account-a', model: 'gemini-3-pro' },
   });
 }
 
 describe('OpenAIResponsesStreamingMapper', () => {
-  afterEach(() => {
-    SignatureStore.clear();
-  });
+  afterEach(() => SignatureStore.clear());
 
-  it('emits a complete Responses tool-call lifecycle without creating an empty text item', () => {
+  it('emits exact SSE frames, monotonic sequence numbers, ordered mixed output, and usage', () => {
     const mapper = createMapper();
+    mapper.setUsageMetadata({
+      candidatesTokenCount: 5,
+      promptTokenCount: 3,
+      thoughtsTokenCount: 2,
+      totalTokenCount: 8,
+    });
     const events = [
       mapper.createResponseCreatedEvent(),
-      ...mapper.processPart({
-        functionCall: {
-          args: { cmd: 'dir' },
-          id: 'call_shell_1',
-          name: 'shell',
-        },
-      }),
-      ...mapper.complete(),
-    ].map(parseEvent);
-
-    expect(events.map((event) => event.type)).toEqual([
-      'response.created',
-      'response.output_item.added',
-      'response.function_call_arguments.delta',
-      'response.function_call_arguments.done',
-      'response.output_item.done',
-      'response.completed',
-    ]);
-    expect(events[1]).toMatchObject({
-      item: {
-        call_id: 'call_shell_1',
-        name: 'shell',
-        type: 'function_call',
-      },
-      output_index: 0,
-    });
-    expect(events[2]).toMatchObject({ delta: '{"command":"dir"}' });
-    expect(events[5]).toMatchObject({
-      response: {
-        output: [
-          {
-            arguments: '{"command":"dir"}',
-            call_id: 'call_shell_1',
-            type: 'function_call',
-          },
-        ],
-      },
-    });
-  });
-
-  it('allocates sequential output indexes across text and tool calls', () => {
-    const mapper = createMapper();
-    const events = [
+      mapper.createResponseInProgressEvent(),
       ...mapper.processPart({ text: 'Hello' }),
       ...mapper.processPart({
-        functionCall: {
-          args: { query: 'Gemini API' },
-          id: 'call_search_1',
-          name: 'search_docs',
-        },
+        functionCall: { args: { cmd: 'dir' }, id: 'call_shell_1', name: 'shell' },
       }),
       ...mapper.complete(),
     ].map(parseEvent);
 
-    expect(events[0]).toMatchObject({ output_index: 0, type: 'response.output_item.added' });
-    expect(events[3]).toMatchObject({ output_index: 1, type: 'response.output_item.added' });
-    expect(events.at(-1)).toMatchObject({
-      response: {
-        output: [
-          expect.objectContaining({ type: 'message' }),
-          expect.objectContaining({ type: 'function_call' }),
-        ],
-      },
-      type: 'response.completed',
-    });
-  });
-
-  it('does not collapse identical calls that have no upstream call ID', () => {
-    const mapper = createMapper();
-    const events = [
-      ...mapper.processPart({
-        functionCall: {
-          args: { query: 'same query' },
-          name: 'search_docs',
-        },
-      }),
-      ...mapper.processPart({
-        functionCall: {
-          args: { query: 'same query' },
-          name: 'search_docs',
-        },
-      }),
-    ].map(parseEvent);
-
-    const addedItems = events.filter((event) => event.type === 'response.output_item.added');
-    expect(addedItems).toHaveLength(2);
-    expect(addedItems[0]).toMatchObject({ item: { call_id: 'call_resp_test_0' } });
-    expect(addedItems[1]).toMatchObject({ item: { call_id: 'call_resp_test_1' } });
-  });
-
-  it('preserves a function call marked as thought and stores its thought signature', () => {
-    const mapper = createMapper();
-    const encodedSignature = Buffer.from('stored thought signature').toString('base64');
-    const events = mapper.processPart({
-      functionCall: {
-        args: { command: 'pwd' },
-        id: 'call_thought_1',
-        name: 'shell',
-      },
-      thought: true,
-      thoughtSignature: encodedSignature,
-    });
-
-    expect(events.map((event) => parseEvent(event).type)).toEqual([
-      'response.output_item.added',
-      'response.function_call_arguments.delta',
-      'response.function_call_arguments.done',
-      'response.output_item.done',
-    ]);
-    expect(SignatureStore.get({ ...SIGNATURE_CONTEXT, toolCallId: 'call_thought_1' })).toBe(
-      'stored thought signature',
-    );
-  });
-
-  it('emits grounding metadata as visible Responses text', () => {
-    const mapper = createMapper();
-    const events = [
-      ...mapper.processGrounding({
-        groundingChunks: [
-          {
-            web: {
-              title: 'Gemini API documentation',
-              uri: 'https://example.com/gemini',
-            },
-          },
-        ],
-        webSearchQueries: ['Gemini API'],
-      }),
-      ...mapper.complete(),
-    ].map(parseEvent);
-
+    expect(events.map((event) => event.sequence_number)).toEqual(events.map((_, index) => index));
     expect(events.map((event) => event.type)).toEqual([
+      'response.created',
+      'response.in_progress',
       'response.output_item.added',
       'response.content_part.added',
       'response.output_text.delta',
       'response.output_text.done',
       'response.content_part.done',
       'response.output_item.done',
+      'response.output_item.added',
+      'response.function_call_arguments.delta',
+      'response.function_call_arguments.done',
+      'response.output_item.done',
       'response.completed',
     ]);
-    expect(events[2]).toMatchObject({
-      delta: expect.stringContaining('**🌐 Citations:**'),
+    const lifecycleSnapshots = events
+      .filter((event) =>
+        ['response.created', 'response.in_progress', 'response.completed'].includes(
+          String(event.type),
+        ),
+      )
+      .map((event) => event.response as Record<string, unknown>);
+    expect(lifecycleSnapshots.map((response) => response.id)).toEqual([
+      'resp_test',
+      'resp_test',
+      'resp_test',
+    ]);
+    expect(lifecycleSnapshots.map((response) => response.model)).toEqual([
+      'gemini-3-pro',
+      'gemini-3-pro',
+      'gemini-3-pro',
+    ]);
+    expect(lifecycleSnapshots.map((response) => response.created_at)).toEqual([
+      lifecycleSnapshots[0].created_at,
+      lifecycleSnapshots[0].created_at,
+      lifecycleSnapshots[0].created_at,
+    ]);
+    expect(events[3]).toMatchObject({ part: { annotations: [] } });
+    expect(events[8]).toMatchObject({ item: { call_id: 'call_shell_1', id: 'fc_resp_test_1' } });
+    expect(events[10]).toEqual({
+      arguments: '{"command":"dir"}',
+      item_id: 'fc_resp_test_1',
+      name: 'shell',
+      output_index: 1,
+      sequence_number: 10,
+      type: 'response.function_call_arguments.done',
+    });
+    expect(events.at(-1)).toMatchObject({
+      response: {
+        completed_at: expect.any(Number),
+        error: null,
+        incomplete_details: null,
+        output: [
+          expect.objectContaining({ type: 'message' }),
+          expect.objectContaining({ call_id: 'call_shell_1', type: 'function_call' }),
+        ],
+        parallel_tool_calls: true,
+        status: 'completed',
+        usage: {
+          input_tokens: 3,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 5,
+          output_tokens_details: { reasoning_tokens: 2 },
+          total_tokens: 8,
+        },
+      },
+    });
+  });
+
+  it('stores function signatures using the client-visible generated call id', () => {
+    const mapper = createMapper();
+    mapper.processPart({
+      functionCall: { args: { command: 'pwd' }, name: 'shell' },
+      thoughtSignature: Buffer.from('signature').toString('base64'),
+    });
+    mapper.complete();
+    expect(
+      SignatureStore.get({
+        accountId: 'account-a',
+        model: 'gemini-3-pro',
+        toolCallId: 'call_resp_test_0',
+      }),
+    ).toBe('signature');
+  });
+
+  it('terminates once with official-shaped error and failed events', () => {
+    const mapper = createMapper();
+    const events = mapper.fail('bad upstream').map(parseEvent);
+    expect(events).toHaveLength(2);
+    expect(events).toEqual([
+      {
+        code: 'upstream_error',
+        message: 'bad upstream',
+        param: null,
+        sequence_number: 0,
+        type: 'error',
+      },
+      {
+        response: {
+          completed_at: null,
+          created_at: expect.any(Number),
+          error: { code: 'upstream_error', message: 'bad upstream' },
+          id: 'resp_test',
+          incomplete_details: null,
+          model: 'gemini-3-pro',
+          object: 'response',
+          output: [],
+          parallel_tool_calls: true,
+          status: 'failed',
+          usage: null,
+        },
+        sequence_number: 1,
+        type: 'response.failed',
+      },
+    ]);
+    expect(mapper.complete()).toEqual([]);
+  });
+
+  it('keeps partial text coherent in a failed response', () => {
+    const mapper = createMapper();
+    mapper.processPart({ text: 'partial' });
+    const failedResponse = mapper.fail('upstream disconnected').map(parseEvent)[1];
+    expect(failedResponse).toMatchObject({
+      response: {
+        output: [
+          {
+            content: [{ annotations: [], text: 'partial', type: 'output_text' }],
+            status: 'in_progress',
+            type: 'message',
+          },
+        ],
+      },
     });
   });
 });

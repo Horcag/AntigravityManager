@@ -14,6 +14,7 @@ import { decodeSignature } from '../antigravity/signature-utils';
 import {
   type GeminiResponsesGroundingMetadata,
   type GeminiResponsesStreamPart,
+  type GeminiResponsesUsageMetadata,
   OpenAIResponsesStreamingMapper,
 } from '../antigravity/OpenAIResponsesStreamingMapper';
 import {
@@ -1040,6 +1041,7 @@ export class ProxyService {
       const decoder = new TextDecoder();
       let buffer = '';
       let completed = false;
+      let receivedUsableCandidate = false;
       const mapper = new OpenAIResponsesStreamingMapper({
         model,
         responseId: `resp_${uuidv4()}`,
@@ -1066,18 +1068,107 @@ export class ProxyService {
         subscriber.complete();
       };
 
+      const fail = (message: string, code = 'upstream_error'): void => {
+        if (completed) {
+          return;
+        }
+        completed = true;
+        clearHeartbeat();
+        idleTimer.clear();
+        for (const event of mapper.fail(message, code)) {
+          subscriber.next(event);
+        }
+        subscriber.complete();
+      };
+
       subscriber.next(mapper.createResponseCreatedEvent());
+      subscriber.next(mapper.createResponseInProgressEvent());
       heartbeatTimer = setInterval(() => {
         if (!completed) {
           subscriber.next(': ping\n\n');
         }
       }, 15_000);
-      const idleTimer = this.createStreamIdleTimer(
-        upstreamStream,
-        'OpenAI-Responses-SSE',
-        complete,
+      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-Responses-SSE', () =>
+        fail('Upstream Responses stream timed out', 'stream_timeout'),
       );
       idleTimer.reset();
+
+      const processLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) {
+          return;
+        }
+        const dataString = trimmed.slice(6);
+        if (dataString === '[DONE]') {
+          return;
+        }
+        try {
+          const payload = this.toUnknownRecord(JSON.parse(dataString));
+          if (!payload) {
+            fail('Upstream Responses stream payload was not an object', 'invalid_upstream_payload');
+            return;
+          }
+          const upstreamError = this.toUnknownRecord(payload.error);
+          if (upstreamError) {
+            fail(
+              isString(upstreamError.message)
+                ? upstreamError.message
+                : 'Upstream Responses stream returned an error',
+              'upstream_error',
+            );
+            return;
+          }
+          const responsePayload = this.toUnknownRecord(payload.response) ?? payload;
+          const usageMetadata = this.toResponsesUsageMetadata(
+            responsePayload.usageMetadata ?? payload.usageMetadata,
+          );
+          if (!Array.isArray(responsePayload.candidates)) {
+            if (receivedUsableCandidate && usageMetadata) {
+              mapper.setUsageMetadata(usageMetadata);
+              return;
+            }
+            fail(
+              'Upstream Responses stream payload did not include candidates',
+              'invalid_upstream_payload',
+            );
+            return;
+          }
+          const candidate = this.toUnknownRecord(responsePayload.candidates[0]);
+          if (!candidate) {
+            fail(
+              'Upstream Responses stream payload did not include a usable candidate',
+              'invalid_upstream_payload',
+            );
+            return;
+          }
+          receivedUsableCandidate = true;
+          mapper.setUsageMetadata(usageMetadata);
+          const content = this.toUnknownRecord(candidate?.content);
+          if (Array.isArray(content?.parts)) {
+            for (const part of content.parts) {
+              const normalizedPart = this.toResponsesStreamPart(part);
+              if (normalizedPart) {
+                for (const event of mapper.processPart(normalizedPart)) {
+                  subscriber.next(event);
+                }
+              }
+            }
+          }
+          const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
+          if (grounding) {
+            for (const event of mapper.processGrounding(grounding)) {
+              subscriber.next(event);
+            }
+          }
+          if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
+            complete();
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : 'Malformed upstream Responses JSON';
+          fail(`Malformed upstream Responses JSON: ${message}`, 'invalid_upstream_payload');
+        }
+      };
 
       upstreamStream.on('data', (chunk: Buffer) => {
         if (completed) {
@@ -1089,69 +1180,31 @@ export class ProxyService {
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) {
-            continue;
-          }
-
-          const dataString = trimmed.slice(6);
-          if (dataString === '[DONE]') {
-            continue;
-          }
-
-          try {
-            const parsed: unknown = JSON.parse(dataString);
-            const payload = this.toUnknownRecord(parsed);
-            const responsePayload = this.toUnknownRecord(payload?.response) ?? payload;
-            const candidates = responsePayload?.candidates;
-            if (!Array.isArray(candidates)) {
-              continue;
-            }
-
-            const candidate = this.toUnknownRecord(candidates[0]);
-            const content = this.toUnknownRecord(candidate?.content);
-            const parts = content?.parts;
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                const normalizedPart = this.toResponsesStreamPart(part);
-                if (!normalizedPart) {
-                  continue;
-                }
-                for (const event of mapper.processPart(normalizedPart)) {
-                  subscriber.next(event);
-                }
-              }
-            }
-
-            const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
-            if (grounding) {
-              for (const event of mapper.processGrounding(grounding)) {
-                subscriber.next(event);
-              }
-            }
-
-            if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
-              complete();
-              return;
-            }
-          } catch {
-            // Preserve the existing compatibility behavior: malformed upstream chunks are ignored.
+          processLine(line);
+          if (completed) {
+            return;
           }
         }
       });
 
       upstreamStream.on('end', () => {
         idleTimer.clear();
+        if (buffer.trim()) {
+          processLine(buffer);
+        }
+        if (!receivedUsableCandidate) {
+          fail('Upstream Responses stream was empty', 'empty_stream');
+          return;
+        }
         complete();
       });
 
       upstreamStream.on('error', (error: unknown) => {
         idleTimer.clear();
-        clearHeartbeat();
         const cleanError =
           error instanceof Error ? new Error(error.message) : new Error(String(error));
         this.logger.error(`OpenAI Responses stream error: ${cleanError.message}`);
-        subscriber.error(cleanError);
+        fail(cleanError.message, 'upstream_error');
       });
 
       return () => {
@@ -1226,6 +1279,21 @@ export class ProxyService {
       return null;
     }
     return { groundingChunks, webSearchQueries };
+  }
+
+  private toResponsesUsageMetadata(value: unknown): GeminiResponsesUsageMetadata | undefined {
+    const usage = this.toUnknownRecord(value);
+    if (!usage) {
+      return undefined;
+    }
+    return {
+      candidatesTokenCount: isNumber(usage.candidatesTokenCount)
+        ? usage.candidatesTokenCount
+        : undefined,
+      promptTokenCount: isNumber(usage.promptTokenCount) ? usage.promptTokenCount : undefined,
+      thoughtsTokenCount: isNumber(usage.thoughtsTokenCount) ? usage.thoughtsTokenCount : undefined,
+      totalTokenCount: isNumber(usage.totalTokenCount) ? usage.totalTokenCount : undefined,
+    };
   }
 
   private toUnknownRecord(value: unknown): Record<string, unknown> | null {
@@ -1539,6 +1607,12 @@ export class ProxyService {
         choice?.message && isString(choice.message.content) ? choice.message.content : undefined;
 
       subscriber.next(mapper.createResponseCreatedEvent());
+      subscriber.next(mapper.createResponseInProgressEvent());
+      mapper.setUsageMetadata({
+        candidatesTokenCount: response.usage.completion_tokens,
+        promptTokenCount: response.usage.prompt_tokens,
+        totalTokenCount: response.usage.total_tokens,
+      });
       if (content) {
         for (const event of mapper.processPart({ text: content })) {
           subscriber.next(event);

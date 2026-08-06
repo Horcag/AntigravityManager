@@ -2,15 +2,8 @@ import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 
 export interface GeminiResponsesStreamPart {
-  functionCall?: {
-    args: Record<string, unknown>;
-    id?: string;
-    name: string;
-  };
-  inlineData?: {
-    data: string;
-    mimeType: string;
-  };
+  functionCall?: { args: Record<string, unknown>; id?: string; name: string };
+  inlineData?: { data: string; mimeType: string };
   text?: string;
   thought?: boolean;
   thoughtSignature?: string;
@@ -18,23 +11,22 @@ export interface GeminiResponsesStreamPart {
 }
 
 export interface GeminiResponsesGroundingMetadata {
-  groundingChunks?: Array<{
-    web?: {
-      title?: string;
-      uri?: string;
-    };
-  }>;
+  groundingChunks?: Array<{ web?: { title?: string; uri?: string } }>;
   webSearchQueries?: string[];
 }
 
+export interface GeminiResponsesUsageMetadata {
+  candidatesTokenCount?: number;
+  promptTokenCount?: number;
+  thoughtsTokenCount?: number;
+  totalTokenCount?: number;
+}
+
 interface ResponsesMessageOutputItem {
-  content: Array<{
-    text: string;
-    type: 'output_text';
-  }>;
+  content: Array<{ annotations: []; text: string; type: 'output_text' }>;
   id: string;
   role: 'assistant';
-  status: 'completed';
+  status: 'completed' | 'in_progress';
   type: 'message';
 }
 
@@ -47,24 +39,36 @@ interface ResponsesFunctionCallOutputItem {
   type: 'function_call';
 }
 
+interface PendingFunctionCall {
+  arguments: string;
+  callId: string;
+  id: string;
+  name: string;
+  outputIndex: number;
+}
+
 type ResponsesOutputItem = ResponsesMessageOutputItem | ResponsesFunctionCallOutputItem;
 
 interface OpenAIResponsesStreamingMapperOptions {
   model: string;
   responseId: string;
-  /** Account + effective upstream model this stream belongs to; required to capture signatures. */
   signatureContext?: SignatureContext;
 }
 
+/** Maps Gemini's streaming parts into the OpenAI Responses SSE event contract. */
 export class OpenAIResponsesStreamingMapper {
+  private readonly createdAt = Math.floor(Date.now() / 1000);
   private readonly emittedToolCallIds = new Set<string>();
   private readonly messageItemId: string;
   private readonly outputItems: ResponsesOutputItem[] = [];
+  private readonly pendingFunctionCalls: PendingFunctionCall[] = [];
   private accumulatedText = '';
   private completed = false;
   private messageOutputItem: ResponsesMessageOutputItem | null = null;
   private nextOutputIndex = 0;
+  private sequenceNumber = 0;
   private textOutputIndex: number | null = null;
+  private usageMetadata: GeminiResponsesUsageMetadata | undefined;
   /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
   private streamSignature: string | null = null;
 
@@ -73,16 +77,17 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   public createResponseCreatedEvent(): string {
-    return this.serialize({
-      response: {
-        id: this.options.responseId,
-        model: this.options.model,
-        object: 'response',
-        output: [],
-        status: 'in_progress',
-      },
-      type: 'response.created',
-    });
+    return this.serialize({ response: this.response('in_progress'), type: 'response.created' });
+  }
+
+  public createResponseInProgressEvent(): string {
+    return this.serialize({ response: this.response('in_progress'), type: 'response.in_progress' });
+  }
+
+  public setUsageMetadata(usageMetadata: GeminiResponsesUsageMetadata | undefined): void {
+    if (usageMetadata) {
+      this.usageMetadata = usageMetadata;
+    }
   }
 
   public processPart(part: GeminiResponsesStreamPart): string[] {
@@ -94,49 +99,35 @@ export class OpenAIResponsesStreamingMapper {
     if (signature) {
       this.streamSignature = signature;
     }
-
     if (part.functionCall) {
       return this.processFunctionCall(part.functionCall, signature ?? this.streamSignature);
     }
-
     if (part.thought) {
       return [];
     }
-
     if (part.inlineData?.data) {
       const mimeType = part.inlineData.mimeType || 'image/jpeg';
       return this.processText(
         `\n\n![Generated Image](data:${mimeType};base64,${part.inlineData.data})\n\n`,
       );
     }
-
-    if (part.text) {
-      return this.processText(part.text);
-    }
-
-    return [];
+    return part.text ? this.processText(part.text) : [];
   }
 
   public processGrounding(grounding: GeminiResponsesGroundingMetadata): string[] {
     let groundingText = '';
-    if (grounding.webSearchQueries && grounding.webSearchQueries.length > 0) {
+    if (grounding.webSearchQueries?.length) {
       groundingText += `\n\n---\n**🔍 Searched for you:** ${grounding.webSearchQueries.join(', ')}`;
     }
-
-    if (grounding.groundingChunks) {
-      const links = grounding.groundingChunks.flatMap((chunk, index) => {
-        if (!chunk.web) {
-          return [];
-        }
-        const title = chunk.web.title || 'Web source';
-        const uri = chunk.web.uri || '#';
-        return [`[${index + 1}] [${title}](${uri})`];
-      });
-      if (links.length > 0) {
-        groundingText += `\n\n**🌐 Citations:**\n${links.join('\n')}`;
+    const links = grounding.groundingChunks?.flatMap((chunk, index) => {
+      if (!chunk.web) {
+        return [];
       }
+      return [`[${index + 1}] [${chunk.web.title || 'Web source'}](${chunk.web.uri || '#'})`];
+    });
+    if (links?.length) {
+      groundingText += `\n\n**🌐 Citations:**\n${links.join('\n')}`;
     }
-
     return groundingText ? this.processText(groundingText) : [];
   }
 
@@ -144,70 +135,66 @@ export class OpenAIResponsesStreamingMapper {
     if (this.completed) {
       return [];
     }
-
     this.completed = true;
-    const events: string[] = [];
-    if (this.textOutputIndex !== null) {
-      events.push(
-        this.serialize({
-          content_index: 0,
-          item_id: this.messageItemId,
-          output_index: this.textOutputIndex,
-          text: this.accumulatedText,
-          type: 'response.output_text.done',
-        }),
-      );
-      events.push(
-        this.serialize({
-          content_index: 0,
-          item_id: this.messageItemId,
-          output_index: this.textOutputIndex,
-          part: {
-            text: this.accumulatedText,
-            type: 'output_text',
-          },
-          type: 'response.content_part.done',
-        }),
-      );
-
-      const messageItem = this.messageOutputItem;
-      if (!messageItem) {
-        throw new Error('Responses text item is missing its final output record');
-      }
-      messageItem.content = [{ text: this.accumulatedText, type: 'output_text' }];
-      events.push(
-        this.serialize({
-          item: messageItem,
-          output_index: this.textOutputIndex,
-          type: 'response.output_item.done',
-        }),
-      );
+    const events = this.completeTextItem();
+    for (const functionCall of this.pendingFunctionCalls) {
+      events.push(...this.emitFunctionCall(functionCall));
     }
-
     events.push(
-      this.serialize({
-        response: {
-          id: this.options.responseId,
-          model: this.options.model,
-          object: 'response',
-          output: this.outputItems,
-          status: 'completed',
-        },
-        type: 'response.completed',
-      }),
+      this.serialize({ response: this.response('completed'), type: 'response.completed' }),
     );
     return events;
+  }
+
+  public fail(message: string, code = 'upstream_error'): string[] {
+    if (this.completed) {
+      return [];
+    }
+    this.completed = true;
+    const error = { code, message };
+    return [
+      this.serialize({ code, message, param: null, type: 'error' }),
+      this.serialize({ response: this.response('failed', error), type: 'response.failed' }),
+    ];
+  }
+
+  private completeTextItem(): string[] {
+    if (this.textOutputIndex === null || !this.messageOutputItem) {
+      return [];
+    }
+    this.messageOutputItem.content = [
+      { annotations: [], text: this.accumulatedText, type: 'output_text' },
+    ];
+    return [
+      this.serialize({
+        content_index: 0,
+        item_id: this.messageItemId,
+        output_index: this.textOutputIndex,
+        text: this.accumulatedText,
+        type: 'response.output_text.done',
+      }),
+      this.serialize({
+        content_index: 0,
+        item_id: this.messageItemId,
+        output_index: this.textOutputIndex,
+        part: { annotations: [], text: this.accumulatedText, type: 'output_text' },
+        type: 'response.content_part.done',
+      }),
+      this.serialize({
+        item: this.messageOutputItem,
+        output_index: this.textOutputIndex,
+        type: 'response.output_item.done',
+      }),
+    ];
   }
 
   private ensureTextStarted(): string[] {
     if (this.textOutputIndex !== null) {
       return [];
     }
-
-    this.textOutputIndex = this.nextOutputIndex;
-    this.nextOutputIndex += 1;
+    this.textOutputIndex = this.nextOutputIndex++;
     this.messageOutputItem = {
-      content: [{ text: '', type: 'output_text' }],
+      content: [{ annotations: [], text: '', type: 'output_text' }],
       id: this.messageItemId,
       role: 'assistant',
       status: 'completed',
@@ -230,10 +217,7 @@ export class OpenAIResponsesStreamingMapper {
         content_index: 0,
         item_id: this.messageItemId,
         output_index: this.textOutputIndex,
-        part: {
-          text: '',
-          type: 'output_text',
-        },
+        part: { annotations: [], text: '', type: 'output_text' },
         type: 'response.content_part.added',
       }),
     ];
@@ -243,73 +227,83 @@ export class OpenAIResponsesStreamingMapper {
     functionCall: NonNullable<GeminiResponsesStreamPart['functionCall']>,
     signature?: string | null,
   ): string[] {
-    const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
+    const outputIndex = this.nextOutputIndex++;
+    const callId = functionCall.id || `call_${this.options.responseId}_${outputIndex}`;
     if (functionCall.id && this.emittedToolCallIds.has(callId)) {
       return [];
     }
     if (functionCall.id) {
       this.emittedToolCallIds.add(callId);
     }
-
-    // Capture for replay under the id the client actually sees (upstream id when Gemini
-    // supplies one, otherwise the generated call id), keyed by the account/model that produced it.
-    const signatureContext = this.options.signatureContext;
-    if (signature && signatureContext) {
-      SignatureStore.store(
-        {
-          accountId: signatureContext.accountId,
-          model: signatureContext.model,
-          toolCallId: callId,
-        },
-        signature,
-      );
+    if (signature && this.options.signatureContext) {
+      SignatureStore.store({ ...this.options.signatureContext, toolCallId: callId }, signature);
     }
-
     const argumentsString = JSON.stringify(
       this.normalizeShellArguments(functionCall.name, functionCall.args),
     );
-    const outputIndex = this.nextOutputIndex;
-    this.nextOutputIndex += 1;
+    const itemId = `fc_${this.options.responseId}_${outputIndex}`;
+    const pendingFunctionCall = {
+      arguments: argumentsString,
+      callId,
+      id: itemId,
+      name: functionCall.name,
+      outputIndex,
+    };
+    this.outputItems.push({
+      arguments: argumentsString,
+      call_id: callId,
+      id: itemId,
+      name: functionCall.name,
+      status: 'completed',
+      type: 'function_call',
+    });
+    // A later-index tool call cannot finish before a streaming text item that precedes it.
+    if (this.textOutputIndex !== null) {
+      this.pendingFunctionCalls.push(pendingFunctionCall);
+      return [];
+    }
+    return this.emitFunctionCall(pendingFunctionCall);
+  }
 
+  private emitFunctionCall(functionCall: PendingFunctionCall): string[] {
     const inProgressItem = {
       arguments: '',
-      call_id: callId,
-      id: callId,
+      call_id: functionCall.callId,
+      id: functionCall.id,
       name: functionCall.name,
       status: 'in_progress',
       type: 'function_call' as const,
     };
     const completedItem: ResponsesFunctionCallOutputItem = {
-      arguments: argumentsString,
-      call_id: callId,
-      id: callId,
+      arguments: functionCall.arguments,
+      call_id: functionCall.callId,
+      id: functionCall.id,
       name: functionCall.name,
       status: 'completed',
       type: 'function_call',
     };
-    this.outputItems.push(completedItem);
-
     return [
       this.serialize({
         item: inProgressItem,
-        output_index: outputIndex,
+        output_index: functionCall.outputIndex,
         type: 'response.output_item.added',
       }),
       this.serialize({
-        delta: argumentsString,
-        item_id: callId,
-        output_index: outputIndex,
+        delta: functionCall.arguments,
+        item_id: functionCall.id,
+        output_index: functionCall.outputIndex,
         type: 'response.function_call_arguments.delta',
       }),
       this.serialize({
-        arguments: argumentsString,
-        item_id: callId,
-        output_index: outputIndex,
+        arguments: functionCall.arguments,
+        item_id: functionCall.id,
+        name: functionCall.name,
+        output_index: functionCall.outputIndex,
         type: 'response.function_call_arguments.done',
       }),
       this.serialize({
         item: completedItem,
-        output_index: outputIndex,
+        output_index: functionCall.outputIndex,
         type: 'response.output_item.done',
       }),
     ];
@@ -330,6 +324,51 @@ export class OpenAIResponsesStreamingMapper {
     return events;
   }
 
+  private response(
+    status: 'completed' | 'failed' | 'in_progress',
+    error: { code: string; message: string } | null = null,
+  ): Record<string, unknown> {
+    const completedAt = status === 'completed' ? Math.floor(Date.now() / 1000) : null;
+    return {
+      id: this.options.responseId,
+      object: 'response',
+      created_at: this.createdAt,
+      completed_at: completedAt,
+      error,
+      incomplete_details: null,
+      model: this.options.model,
+      output: status === 'failed' ? this.failedOutputItems() : this.outputItems,
+      parallel_tool_calls: true,
+      status,
+      usage: status === 'completed' ? this.usage() : null,
+    };
+  }
+
+  private failedOutputItems(): ResponsesOutputItem[] {
+    return this.outputItems.map((item) => {
+      if (item.type !== 'message') {
+        return item;
+      }
+      return {
+        ...item,
+        content: [{ annotations: [], text: this.accumulatedText, type: 'output_text' }],
+        status: 'in_progress',
+      };
+    });
+  }
+
+  private usage(): Record<string, unknown> {
+    const inputTokens = this.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = this.usageMetadata?.candidatesTokenCount ?? 0;
+    return {
+      input_tokens: inputTokens,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: outputTokens,
+      output_tokens_details: { reasoning_tokens: this.usageMetadata?.thoughtsTokenCount ?? 0 },
+      total_tokens: this.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+    };
+  }
+
   private normalizeShellArguments(
     functionName: string,
     args: Record<string, unknown>,
@@ -337,20 +376,17 @@ export class OpenAIResponsesStreamingMapper {
     if (!['shell', 'bash', 'local_shell'].includes(functionName) || 'command' in args) {
       return args;
     }
-
     for (const alternativeKey of ['cmd', 'code', 'script', 'shell_command']) {
       if (alternativeKey in args) {
         const { [alternativeKey]: command, ...remainingArgs } = args;
-        return {
-          ...remainingArgs,
-          command,
-        };
+        return { ...remainingArgs, command };
       }
     }
     return args;
   }
 
   private serialize(event: Record<string, unknown>): string {
-    return `data: ${JSON.stringify(event)}\n\n`;
+    const payload = { ...event, sequence_number: this.sequenceNumber++ };
+    return `event: ${String(event.type)}\ndata: ${JSON.stringify(payload)}\n\n`;
   }
 }
