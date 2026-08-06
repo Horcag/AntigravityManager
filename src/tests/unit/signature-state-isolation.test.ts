@@ -338,7 +338,7 @@ describe('thought signature state isolation', () => {
                     thoughtSignature: encode(SIGNATURE_A),
                   },
                   {
-                    functionCall: { args: { city: 'Paris' }, id: 'call_repeat', name: 'weather' },
+                    functionCall: { args: { city: 'London' }, id: 'call_repeat', name: 'weather' },
                     thoughtSignature: encode(SIGNATURE_B),
                   },
                   {
