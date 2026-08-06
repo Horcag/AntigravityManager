@@ -381,8 +381,8 @@ export class ProxyService {
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) continue;
-          const dataStr = trimmed.slice(6);
+          if (!trimmed.startsWith('data:')) continue;
+          const dataStr = trimmed.slice('data:'.length).trim();
           if (dataStr === '[DONE]') continue;
 
           try {
@@ -993,11 +993,11 @@ export class ProxyService {
 
         for (const line of lines) {
           const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) {
+          if (!trimmed.startsWith('data:')) {
             continue;
           }
 
-          const dataStr = trimmed.slice(6);
+          const dataStr = trimmed.slice('data:'.length).trim();
           if (dataStr === '[DONE]') {
             continue;
           }

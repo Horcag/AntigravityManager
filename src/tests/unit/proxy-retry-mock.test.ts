@@ -221,6 +221,80 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(result.candidates[0].finishReason).toBe('STOP');
   });
 
+  it('collects no-space SSE frames during the non-stream fallback', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+
+    mockGeminiClient.generateInternal.mockResolvedValueOnce({ candidates: [] });
+    mockGeminiClient.streamGenerateInternal.mockResolvedValueOnce(stream);
+
+    const resultPromise = (service as any).generateInternalWithStreamFallback(
+      { model: 'gemini-2.5-flash' },
+      'token',
+      undefined,
+    );
+
+    setTimeout(() => {
+      const payload = JSON.stringify({
+        candidates: [
+          {
+            content: { parts: [{ text: 'no-space fallback text' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      });
+      stream.emit('data', Buffer.from(`data:${payload}\n\n`));
+      stream.emit('end');
+    }, 10);
+
+    const result = await resultPromise;
+    expect(result.candidates[0].content.parts[0].text).toBe('no-space fallback text');
+    expect(result.candidates[0].finishReason).toBe('STOP');
+  });
+
+  it('emits an ordered Anthropic response for a no-space SSE frame', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    const payload = JSON.stringify({
+      candidates: [
+        {
+          content: { parts: [{ text: 'no-space stream text' }] },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    stream.emit('data', Buffer.from(`data:${payload}\n\n`));
+    stream.emit('end');
+    await completed;
+
+    const eventTypes = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => line.slice('data: '.length))
+      .filter((payload) => payload !== '[DONE]')
+      .map((payload) => JSON.parse(payload).type);
+
+    expect(eventTypes).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ]);
+    expect(chunks.join('')).toContain('no-space stream text');
+  });
+
   it('injects Claude beta headers when handling Gemini-compatible Claude models', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
