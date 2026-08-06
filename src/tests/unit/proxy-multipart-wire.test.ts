@@ -7,6 +7,7 @@ import {
   FastifyMultipartProvider,
   isMultipartMediaEndpoint,
   isMultipartParserOrLimitError,
+  MAX_JSON_MEDIA_BODY_BYTES,
   MultipartOpenAIExceptionFilter,
 } from '@/modules/proxy-gateway/server/fastify-multipart.provider';
 import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
@@ -77,10 +78,10 @@ function multipartBody(
 describe('OpenAI multipart media endpoints', () => {
   let app: NestFastifyApplication;
 
-  async function createApp(bodyLimit?: number): Promise<NestFastifyApplication> {
+  async function createApp(): Promise<NestFastifyApplication> {
     return NestFactory.create<NestFastifyApplication>(
       MultipartWireTestModule,
-      new FastifyAdapter(bodyLimit ? { bodyLimit } : undefined),
+      new FastifyAdapter(),
       { logger: false },
     );
   }
@@ -171,8 +172,30 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
-  it('returns the OpenAI envelope when Fastify rejects an oversized /v1 body', async () => {
-    app = await createApp(64);
+  it.each([
+    '/v1/chat/completions',
+    '/v1/responses',
+    '/v1/images/edits',
+    '/v1/audio/transcriptions',
+  ])('accepts a declared JSON media request larger than Fastify default at %s', async (url) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url,
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ model: 'gemini-3-flash', padding: 'x'.repeat(2 * 1024 * 1024) }),
+      });
+
+    expect(response.statusCode, response.body).not.toBe(413);
+  });
+
+  it('keeps declared JSON media requests bounded at 64 MiB with an OpenAI 413 envelope', async () => {
+    app = await createApp();
     await app.init();
 
     const response = await app
@@ -182,7 +205,10 @@ describe('OpenAI multipart media endpoints', () => {
         method: 'POST',
         url: '/v1/chat/completions',
         headers: { 'content-type': 'application/json' },
-        payload: JSON.stringify({ model: 'gemini-3-flash', messages: 'x'.repeat(128) }),
+        payload: JSON.stringify({
+          model: 'gemini-3-flash',
+          padding: 'x'.repeat(MAX_JSON_MEDIA_BODY_BYTES),
+        }),
       });
 
     expect(response.statusCode).toBe(413);
@@ -194,6 +220,23 @@ describe('OpenAI multipart media endpoints', () => {
         code: 'request_body_too_large',
       },
     });
+  });
+
+  it('keeps unrelated OpenAI routes at Fastify default body limit', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ padding: 'x'.repeat(2 * 1024 * 1024) }),
+      });
+
+    expect(response.statusCode).toBe(413);
   });
 
   it('preserves Anthropic errors through the assembled Nest and Fastify pipeline', async () => {

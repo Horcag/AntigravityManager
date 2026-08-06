@@ -12,6 +12,13 @@ import multipart from '@fastify/multipart';
 import { FastifyInstance } from 'fastify';
 
 const MEDIA_ENDPOINTS = new Set(['/v1/audio/transcriptions', '/v1/images/edits']);
+const JSON_MEDIA_ENDPOINTS = new Set([
+  '/v1/chat/completions',
+  '/v1/responses',
+  '/v1/images/edits',
+  '/v1/audio/transcriptions',
+]);
+export const MAX_JSON_MEDIA_BODY_BYTES = 64 * 1024 * 1024;
 const MULTIPART_ERROR_CODES = new Set([
   'FST_PARTS_LIMIT',
   'FST_FILES_LIMIT',
@@ -53,9 +60,16 @@ export function isMultipartParserOrLimitError(error: unknown): error is Error {
 }
 
 export function isMultipartMediaEndpoint(url: string | undefined): boolean {
+  return MEDIA_ENDPOINTS.has(normalizePathname(url));
+}
+
+export function isJsonMediaEndpoint(url: string | undefined): boolean {
+  return JSON_MEDIA_ENDPOINTS.has(normalizePathname(url));
+}
+
+function normalizePathname(url: string | undefined): string {
   const pathname = url?.split('?', 1)[0] ?? '';
-  const normalizedPathname = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-  return MEDIA_ENDPOINTS.has(normalizedPathname);
+  return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
 }
 
 @Catch()
@@ -167,7 +181,17 @@ function getExceptionMessage(error: HttpException): string {
 
 @Injectable()
 export class FastifyMultipartProvider implements OnModuleInit {
-  constructor(@Inject(HttpAdapterHost) private readonly httpAdapterHost: HttpAdapterHost) {}
+  constructor(@Inject(HttpAdapterHost) private readonly httpAdapterHost: HttpAdapterHost) {
+    const fastify = this.httpAdapterHost.httpAdapter.getInstance<FastifyInstance>();
+
+    // Nest maps controller routes after constructing providers, so this hook can set Fastify's
+    // per-route parser limit before the OpenAI-compatible routes are registered.
+    fastify.addHook('onRoute', (routeOptions) => {
+      if (routeOptions.method === 'POST' && isJsonMediaEndpoint(routeOptions.url)) {
+        routeOptions.bodyLimit = MAX_JSON_MEDIA_BODY_BYTES;
+      }
+    });
+  }
 
   onModuleInit(): void {
     const fastify = this.httpAdapterHost.httpAdapter.getInstance<FastifyInstance>();
