@@ -81,6 +81,20 @@ describe('StreamingState', () => {
       expect(output).toContain('"message_stop"');
     });
 
+    it.each([
+      ['sToP', 'end_turn'],
+      ['mAx_ToKeNs', 'max_tokens'],
+      ['BLOCKLIST', 'refusal'],
+      ['MALFORMED_FUNCTION_CALL', 'refusal'],
+      ['IMAGE_SAFETY', 'refusal'],
+      ['FUTURE_GEMINI_REASON', 'refusal'],
+    ])('emits valid Anthropic stop reason %s for Gemini %s', (finishReason, stopReason) => {
+      const output = state.emitFinish(finishReason).join('');
+
+      expect(output).toContain(`"stop_reason":"${stopReason}"`);
+      expect(output).not.toContain(finishReason);
+    });
+
     it('suppresses an exact explicit tool call replay', () => {
       const processor = new PartProcessor(state);
       const first = processor.process({

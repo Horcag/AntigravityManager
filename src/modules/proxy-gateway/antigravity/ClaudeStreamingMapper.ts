@@ -3,6 +3,7 @@ import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 import { logger } from '@/shared/logging/logger';
+import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
 
@@ -206,11 +207,10 @@ export class StreamingState {
     }
 
     // Determine stop reason
-    let stopReason = 'end_turn';
+    let stopReason: ReturnType<typeof mapGeminiFinishReasonToAnthropic> | 'tool_use' =
+      mapGeminiFinishReasonToAnthropic(finishReason);
     if (this.usedTool) {
       stopReason = 'tool_use';
-    } else if (finishReason === 'MAX_TOKENS') {
-      stopReason = 'max_tokens';
     }
 
     const usage: Usage = usageMetadata

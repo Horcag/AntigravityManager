@@ -4,10 +4,12 @@ import { transformResponse } from '@/modules/proxy-gateway/antigravity/ClaudeRes
 
 describe('ClaudeResponseMapper termination reasons', () => {
   it.each([
-    ['STOP', 'end_turn'],
-    ['MAX_TOKENS', 'max_tokens'],
-    ['SAFETY', 'refusal'],
-    ['RECITATION', 'refusal'],
+    ['sToP', 'end_turn'],
+    ['mAx_ToKeNs', 'max_tokens'],
+    ['BLOCKLIST', 'refusal'],
+    ['MALFORMED_FUNCTION_CALL', 'refusal'],
+    ['IMAGE_SAFETY', 'refusal'],
+    ['FUTURE_GEMINI_REASON', 'refusal'],
   ])('maps Gemini %s to the valid Anthropic stop reason %s', (finishReason, stopReason) => {
     const response = transformResponse({
       candidates: [{ content: { role: 'model', parts: [{ text: 'result' }] }, finishReason }],

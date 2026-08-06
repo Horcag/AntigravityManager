@@ -30,6 +30,7 @@ import {
 } from '../antigravity/types';
 import { normalizeObjectJsonSchema } from '../antigravity/JsonSchemaUtils';
 import { classifyStreamError } from '../antigravity/stream-error-utils';
+import { mapGeminiFinishReasonToOpenAI } from '../antigravity/gemini-finish-reason';
 import {
   OpenAIChatRequest,
   AnthropicChatRequest,
@@ -1818,7 +1819,7 @@ export class ProxyService {
           if (candidate?.finishReason) {
             const mappedFinishReason = emittedToolCall
               ? 'tool_calls'
-              : this.mapGeminiFinishReasonToOpenAIFinishReason(candidate.finishReason);
+              : mapGeminiFinishReasonToOpenAI(candidate.finishReason);
             pushChoice(this.buildOpenAIFinishChoice(streamOptions.variant, mappedFinishReason));
             terminated = true;
             idleTimer.clear();
@@ -2389,25 +2390,6 @@ export class ProxyService {
     return result.length > 0 ? result : undefined;
   }
 
-  private mapGeminiFinishReasonToOpenAIFinishReason(finishReason?: string): string | null {
-    if (!finishReason) {
-      return null;
-    }
-
-    const normalized = finishReason.toUpperCase();
-    if (normalized === 'STOP') {
-      return 'stop';
-    }
-    if (normalized === 'MAX_TOKENS') {
-      return 'length';
-    }
-    if (normalized === 'SAFETY' || normalized === 'RECITATION') {
-      return 'content_filter';
-    }
-
-    return finishReason.toLowerCase();
-  }
-
   private mapAnthropicStopReasonToOpenAIFinishReason(stopReason?: string | null): string | null {
     if (!stopReason) {
       return null;
@@ -2426,7 +2408,7 @@ export class ProxyService {
       return 'content_filter';
     }
 
-    return stopReason;
+    return 'content_filter';
   }
 
   private normalizeToolCallArguments(input: unknown): string {

@@ -969,10 +969,12 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
   });
 
   it.each([
-    ['STOP', 'stop'],
-    ['MAX_TOKENS', 'length'],
-    ['SAFETY', 'content_filter'],
-    ['RECITATION', 'content_filter'],
+    ['sToP', 'stop'],
+    ['mAx_ToKeNs', 'length'],
+    ['BLOCKLIST', 'content_filter'],
+    ['MALFORMED_FUNCTION_CALL', 'content_filter'],
+    ['IMAGE_SAFETY', 'content_filter'],
+    ['FUTURE_GEMINI_REASON', 'content_filter'],
   ])(
     'preserves Gemini %s termination semantics for non-stream Chat, legacy, and Responses outputs',
     async (finishReason, expectedFinishReason) => {
@@ -994,6 +996,33 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
 
         expect(response.choices[0]?.finish_reason).toBe(expectedFinishReason);
       }
+    },
+  );
+
+  it.each(['BLOCKLIST', 'MALFORMED_FUNCTION_CALL', 'IMAGE_SAFETY', 'FUTURE_GEMINI_REASON'])(
+    'emits content_filter for live OpenAI streams with Gemini %s',
+    async (finishReason) => {
+      const service = createService();
+      const stream = new EventEmitter();
+      const outcome = await collectStream(
+        invokePrivate<Observable<string>>(service, 'processStreamResponse', stream, 'gpt-4o-mini'),
+        (source) => {
+          source.emit(
+            'data',
+            geminiChunk({
+              candidates: [{ content: { parts: [{ text: 'result' }] }, finishReason }],
+            }),
+          );
+        },
+        stream,
+      );
+
+      const payloads = parseSseData(outcome.chunks).filter(
+        (event): event is Record<string, unknown> => event !== '[DONE]',
+      );
+      expect(payloads.at(-1)?.choices).toEqual([
+        { index: 0, delta: {}, finish_reason: 'content_filter' },
+      ]);
     },
   );
 

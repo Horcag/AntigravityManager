@@ -9,6 +9,7 @@ import {
 } from './types';
 import { decodeSignature } from './signature-utils';
 import { SignatureContext, SignatureStore } from './SignatureStore';
+import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
 
 /**
  * Non-streaming response processor (Gemini -> Claude)
@@ -235,16 +236,10 @@ class NonStreamingProcessor {
 
   private buildResponse(geminiResponse: GeminiResponse): ClaudeResponse {
     const finishReason = geminiResponse.candidates?.[0]?.finishReason;
-    const normalizedFinishReason = finishReason?.toUpperCase();
-
-    let stopReason = 'end_turn';
+    let stopReason: ReturnType<typeof mapGeminiFinishReasonToAnthropic> | 'tool_use' =
+      mapGeminiFinishReasonToAnthropic(finishReason);
     if (this.hasToolCall) {
       stopReason = 'tool_use';
-    } else if (normalizedFinishReason === 'MAX_TOKENS') {
-      stopReason = 'max_tokens';
-    } else if (normalizedFinishReason === 'SAFETY' || normalizedFinishReason === 'RECITATION') {
-      // Anthropic has no safety stop reason; refusal is its valid non-normal terminal state.
-      stopReason = 'refusal';
     }
 
     const usage = this.buildUsage(geminiResponse);

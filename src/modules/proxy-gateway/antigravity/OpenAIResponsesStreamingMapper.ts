@@ -1,6 +1,7 @@
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
+import { mapGeminiFinishReasonToOpenAI } from './gemini-finish-reason';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: { args: Record<string, unknown>; id?: string; name: string };
@@ -382,11 +383,11 @@ export class OpenAIResponsesStreamingMapper {
       return null;
     }
 
-    const normalized = finishReason.toUpperCase();
-    if (normalized === 'MAX_TOKENS' || normalized === 'LENGTH') {
+    const mapped = mapGeminiFinishReasonToOpenAI(finishReason);
+    if (mapped === 'length') {
       return 'max_output_tokens';
     }
-    if (normalized === 'SAFETY' || normalized === 'RECITATION') {
+    if (mapped === 'content_filter') {
       return 'content_filter';
     }
     return null;

@@ -162,7 +162,14 @@ describe('OpenAIResponsesStreamingMapper', () => {
     expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
   });
 
-  it.each(['SAFETY', 'recitation'])('maps %s to content-filter incompleteness', (finishReason) => {
+  it.each([
+    'SAFETY',
+    'recitation',
+    'BLOCKLIST',
+    'MALFORMED_FUNCTION_CALL',
+    'IMAGE_SAFETY',
+    'UNKNOWN',
+  ])('maps %s to content-filter incompleteness', (finishReason) => {
     const mapper = createMapper();
     const terminal = mapper.complete(finishReason).map(parseEvent).at(-1);
 
