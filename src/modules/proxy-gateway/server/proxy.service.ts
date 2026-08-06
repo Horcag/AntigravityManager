@@ -387,6 +387,66 @@ export class ProxyService {
 
       idleTimer.reset();
 
+      const processLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) {
+          return;
+        }
+        const dataStr = trimmed.slice('data:'.length).trim();
+        if (dataStr.length === 0 || dataStr === '[DONE]') {
+          return;
+        }
+
+        try {
+          const json = JSON.parse(dataStr);
+          const upstreamError = this.getUpstreamStreamError(json);
+          if (upstreamError) {
+            failStream(upstreamError);
+            return;
+          }
+
+          const candidate = json?.candidates?.[0];
+          const parts = candidate?.content?.parts;
+          const hasUsableCandidate =
+            Array.isArray(parts) && parts.some((part) => this.isGeminiPart(part));
+
+          if (candidate?.finishReason) {
+            lastFinishReason = candidate.finishReason;
+          }
+          if (json?.usageMetadata) {
+            lastUsageMetadata = json.usageMetadata;
+          }
+
+          if (hasUsableCandidate) {
+            const startMsg = state.emitMessageStart(json);
+            if (startMsg) {
+              hasUsableEvent = true;
+              subscriber.next(startMsg);
+            }
+
+            for (const part of parts) {
+              if (this.isGeminiPart(part)) {
+                const chunks = processor.process(part);
+                chunks.forEach((chunk) => subscriber.next(chunk));
+              }
+            }
+          }
+
+          state.resetErrorState();
+        } catch (error) {
+          if (error instanceof ToolCallIdConflictError) {
+            failStream(error);
+            return;
+          }
+          this.logger.error('Stream parse error', error);
+          const errorChunks = state.handleParseError(dataStr);
+          errorChunks.forEach((chunk) => subscriber.next(chunk));
+          if (state.getErrorCount() > 3) {
+            failStream(new Error('Malformed upstream stream payload'));
+          }
+        }
+      };
+
       upstreamStream.on('data', (chunk: Buffer) => {
         if (terminated) {
           return;
@@ -400,72 +460,18 @@ export class ProxyService {
           if (terminated) {
             return;
           }
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const dataStr = trimmed.slice('data:'.length).trim();
-          if (dataStr.length === 0 || dataStr === '[DONE]') continue;
-
-          try {
-            const json = JSON.parse(dataStr);
-
-            if (isPlainObject(json.error)) {
-              const message = isString(json.error.message)
-                ? json.error.message
-                : 'Upstream stream error';
-              const status =
-                isNumber(json.error.code) && json.error.code >= 400 && json.error.code <= 599
-                  ? json.error.code
-                  : undefined;
-              failStream(new UpstreamRequestError({ message, status }));
-              return;
-            }
-
-            if (json) {
-              const startMsg = state.emitMessageStart(json);
-              if (startMsg) {
-                hasUsableEvent = true;
-                subscriber.next(startMsg);
-              }
-            }
-
-            const candidate = json.candidates?.[0];
-            const parts = candidate?.content?.parts;
-
-            if (candidate?.finishReason) {
-              lastFinishReason = candidate.finishReason;
-            }
-            if (json.usageMetadata) {
-              lastUsageMetadata = json.usageMetadata;
-            }
-
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                if (this.isGeminiPart(part)) {
-                  const chunks = processor.process(part);
-                  chunks.forEach((c) => subscriber.next(c));
-                }
-              }
-            }
-
-            // Reset error state on successful parse
-            state.resetErrorState();
-          } catch (e) {
-            if (e instanceof ToolCallIdConflictError) {
-              failStream(e);
-              return;
-            }
-            this.logger.error('Stream parse error', e);
-            const errorChunks = state.handleParseError(dataStr);
-            errorChunks.forEach((c) => subscriber.next(c));
-            if (state.getErrorCount() > 3) {
-              failStream(new Error('Malformed upstream stream payload'));
-              return;
-            }
-          }
+          processLine(line);
         }
       });
 
       upstreamStream.on('end', () => {
+        if (terminated) {
+          return;
+        }
+        buffer += decoder.decode();
+        if (buffer.trim().length > 0) {
+          processLine(buffer);
+        }
         if (terminated) {
           return;
         }
@@ -1036,6 +1042,28 @@ export class ProxyService {
     return Array.isArray(parts) && parts.length > 0;
   }
 
+  private getUpstreamStreamError(payload: unknown): UpstreamRequestError | null {
+    const record = this.toUnknownRecord(payload);
+    if (!record || !Object.hasOwn(record, 'error') || isNil(record.error)) {
+      return null;
+    }
+
+    const error = record.error;
+    const errorRecord = this.toUnknownRecord(error);
+    if (errorRecord) {
+      const message = isString(errorRecord.message) ? errorRecord.message : 'Upstream stream error';
+      const status =
+        isNumber(errorRecord.code) && errorRecord.code >= 400 && errorRecord.code <= 599
+          ? errorRecord.code
+          : undefined;
+      return new UpstreamRequestError({ message, status });
+    }
+
+    return new UpstreamRequestError({
+      message: isString(error) ? error : `Upstream stream error: ${String(error)}`,
+    });
+  }
+
   private collectGeminiStreamAsResponse(
     upstreamStream: NodeJS.ReadableStream,
   ): Promise<GeminiResponse> {
@@ -1092,52 +1120,64 @@ export class ProxyService {
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) {
-            continue;
+          processLine(line);
+          if (settled) {
+            return;
+          }
+        }
+      };
+
+      const processLine = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) {
+          return;
+        }
+
+        const dataStr = trimmed.slice('data:'.length).trim();
+        if (dataStr.length === 0 || dataStr === '[DONE]') {
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(dataStr);
+          const upstreamError = this.getUpstreamStreamError(parsed);
+          if (upstreamError) {
+            rejectOnce(upstreamError, true);
+            return;
           }
 
-          const dataStr = trimmed.slice('data:'.length).trim();
-          if (dataStr.length === 0 || dataStr === '[DONE]') {
-            continue;
-          }
-
-          try {
-            const parsed = JSON.parse(dataStr);
-            const candidate = parsed?.candidates?.[0];
-            const parts = candidate?.content?.parts;
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                if (!this.isGeminiPart(part)) {
-                  continue;
-                }
-                if (
-                  part.functionCall &&
-                  toolCallIdIntegrity.record(
-                    part.functionCall.id,
-                    part.functionCall.name,
-                    part.functionCall.args,
-                  ) === 'replay'
-                ) {
-                  continue;
-                }
-                mergedParts.push(part);
+          const candidate = parsed?.candidates?.[0];
+          const parts = candidate?.content?.parts;
+          if (Array.isArray(parts)) {
+            for (const part of parts) {
+              if (!this.isGeminiPart(part)) {
+                continue;
               }
+              if (
+                part.functionCall &&
+                toolCallIdIntegrity.record(
+                  part.functionCall.id,
+                  part.functionCall.name,
+                  part.functionCall.args,
+                ) === 'replay'
+              ) {
+                continue;
+              }
+              mergedParts.push(part);
             }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-            if (parsed?.usageMetadata) {
-              usageMetadata = parsed.usageMetadata;
-            }
-          } catch (error) {
-            if (error instanceof ToolCallIdConflictError) {
-              rejectOnce(error, true);
-              return;
-            }
-            // Ignore malformed chunks and continue collecting valid parts.
           }
+
+          if (candidate?.finishReason) {
+            finishReason = candidate.finishReason;
+          }
+          if (parsed?.usageMetadata) {
+            usageMetadata = parsed.usageMetadata;
+          }
+        } catch (error) {
+          if (error instanceof ToolCallIdConflictError) {
+            rejectOnce(error, true);
+          }
+          // Ignore malformed chunks and continue collecting valid parts.
         }
       };
 
@@ -1145,7 +1185,14 @@ export class ProxyService {
         if (settled) {
           return;
         }
-        if (!receivedData) {
+        buffer += decoder.decode();
+        if (buffer.trim().length > 0) {
+          processLine(buffer);
+        }
+        if (settled) {
+          return;
+        }
+        if (!receivedData || mergedParts.length === 0) {
           rejectOnce(new Error('Empty response stream'));
           return;
         }

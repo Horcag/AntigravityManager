@@ -266,6 +266,55 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(result.candidates[0].finishReason).toBe('STOP');
   });
 
+  it('collects a valid final fallback frame without a trailing newline', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream) as Promise<any>;
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"final frame"}]}}]}'),
+    );
+    stream.emit('end');
+
+    await expect(resultPromise).resolves.toMatchObject({
+      candidates: [{ content: { parts: [{ text: 'final frame' }] } }],
+    });
+  });
+
+  it.each([
+    ['object', { code: 429, message: 'quota exhausted' }, 'quota exhausted'],
+    ['string', 'quota exhausted', 'quota exhausted'],
+    ['primitive', 429, 'Upstream stream error: 429'],
+  ])('rejects an in-band %s error during fallback collection', async (_kind, error, message) => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream);
+
+    stream.emit('data', Buffer.from(`data: ${JSON.stringify({ error })}\n\n`));
+    stream.emit('end');
+
+    await expect(resultPromise).rejects.toThrow(message);
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(stream.listenerCount('end')).toBe(0);
+    expect(stream.listenerCount('error')).toBe(0);
+  });
+
+  it('rejects candidate-free and usage-only fallback streams', async () => {
+    const service = new TestableProxyService();
+
+    for (const payload of [
+      { candidates: [] },
+      { usageMetadata: { totalTokenCount: 3 }, candidates: [{ finishReason: 'STOP' }] },
+    ]) {
+      const stream = new EventEmitter();
+      const resultPromise = service.testCollectStream(stream);
+      stream.emit('data', Buffer.from(`data: ${JSON.stringify(payload)}\n\n`));
+      stream.emit('end');
+      await expect(resultPromise).rejects.toThrow('Empty response stream');
+    }
+  });
+
   it('suppresses exact explicit tool-call replays across fallback frames before protocol mapping', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
@@ -428,6 +477,29 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       'message_stop',
     ]);
     expect(chunks.join('')).toContain('no-space stream text');
+  });
+
+  it('emits an Anthropic response from a valid final SSE frame without a trailing newline', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"final stream"}]}}]}'),
+    );
+    stream.emit('end');
+    await completed;
+
+    expect(chunks.join('')).toContain('final stream');
+    expect(chunks.join('')).toContain('message_stop');
   });
 
   it('emits every ordered Anthropic block from a multipart upstream SSE frame', async () => {
@@ -873,6 +945,80 @@ describe('ProxyService Empty Stream Retry Logic', () => {
 
     expect(errorMessage).toBe('quota exhausted');
     expect(chunks).toEqual([]);
+  });
+
+  it.each([
+    ['string', 'quota exhausted', 'quota exhausted'],
+    ['primitive', 429, 'Upstream stream error: 429'],
+  ])('fails an Anthropic stream for an in-band %s error frame', (_kind, error, message) => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    let errorMessage = '';
+
+    service.testProcessStream(stream).subscribe({
+      next: (chunk) => chunks.push(chunk),
+      error: (streamError: Error) => {
+        errorMessage = streamError.message;
+      },
+    });
+
+    stream.emit('data', Buffer.from(`data: ${JSON.stringify({ error })}\n\n`));
+    stream.emit('end');
+
+    expect(errorMessage).toBe(message);
+    expect(chunks).toEqual([]);
+  });
+
+  it('rejects candidate-free and usage-only Anthropic frames without success terminators', () => {
+    const service = new TestableProxyService();
+
+    for (const payload of [
+      { candidates: [] },
+      { usageMetadata: { totalTokenCount: 3 }, candidates: [{ finishReason: 'STOP' }] },
+    ]) {
+      const stream = new EventEmitter();
+      const chunks: string[] = [];
+      let errorMessage = '';
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: (error: Error) => {
+          errorMessage = error.message;
+        },
+      });
+
+      stream.emit('data', Buffer.from(`data: ${JSON.stringify(payload)}\n\n`));
+      stream.emit('end');
+
+      expect(errorMessage).toBe('Empty response stream');
+      expect(chunks.join('')).not.toContain('message_stop');
+      expect(chunks.join('')).not.toContain('[DONE]');
+    }
+  });
+
+  it('does not emit Anthropic success terminators after an in-band failure', () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    let errorMessage = '';
+
+    service.testProcessStream(stream).subscribe({
+      next: (chunk) => chunks.push(chunk),
+      error: (error: Error) => {
+        errorMessage = error.message;
+      },
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'),
+    );
+    stream.emit('data', Buffer.from('data: {"error":"quota exhausted"}\n\n'));
+    stream.emit('end');
+
+    expect(errorMessage).toBe('quota exhausted');
+    expect(chunks.join('')).not.toContain('message_stop');
+    expect(chunks.join('')).not.toContain('[DONE]');
   });
 
   it('emits one Anthropic wire error for an in-band upstream error frame without success events', () => {
