@@ -6,9 +6,9 @@ import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 function convertOpenAIToClaude(request: Record<string, unknown>) {
   const service = new ProxyService({} as never, {} as never);
   const target = service as unknown as {
-    convertOpenAIToClaude: (value: Record<string, unknown>) => Parameters<
-      typeof transformClaudeRequestIn
-    >[0];
+    convertOpenAIToClaude: (
+      value: Record<string, unknown>,
+    ) => Parameters<typeof transformClaudeRequestIn>[0];
   };
 
   return target.convertOpenAIToClaude(request);
