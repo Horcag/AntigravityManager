@@ -2594,6 +2594,135 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('accepts parameterized, whitespace-wrapped image data URLs on Chat and Responses paths', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_parameterized_data_url',
+        created: 1700000003,
+        model: 'gpt-4o',
+        choices: [{ message: { content: 'done' } }],
+      }),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const imageUrl = 'data:image/png;charset=utf-8;base64,QU\nJDRA==';
+
+    try {
+      for (const [url, payload] of [
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              { role: 'user', content: [{ type: 'image_url', image_url: { url: imageUrl } }] },
+            ],
+          },
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [{ role: 'user', content: [{ type: 'input_image', image_url: imageUrl }] }],
+          },
+        ],
+      ] as Array<[string, Record<string, unknown>]>) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode, response.body).toBe(200);
+      }
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects malformed image data URLs on Chat and Responses paths before upstream', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const [url, payload, param] of [
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'image_url', image_url: { url: 'data:image/png;base64,QU=JDRA==' } },
+                ],
+              },
+            ],
+          },
+          'messages',
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'input_image', image_url: 'data:image/png;charset;base64,QUJDRA==' },
+                ],
+              },
+            ],
+          },
+          'input.content',
+        ],
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'user',
+                content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,' } }],
+              },
+            ],
+          },
+          'messages',
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'input_image', image_url: 'data:image/png;base64,QUJDRA==;ignored' },
+                ],
+              },
+            ],
+          },
+          'input.content',
+        ],
+      ] as Array<[string, Record<string, unknown>, string]>) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+          error: {
+            message: `${param} must contain a valid base64 image data URL`,
+            type: 'invalid_request_error',
+            param,
+            code: 'invalid_value',
+          },
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts data URLs and skips replayed reasoning items without converting either to text', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {

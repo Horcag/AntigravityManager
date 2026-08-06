@@ -1289,10 +1289,21 @@ export class ProxyController {
   }
 
   private validateImageDataUrl(url: string, param: string): void {
-    if (!/^data:[\w/+.-]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(url)) {
+    if (!url.startsWith('data:')) {
       throw this.unsupportedParameter(
         param,
         'remote image URLs are not supported by this gateway; use a data URL',
+      );
+    }
+
+    const dataUrl = url.match(
+      /^data:(?<mime>[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/,
+    );
+    if (!dataUrl?.groups?.data || this.hasInvalidBase64Data(dataUrl.groups.data)) {
+      throw this.invalidRequest(
+        `${param} must contain a valid base64 image data URL`,
+        param,
+        'invalid_value',
       );
     }
   }
@@ -1309,8 +1320,8 @@ export class ProxyController {
     }
   }
 
-  private invalidRequest(message: string, param?: string): OpenAIProtocolException {
-    return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param });
+  private invalidRequest(message: string, param?: string, code?: string): OpenAIProtocolException {
+    return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param, code });
   }
 
   private validateImageOptions(input: ImageOptionInput, res: FastifyReply): boolean {
