@@ -148,6 +148,50 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it('rejects repeated timestamp granularities from a real multipart audio request', async () => {
+    app = await createApp();
+    await app.init();
+
+    const boundary = '----openai-audio-granularities';
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="model"'], value: 'gemini-3-flash' },
+          {
+            headers: ['Content-Disposition: form-data; name="timestamp_granularities[]"'],
+            value: 'segment',
+          },
+          {
+            headers: ['Content-Disposition: form-data; name="timestamp_granularities[]"'],
+            value: 'word',
+          },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="file"; filename="speech.wav"',
+              'Content-Type: audio/wav',
+            ],
+            value: Buffer.from([0, 255, 16, 128]),
+          },
+        ]),
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'timestamp_granularities is not supported by this proxy.',
+        type: 'invalid_request_error',
+        param: 'timestamp_granularities',
+        code: 'unsupported_option',
+      },
+    });
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+  });
+
   it('accepts a scalar image field through a real multipart request', async () => {
     proxyService.handleChatCompletions.mockResolvedValue({
       choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],

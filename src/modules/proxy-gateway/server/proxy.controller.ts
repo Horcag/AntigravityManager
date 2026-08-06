@@ -773,9 +773,7 @@ export class ProxyController {
     if (type === 'function_call') {
       this.requireResponsesCallId(inputItem);
       this.requireNonEmptyString(inputItem.name, 'input.name');
-      if (!isString(inputItem.arguments)) {
-        throw this.invalidRequest('function_call arguments must be a string', 'input.arguments');
-      }
+      this.requireResponsesFunctionCallArguments(inputItem.arguments);
       return;
     }
     if (type === 'function_call_output' || type === 'custom_tool_call_output') {
@@ -800,11 +798,32 @@ export class ProxyController {
   }
 
   private responsesInputItemType(item: Record<string, unknown>): string | null {
-    const type = this.asString(item.type);
-    if (type) {
-      return type;
+    if (Object.hasOwn(item, 'type')) {
+      return this.asString(item.type);
     }
     return item.role !== undefined && item.content !== undefined ? 'message' : null;
+  }
+
+  private requireResponsesFunctionCallArguments(value: unknown): string {
+    if (!isString(value)) {
+      throw this.invalidRequest('function_call arguments must be a string', 'input.arguments');
+    }
+
+    try {
+      if (!this.toRecord(JSON.parse(value))) {
+        throw this.invalidRequest(
+          'function_call arguments must be a JSON object',
+          'input.arguments',
+        );
+      }
+    } catch (error) {
+      if (error instanceof OpenAIProtocolException) {
+        throw error;
+      }
+      throw this.invalidRequest('function_call arguments must be valid JSON', 'input.arguments');
+    }
+
+    return value;
   }
 
   private validateResponsesMessage(item: Record<string, unknown>): void {
@@ -1233,7 +1252,10 @@ export class ProxyController {
           const callId =
             this.asString(itemObj.call_id) ?? this.asString(itemObj.id) ?? `call_${Date.now()}`;
           const toolName = callIdToToolName.get(callId) ?? 'unknown';
-          const args = this.resolveToolArguments(type, itemObj);
+          const argumentsValue =
+            type === 'function_call'
+              ? this.requireResponsesFunctionCallArguments(itemObj.arguments)
+              : JSON.stringify(this.resolveToolArguments(type, itemObj));
           messages.push({
             role: 'assistant',
             content: '',
@@ -1243,7 +1265,7 @@ export class ProxyController {
                 type: 'function',
                 function: {
                   name: toolName,
-                  arguments: JSON.stringify(args),
+                  arguments: argumentsValue,
                 },
               },
             ],

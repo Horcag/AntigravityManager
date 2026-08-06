@@ -617,7 +617,7 @@ describe('ProxyController Integration', () => {
             type: 'function_call',
             call_id: 'call_docs',
             name: 'search_docs',
-            arguments: '{"query":"Responses"}',
+            arguments: '{ "query": "Responses" }',
           },
         ],
       },
@@ -634,7 +634,10 @@ describe('ProxyController Integration', () => {
             tool_calls: [
               expect.objectContaining({
                 id: 'call_docs',
-                function: expect.objectContaining({ name: 'search_docs' }),
+                function: expect.objectContaining({
+                  name: 'search_docs',
+                  arguments: '{ "query": "Responses" }',
+                }),
               }),
             ],
           }),
@@ -647,6 +650,9 @@ describe('ProxyController Integration', () => {
   it.each([
     ['a primitive item', ['invalid']],
     ['an unknown item type', [{ type: 'reasoning', content: [] }]],
+    ['a null item type', [{ type: null, role: 'user', content: 'hello' }]],
+    ['an empty item type', [{ type: '', role: 'user', content: 'hello' }]],
+    ['a non-string item type', [{ type: 123, role: 'user', content: 'hello' }]],
     ['an invalid message role', [{ role: 'tool', content: 'result' }]],
     ['an invalid message content block', [{ role: 'user', content: [{ type: 'input_audio' }] }]],
     [
@@ -660,6 +666,14 @@ describe('ProxyController Integration', () => {
     [
       'a function call with object arguments',
       [{ type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: {} }],
+    ],
+    [
+      'a function call with invalid JSON arguments',
+      [{ type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{invalid' }],
+    ],
+    [
+      'a function call with non-object JSON arguments',
+      [{ type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '[]' }],
     ],
     ['a malformed tool output', [{ type: 'function_call_output', call_id: 'call_1', output: {} }]],
     ['a malformed local shell call', [{ type: 'local_shell_call', call_id: 'call_1', action: {} }]],
