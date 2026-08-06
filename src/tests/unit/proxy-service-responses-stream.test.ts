@@ -25,6 +25,21 @@ function createResponsesStream(
   return result;
 }
 
+function createSyntheticResponsesStream(
+  service: ProxyService,
+  response: Record<string, unknown>,
+): Observable<unknown> {
+  const method: unknown = Reflect.get(service, 'createSyntheticResponsesStream');
+  if (typeof method !== 'function') {
+    throw new Error('Synthetic Responses stream creator is unavailable');
+  }
+  const result: unknown = Reflect.apply(method, service, [response]);
+  if (!(result instanceof Observable)) {
+    throw new Error('Synthetic Responses stream creator did not return an Observable');
+  }
+  return result;
+}
+
 describe('ProxyService Responses streaming', () => {
   it('keeps an otherwise idle Responses connection alive with SSE comments', async () => {
     vi.useFakeTimers();
@@ -57,6 +72,48 @@ describe('ProxyService Responses streaming', () => {
     expect(events.at(-1)).toMatchObject({
       response: { usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } },
     });
+  });
+
+  it('carries actual usage through a synthetic Responses completion event', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const stream = createSyntheticResponsesStream(service, {
+      choices: [{ message: { content: 'ok' } }],
+      model: 'gemini-3-pro',
+      usage: { completion_tokens: 3, prompt_tokens: 2, total_tokens: 5 },
+    });
+
+    const events = (await lastValueFrom(stream.pipe(toArray()))).map((event) =>
+      parseEvent(String(event)),
+    );
+    expect(events.at(-1)).toMatchObject({
+      response: {
+        status: 'completed',
+        usage: {
+          input_tokens: 2,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 3,
+          output_tokens_details: { reasoning_tokens: 0 },
+          total_tokens: 5,
+        },
+      },
+      type: 'response.completed',
+    });
+  });
+
+  it('reports null usage rather than fabricated counters when synthetic usage is unavailable', async () => {
+    const stream = createSyntheticResponsesStream(new ProxyService({} as never, {} as never), {
+      choices: [{ message: { content: 'ok' } }],
+      model: 'gemini-3-pro',
+    });
+
+    const events = (await lastValueFrom(stream.pipe(toArray()))).map((event) =>
+      parseEvent(String(event)),
+    );
+    expect(events.at(-1)).toMatchObject({
+      response: { status: 'completed', usage: null },
+      type: 'response.completed',
+    });
+    expect(JSON.stringify(events.at(-1))).not.toContain('input_tokens');
   });
 
   it('accepts a usage-only frame after a usable candidate', async () => {

@@ -357,15 +357,18 @@ export class OpenAIResponsesStreamingMapper {
     });
   }
 
-  private usage(): Record<string, unknown> {
-    const inputTokens = this.usageMetadata?.promptTokenCount ?? 0;
-    const outputTokens = this.usageMetadata?.candidatesTokenCount ?? 0;
+  private usage(): Record<string, unknown> | null {
+    if (!this.usageMetadata) {
+      return null;
+    }
+    const inputTokens = this.usageMetadata.promptTokenCount ?? 0;
+    const outputTokens = this.usageMetadata.candidatesTokenCount ?? 0;
     return {
       input_tokens: inputTokens,
       input_tokens_details: { cached_tokens: 0 },
       output_tokens: outputTokens,
-      output_tokens_details: { reasoning_tokens: this.usageMetadata?.thoughtsTokenCount ?? 0 },
-      total_tokens: this.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+      output_tokens_details: { reasoning_tokens: this.usageMetadata.thoughtsTokenCount ?? 0 },
+      total_tokens: this.usageMetadata.totalTokenCount ?? inputTokens + outputTokens,
     };
   }
 

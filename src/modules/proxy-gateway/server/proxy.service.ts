@@ -1772,11 +1772,13 @@ export class ProxyService {
 
       subscriber.next(mapper.createResponseCreatedEvent());
       subscriber.next(mapper.createResponseInProgressEvent());
-      mapper.setUsageMetadata({
-        candidatesTokenCount: response.usage.completion_tokens,
-        promptTokenCount: response.usage.prompt_tokens,
-        totalTokenCount: response.usage.total_tokens,
-      });
+      if (response.usage) {
+        mapper.setUsageMetadata({
+          candidatesTokenCount: response.usage.completion_tokens,
+          promptTokenCount: response.usage.prompt_tokens,
+          totalTokenCount: response.usage.total_tokens,
+        });
+      }
       if (content) {
         for (const event of mapper.processPart({ text: content })) {
           subscriber.next(event);
