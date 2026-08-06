@@ -256,7 +256,7 @@ describe('OpenAI multipart media endpoints', () => {
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({
       type: 'error',
-      error: { type: 'api_error', message: 'anthropic upstream failure' },
+      error: { type: 'api_error', message: 'Internal Server Error' },
     });
   });
 
