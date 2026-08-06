@@ -32,6 +32,7 @@ const keepLanguages = new Set(['en', 'en-US', 'zh-CN', 'ru']);
 const windowsExecutableName = 'antigravity-manager';
 
 const isStartCommand = process.argv.some((arg) => arg.includes('start'));
+const isE2ePackage = process.env.npm_lifecycle_event === 'test:e2e';
 
 const artifactRegex = /.*\.(?:exe|dmg|AppImage|zip|deb|rpm|msi)$/;
 const platformNamesMap: Record<string, string> = {
@@ -149,6 +150,7 @@ const config: ForgeConfig = {
     icon: 'images/icon', // Electron Forge automatically adds .icns/.ico
     extraResource: ['src/assets'], // Copy assets folder to resources/assets
     afterCopy: packagerAfterCopy,
+    derefSymlinks: true,
     ignore: packageIgnorePatterns,
     prune: true,
   },
@@ -467,7 +469,7 @@ const config: ForgeConfig = {
             [FuseV1Options.RunAsNode]: false,
             [FuseV1Options.EnableCookieEncryption]: true,
             [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
-            [FuseV1Options.EnableNodeCliInspectArguments]: false,
+            [FuseV1Options.EnableNodeCliInspectArguments]: isE2ePackage,
             [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
             [FuseV1Options.OnlyLoadAppFromAsar]: true,
           }),

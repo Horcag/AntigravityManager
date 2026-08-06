@@ -50,6 +50,7 @@ import { selectWindowsUpdateResult } from '@/modules/app-shell/update/windowsUpd
 import { getQuickObservabilityConfig } from '@/shared/observability/observabilityConfig';
 
 const packetLogPath = path.join(app.getPath('userData'), 'orpc_packets.log');
+const isE2eTest = process.env.AGM_E2E_TEST === 'true';
 
 function logPacket(data: any) {
   try {
@@ -610,7 +611,9 @@ app
     logger.info('Step: Load Config');
     const config = ConfigManager.loadConfig();
     startupConfig = config;
-    syncAutoStart(config);
+    if (!isE2eTest) {
+      syncAutoStart(config);
+    }
     shouldStartHidden = isAutoStartLaunch() && config.auto_startup && config.start_in_tray;
     if (shouldStartHidden) {
       logger.info('Startup: Auto-start detected, window will start hidden');
@@ -623,8 +626,10 @@ app
       logger.error('Startup: Failed to initialize CloudAccountRepo', e);
     }
 
-    logger.info('Step: Initialize Antigravity DB (WAL Mode)');
-    initDatabase();
+    if (!isE2eTest) {
+      logger.info('Step: Initialize Antigravity DB (WAL Mode)');
+      initDatabase();
+    }
   })
   .then(() => {
     logger.info('Step: setupORPC');
@@ -639,14 +644,17 @@ app
     // return installExtensions();
   })
   .then(() => {
-    logger.info('Step: checkForUpdates');
-    checkForUpdates();
+    if (!isE2eTest) {
+      logger.info('Step: checkForUpdates');
+      checkForUpdates();
+    }
   })
   .then(async () => {
     // Initialize Cloud Monitor if enabled
     try {
-      // Start OAuth Server
-      AuthServer.start();
+      if (!isE2eTest) {
+        AuthServer.start();
+      }
 
       // Gateway Server (NestJS) - auto-start if enabled
       const config = startupConfig || ConfigManager.loadConfig();
@@ -668,13 +676,17 @@ app
         }
       }
 
-      const enabled = CloudAccountSettingsStore.getSetting('auto_switch_enabled', false);
-      if (enabled) {
-        logger.info('Startup: Auto-Switch enabled, starting monitor...');
-        CloudMonitorService.start();
-      } else {
-        logger.info('Startup: Auto-Switch disabled, running one-time quota and AI credits sync...');
-        await CloudMonitorService.poll();
+      if (!isE2eTest) {
+        const enabled = CloudAccountSettingsStore.getSetting('auto_switch_enabled', false);
+        if (enabled) {
+          logger.info('Startup: Auto-Switch enabled, starting monitor...');
+          CloudMonitorService.start();
+        } else {
+          logger.info(
+            'Startup: Auto-Switch disabled, running one-time quota and AI credits sync...',
+          );
+          await CloudMonitorService.poll();
+        }
       }
     } catch (e) {
       logger.error('Startup: Failed to initialize services', e);
@@ -682,7 +694,7 @@ app
   })
   .then(async () => {
     logger.info('Step: Startup Complete');
-    if (globalMainWindow) {
+    if (globalMainWindow && !isE2eTest) {
       initTray(globalMainWindow);
     }
   })
