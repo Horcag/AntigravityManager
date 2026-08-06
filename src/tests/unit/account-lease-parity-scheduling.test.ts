@@ -104,6 +104,7 @@ describe('AccountLeaseService parity scheduling replay', () => {
           token_type: 'Bearer',
           expires_in: 3600,
           expiry_timestamp: nowSec + 3600,
+          project_id: 'project-1',
           model_quotas: { 'gemini-3-flash': 80 },
           model_limits: {},
           model_reset_times: {},
@@ -120,6 +121,7 @@ describe('AccountLeaseService parity scheduling replay', () => {
           token_type: 'Bearer',
           expires_in: 3600,
           expiry_timestamp: nowSec + 3600,
+          project_id: 'project-2',
           model_quotas: { 'gpt-oss-120b-medium': 80 },
           model_limits: {},
           model_reset_times: {},
@@ -128,9 +130,21 @@ describe('AccountLeaseService parity scheduling replay', () => {
       ],
     ]);
 
+    const fetchProjectIdSpy = vi
+      .spyOn(GoogleAPIService, 'fetchProjectId')
+      .mockRejectedValue(new Error('Project ID lookup must not run during model selection'));
+    const fetchProjectContextSpy = vi
+      .spyOn(GoogleAPIService, 'fetchProjectContext')
+      .mockRejectedValue(new Error('Project context lookup must not run during model selection'));
+
     const selected = await service.getNextToken({ model: 'gpt-oss-120b-medium' });
 
     expect(selected?.id).toBe('acc-2');
+    expect(fetchProjectIdSpy).not.toHaveBeenCalled();
+    expect(fetchProjectContextSpy).not.toHaveBeenCalled();
+
+    fetchProjectIdSpy.mockRestore();
+    fetchProjectContextSpy.mockRestore();
   });
 
   it('passes oauth_client_key when refreshing token and persists refreshed key', async () => {
