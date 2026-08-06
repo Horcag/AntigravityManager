@@ -2677,7 +2677,7 @@ describe('ProxyController Integration', () => {
     const app = await createHttpApp(proxyService);
     const server = app.getHttpAdapter().getInstance();
     const headers = { authorization: 'Bearer test-key' };
-    const imageUrl = 'data:image/png;charset=utf-8;base64,QU\nJDRA==';
+    const imageUrl = 'DATA:IMAGE/PNG;charset=utf-8;BASE64,QU\nJDRA==';
 
     try {
       for (const [url, payload] of [
@@ -2716,6 +2716,75 @@ describe('ProxyController Integration', () => {
 
     try {
       for (const [url, payload, param] of [
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  { type: 'image_url', image_url: { url: 'data:text/plain;base64,QUJDRA==' } },
+                ],
+              },
+            ],
+          },
+          'messages',
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'input_image',
+                    image_url: 'data:text/plain;base64,QUJDRA==',
+                  },
+                ],
+              },
+            ],
+          },
+          'input.content',
+        ],
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'image_url',
+                    image_url: { url: 'data:application/octet-stream;base64,QUJDRA==' },
+                  },
+                ],
+              },
+            ],
+          },
+          'messages',
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'input_image',
+                    image_url: 'data:application/octet-stream;base64,QUJDRA==',
+                  },
+                ],
+              },
+            ],
+          },
+          'input.content',
+        ],
         [
           '/v1/chat/completions',
           {

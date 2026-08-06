@@ -1296,7 +1296,7 @@ export class ProxyController {
   }
 
   private validateImageDataUrl(url: string, param: string): void {
-    if (!url.startsWith('data:')) {
+    if (!/^data:/i.test(url)) {
       throw this.unsupportedParameter(
         param,
         'remote image URLs are not supported by this gateway; use a data URL',
@@ -1304,7 +1304,7 @@ export class ProxyController {
     }
 
     const dataUrl = url.match(
-      /^data:(?<mime>[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/,
+      /^data:(?<mime>image\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/i,
     );
     if (!dataUrl?.groups?.data || this.hasInvalidBase64Data(dataUrl.groups.data)) {
       throw this.invalidRequest(
