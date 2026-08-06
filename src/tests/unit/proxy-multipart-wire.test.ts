@@ -400,6 +400,228 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it.each([
+    [
+      'application/octet-stream PNG',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      'image/png',
+    ],
+    [
+      'application/octet-stream JPEG',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from([0xff, 0xd8, 0xff, 0xdb]),
+      'image/jpeg',
+    ],
+    [
+      'application/octet-stream GIF',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('GIF89a'),
+      'image/gif',
+    ],
+    [
+      'application/octet-stream WebP',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('RIFF\u0000\u0000\u0000\u0000WEBP'),
+      'image/webp',
+    ],
+    ['no Content-Type header PNG', [], Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), 'image/png'],
+  ])(
+    'normalizes %s image multipart parts from their recognized signature',
+    async (_label, contentTypeHeader, image, expectedMimeType) => {
+      proxyService.handleChatCompletions.mockResolvedValue({
+        choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+      });
+      app = await createApp();
+      await app.init();
+
+      const boundary = '----generic-image';
+      const response = await app
+        .getHttpAdapter()
+        .getInstance()
+        .inject({
+          method: 'POST',
+          url: '/v1/images/edits',
+          headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+          payload: multipartBody(boundary, [
+            { headers: ['Content-Disposition: form-data; name="prompt"'], value: 'make it blue' },
+            {
+              headers: [
+                'Content-Disposition: form-data; name="image"; filename="source.bin"',
+                ...contentTypeHeader,
+              ],
+              value: image,
+            },
+          ]),
+        });
+
+      expect(response.statusCode, response.body).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [
+            expect.objectContaining({
+              content: expect.arrayContaining([
+                expect.objectContaining({
+                  image_url: { url: `data:${expectedMimeType};base64,${image.toString('base64')}` },
+                }),
+              ]),
+            }),
+          ],
+        }),
+      );
+    },
+  );
+
+  it.each([
+    [
+      'application/octet-stream MP3',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]),
+      'audio/mpeg',
+    ],
+    [
+      'application/octet-stream WAV',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('RIFF\u0000\u0000\u0000\u0000WAVE'),
+      'audio/wav',
+    ],
+    [
+      'application/octet-stream FLAC',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('fLaC'),
+      'audio/flac',
+    ],
+    [
+      'application/octet-stream OGG',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('OggS'),
+      'audio/ogg',
+    ],
+    [
+      'application/octet-stream MP4/M4A',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from('\u0000\u0000\u0000\u0018ftypM4A '),
+      'audio/mp4',
+    ],
+    [
+      'application/octet-stream WebM',
+      ['Content-Type: application/octet-stream'],
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+      'audio/webm',
+    ],
+    [
+      'no Content-Type header MP3',
+      [],
+      Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]),
+      'audio/mpeg',
+    ],
+  ])(
+    'normalizes %s audio multipart parts from their recognized signature',
+    async (_label, contentTypeHeader, audio, expectedMimeType) => {
+      proxyService.handleGeminiGenerateContent.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'hello world' }] } }],
+      });
+      app = await createApp();
+      await app.init();
+
+      const boundary = '----generic-audio';
+      const response = await app
+        .getHttpAdapter()
+        .getInstance()
+        .inject({
+          method: 'POST',
+          url: '/v1/audio/transcriptions',
+          headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+          payload: multipartBody(boundary, [
+            { headers: ['Content-Disposition: form-data; name="model"'], value: 'gemini-3-flash' },
+            {
+              headers: [
+                'Content-Disposition: form-data; name="file"; filename="speech.bin"',
+                ...contentTypeHeader,
+              ],
+              value: audio,
+            },
+          ]),
+        });
+
+      expect(response.statusCode, response.body).toBe(200);
+      expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
+        'gemini-3-flash',
+        expect.objectContaining({
+          contents: [
+            expect.objectContaining({
+              parts: expect.arrayContaining([
+                expect.objectContaining({
+                  inlineData: { mimeType: expectedMimeType, data: audio.toString('base64') },
+                }),
+              ]),
+            }),
+          ],
+        }),
+      );
+    },
+  );
+
+  it('accepts wrapped, case-insensitive audio JSON data URLs and normalizes their base64', async () => {
+    proxyService.handleGeminiGenerateContent.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'hello world' }] } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: {
+          model: 'gemini-3-flash',
+          file: 'DATA:AUDIO/MPEG;charset=utf-8;BASE64,SU\nQzBA==',
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
+      'gemini-3-flash',
+      expect.objectContaining({
+        contents: [
+          expect.objectContaining({
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                inlineData: { mimeType: 'audio/mpeg', data: 'SUQzBA==' },
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    ['/v1/images/edits', { prompt: 'make it blue', image: 'data:text/html;base64,PGgxPg==' }],
+    [
+      '/v1/audio/transcriptions',
+      { model: 'gemini-3-flash', file: 'data:text/html;base64,PGgxPg==' },
+    ],
+    [
+      '/v1/audio/transcriptions',
+      { model: 'gemini-3-flash', file: 'data:audio/mpeg;base64,SU=QzBA==' },
+    ],
+  ])('rejects explicit non-media JSON MIME locally for %s', async (url, payload) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'POST', url, payload });
+
+    expect(response.statusCode).toBe(400);
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+  });
+
   it('rejects repeated timestamp granularities from a real multipart audio request', async () => {
     app = await createApp();
     await app.init();

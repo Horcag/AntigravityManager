@@ -56,7 +56,12 @@ import {
 } from './openai-protocol-error';
 import { isMultipartParserOrLimitError } from './fastify-multipart.provider';
 import { type OpenAIResponsesConfiguration } from '../antigravity/OpenAIResponsesStreamingMapper';
-import { parseImageDataUrl } from './image-data-url';
+import {
+  isValidBase64,
+  type MediaKind,
+  parseAudioDataUrl,
+  parseImageDataUrl,
+} from './image-data-url';
 
 type InlineInput = string | { data?: string; mimeType?: string };
 
@@ -480,7 +485,7 @@ export class ProxyController {
     }
 
     const audioParam = input.file ? 'file' : 'audio';
-    if (!this.validateInlineBase64Inputs([input.file ?? input.audio], audioParam, res)) {
+    if (!this.validateInlineAudioInputs([input.file ?? input.audio], audioParam, res)) {
       return;
     }
     const inlineAudio = this.resolveInlineData(input.file ?? input.audio);
@@ -2204,12 +2209,12 @@ export class ProxyController {
     return parts;
   }
 
-  private validateInlineBase64Inputs(
+  private validateInlineAudioInputs(
     inputs: Array<InlineInput | undefined>,
     param: string,
     res: FastifyReply,
   ): boolean {
-    if (inputs.every((input) => !this.hasInvalidBase64Data(input))) {
+    if (inputs.every((input) => this.isValidInlineMediaInput(input, 'audio'))) {
       return true;
     }
 
@@ -2241,8 +2246,7 @@ export class ProxyController {
       }
 
       return (
-        (!isString(input) &&
-          (!input.mimeType || !/^image\/[A-Za-z0-9!#$&^_.+-]+$/i.test(input.mimeType))) ||
+        (!isString(input) && !this.hasSupportedMediaMimeType(input, 'image')) ||
         this.hasInvalidBase64Data(value)
       );
     });
@@ -2269,19 +2273,100 @@ export class ProxyController {
       return false;
     }
 
-    const dataUri = value.match(/^data:[^;]+;base64,(?<data>.*)$/);
-    if (value.startsWith('data:') && !dataUri) {
+    const dataUri = value.match(/^data:[^;]+;base64,(?<data>.*)$/i);
+    if (/^data:/i.test(value) && !dataUri) {
       return true;
     }
 
     const data = (dataUri?.groups?.data ?? value).replace(/\s+/g, '');
-    if (data.length === 0 || data.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+    return data.length === 0 || !isValidBase64(data);
+  }
+
+  private isValidInlineMediaInput(input: InlineInput | undefined, kind: MediaKind): boolean {
+    if (!input) {
       return true;
     }
 
+    const data = isString(input) ? input : input.data;
+    if (!isString(data)) {
+      return true;
+    }
+    if (/^data:/i.test(data)) {
+      return kind === 'image' ? Boolean(parseImageDataUrl(data)) : Boolean(parseAudioDataUrl(data));
+    }
+
     return (
-      Buffer.from(data, 'base64').toString('base64').replace(/=+$/, '') !== data.replace(/=+$/, '')
+      (isString(input) || this.hasSupportedMediaMimeType(input, kind)) &&
+      !this.hasInvalidBase64Data(data)
     );
+  }
+
+  private hasSupportedMediaMimeType(input: Exclude<InlineInput, string>, kind: MediaKind): boolean {
+    const mimeType = input.mimeType?.toLowerCase();
+    if (!mimeType) {
+      return false;
+    }
+    if (mimeType.startsWith(`${kind}/`)) {
+      return true;
+    }
+    if (!['application/octet-stream', 'text/plain'].includes(mimeType) || !isString(input.data)) {
+      return false;
+    }
+
+    return (
+      !this.hasInvalidBase64Data(input.data) && Boolean(this.detectMediaMimeType(input.data, kind))
+    );
+  }
+
+  private detectMediaMimeType(data: string, kind: MediaKind): string | null {
+    const bytes = Buffer.from(data, 'base64');
+    if (kind === 'image') {
+      if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        return 'image/png';
+      }
+      if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) {
+        return 'image/jpeg';
+      }
+      if (
+        bytes.subarray(0, 6).equals(Buffer.from('GIF87a')) ||
+        bytes.subarray(0, 6).equals(Buffer.from('GIF89a'))
+      ) {
+        return 'image/gif';
+      }
+      if (
+        bytes.subarray(0, 4).equals(Buffer.from('RIFF')) &&
+        bytes.subarray(8, 12).equals(Buffer.from('WEBP'))
+      ) {
+        return 'image/webp';
+      }
+      return null;
+    }
+
+    if (
+      bytes.subarray(0, 3).equals(Buffer.from('ID3')) ||
+      (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
+    ) {
+      return 'audio/mpeg';
+    }
+    if (
+      bytes.subarray(0, 4).equals(Buffer.from('RIFF')) &&
+      bytes.subarray(8, 12).equals(Buffer.from('WAVE'))
+    ) {
+      return 'audio/wav';
+    }
+    if (bytes.subarray(0, 4).equals(Buffer.from('fLaC'))) {
+      return 'audio/flac';
+    }
+    if (bytes.subarray(0, 4).equals(Buffer.from('OggS'))) {
+      return 'audio/ogg';
+    }
+    if (bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) {
+      return 'audio/webm';
+    }
+    if (bytes.subarray(4, 8).equals(Buffer.from('ftyp'))) {
+      return 'audio/mp4';
+    }
+    return null;
   }
 
   private validateImageInputCount(
@@ -2313,8 +2398,9 @@ export class ProxyController {
       return null;
     }
 
+    const kind: MediaKind = defaultMimeType.startsWith('image/') ? 'image' : 'audio';
     if (isString(input)) {
-      const dataUrl = parseImageDataUrl(input);
+      const dataUrl = kind === 'image' ? parseImageDataUrl(input) : parseAudioDataUrl(input);
       if (dataUrl) {
         return {
           mimeType: dataUrl.mimeType,
@@ -2346,12 +2432,17 @@ export class ProxyController {
       if (!data) {
         return null;
       }
-      const dataUrl = parseImageDataUrl(data);
+      const dataUrl = kind === 'image' ? parseImageDataUrl(data) : parseAudioDataUrl(data);
       if (dataUrl) {
         return dataUrl;
       }
+      const declaredMimeType = this.asString(inputRecord.mimeType)?.toLowerCase();
+      const mimeType =
+        declaredMimeType && ['application/octet-stream', 'text/plain'].includes(declaredMimeType)
+          ? (this.detectMediaMimeType(data, kind) ?? declaredMimeType)
+          : (declaredMimeType ?? defaultMimeType);
       return {
-        mimeType: this.asString(inputRecord.mimeType)?.toLowerCase() ?? defaultMimeType,
+        mimeType,
         data,
       };
     }

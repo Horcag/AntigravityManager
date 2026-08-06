@@ -1,7 +1,14 @@
-const IMAGE_DATA_URL_PATTERN =
-  /^data:(?<mime>image\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/i;
+const MEDIA_DATA_URL_PATTERN =
+  /^data:(?<mime>[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/i;
+
+export type MediaKind = 'audio' | 'image';
 
 export interface ImageDataUrl {
+  mimeType: string;
+  data: string;
+}
+
+export interface MediaDataUrl {
   mimeType: string;
   data: string;
 }
@@ -11,17 +18,25 @@ export interface ImageDataUrl {
  * normalized representation expected by every downstream request mapper.
  */
 export function parseImageDataUrl(value: string): ImageDataUrl | null {
-  const match = value.match(IMAGE_DATA_URL_PATTERN);
+  return parseMediaDataUrl(value, 'image');
+}
+
+export function parseAudioDataUrl(value: string): MediaDataUrl | null {
+  return parseMediaDataUrl(value, 'audio');
+}
+
+export function parseMediaDataUrl(value: string, kind: MediaKind): MediaDataUrl | null {
+  const match = value.match(MEDIA_DATA_URL_PATTERN);
   const mimeType = match?.groups?.mime?.toLowerCase();
   const data = match?.groups?.data?.replace(/\s+/g, '');
-  if (!mimeType || !data || !isValidBase64(data)) {
+  if (!mimeType || !mimeType.startsWith(`${kind}/`) || !data || !isValidBase64(data)) {
     return null;
   }
 
   return { mimeType, data };
 }
 
-function isValidBase64(data: string): boolean {
+export function isValidBase64(data: string): boolean {
   if (data.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
     return false;
   }
