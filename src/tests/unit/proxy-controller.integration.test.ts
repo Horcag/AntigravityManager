@@ -2352,7 +2352,7 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('maps raw JSON base64 image inputs to image/png while preserving explicit MIME types', async () => {
+  it('maps raw JSON base64 image inputs with a detected PNG signature while preserving explicit MIME types', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({
         choices: [{ message: { content: 'data:image/png;base64,RESULT' } }],
@@ -2364,7 +2364,7 @@ describe('ProxyController Integration', () => {
     await controller.imageEdits(
       {
         prompt: 'edit image',
-        image: 'BwgJ',
+        image: 'iVBORw0KGgo=',
         reference_images: [{ data: 'CgsM', mimeType: 'image/webp' }],
       },
       { headers: { 'content-type': 'application/json' } } as any,
@@ -2376,7 +2376,10 @@ describe('ProxyController Integration', () => {
         messages: [
           expect.objectContaining({
             content: expect.arrayContaining([
-              { type: 'image_url', image_url: { url: 'data:image/png;base64,BwgJ' } },
+              {
+                type: 'image_url',
+                image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' },
+              },
               {
                 type: 'image_url',
                 image_url: { url: 'data:image/webp;base64,CgsM' },
@@ -3016,7 +3019,7 @@ describe('ProxyController Integration', () => {
         [
           {
             prompt: 'edit',
-            image: 'QUJDRA==',
+            image: 'iVBORw0KGgo=',
             reference_images: [{ data: 'QUJDRA==', mimeType: 'text/html' }],
           },
           'reference_images',
