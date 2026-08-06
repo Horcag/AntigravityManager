@@ -1210,7 +1210,7 @@ export class ProxyController {
       output.push({
         id: this.normalizeResponsesId('msg', response.id),
         type: 'message',
-        status: 'completed',
+        status: incomplete ? 'incomplete' : 'completed',
         role: 'assistant',
         content: [
           {

@@ -70,7 +70,10 @@ describe('ProxyService Responses streaming', () => {
     expect(events.map((event) => event.type)).toContain('response.completed');
     expect(events.map((event) => event.sequence_number)).toEqual(events.map((_, index) => index));
     expect(events.at(-1)).toMatchObject({
-      response: { usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } },
+      response: {
+        output: [expect.objectContaining({ status: 'completed', type: 'message' })],
+        usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 },
+      },
     });
   });
 
@@ -113,6 +116,7 @@ describe('ProxyService Responses streaming', () => {
     expect(events.at(-1)).toMatchObject({
       response: {
         status: 'completed',
+        output: [expect.objectContaining({ status: 'completed', type: 'message' })],
         usage: {
           input_tokens: 2,
           input_tokens_details: { cached_tokens: 0 },
@@ -145,13 +149,21 @@ describe('ProxyService Responses streaming', () => {
     ).map((event) => parseEvent(String(event)));
 
     for (const events of [liveEvents, syntheticEvents]) {
+      const textItemDone = events.find(
+        (event) =>
+          event.type === 'response.output_item.done' &&
+          (event.item as Record<string, unknown>).type === 'message',
+      );
       expect(events.at(-1)).toMatchObject({
         response: {
+          completed_at: null,
           incomplete_details: { reason: 'max_output_tokens' },
+          output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
           status: 'incomplete',
         },
         type: 'response.incomplete',
       });
+      expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
     }
   });
 

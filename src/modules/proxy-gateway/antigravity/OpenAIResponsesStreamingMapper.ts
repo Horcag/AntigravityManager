@@ -26,7 +26,7 @@ interface ResponsesMessageOutputItem {
   content: Array<{ annotations: []; text: string; type: 'output_text' }>;
   id: string;
   role: 'assistant';
-  status: 'completed' | 'in_progress';
+  status: 'completed' | 'in_progress' | 'incomplete';
   type: 'message';
 }
 
@@ -141,7 +141,7 @@ export class OpenAIResponsesStreamingMapper {
     }
     this.completed = true;
     const incomplete = this.isMaxOutputTokensFinishReason(finishReason);
-    const events = this.completeTextItem();
+    const events = this.completeTextItem(incomplete);
     for (const functionCall of this.pendingFunctionCalls) {
       events.push(...this.emitFunctionCall(functionCall));
     }
@@ -166,13 +166,14 @@ export class OpenAIResponsesStreamingMapper {
     ];
   }
 
-  private completeTextItem(): string[] {
+  private completeTextItem(incomplete: boolean): string[] {
     if (this.textOutputIndex === null || !this.messageOutputItem) {
       return [];
     }
     this.messageOutputItem.content = [
       { annotations: [], text: this.accumulatedText, type: 'output_text' },
     ];
+    this.messageOutputItem.status = incomplete ? 'incomplete' : 'completed';
     return [
       this.serialize({
         content_index: 0,
@@ -336,8 +337,7 @@ export class OpenAIResponsesStreamingMapper {
     status: 'completed' | 'failed' | 'in_progress' | 'incomplete',
     error: { code: string; message: string } | null = null,
   ): Record<string, unknown> {
-    const completedAt =
-      status === 'completed' || status === 'incomplete' ? Math.floor(Date.now() / 1000) : null;
+    const completedAt = status === 'completed' ? Math.floor(Date.now() / 1000) : null;
     return {
       id: this.options.responseId,
       object: 'response',

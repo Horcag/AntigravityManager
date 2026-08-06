@@ -725,6 +725,7 @@ describe('ProxyController Integration', () => {
             id: 'msg_resp',
             type: 'message',
             role: 'assistant',
+            status: 'completed',
             content: [
               {
                 type: 'output_text',
@@ -775,6 +776,7 @@ describe('ProxyController Integration', () => {
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
         incomplete_details: { reason: 'max_output_tokens' },
+        output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
         status: 'incomplete',
       }),
     );

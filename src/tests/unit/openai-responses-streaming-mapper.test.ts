@@ -78,6 +78,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
       lifecycleSnapshots[0].created_at,
     ]);
     expect(events[3]).toMatchObject({ part: { annotations: [] } });
+    expect(events[7]).toMatchObject({ item: { status: 'completed', type: 'message' } });
     expect(events[8]).toMatchObject({ item: { call_id: 'call_shell_1', id: 'fc_resp_test_1' } });
     expect(events[10]).toEqual({
       arguments: '{"command":"dir"}',
@@ -138,15 +139,27 @@ describe('OpenAIResponsesStreamingMapper', () => {
 
   it('emits an incomplete terminal response when Gemini reaches MAX_TOKENS case-insensitively', () => {
     const mapper = createMapper();
-    const completed = mapper.complete('max_tokens').map(parseEvent).at(-1);
+    const events = [
+      ...mapper.processPart({ text: 'cut off' }),
+      ...mapper.complete('max_tokens'),
+    ].map(parseEvent);
+    const completed = events.at(-1);
+    const textItemDone = events.find(
+      (event) =>
+        event.type === 'response.output_item.done' &&
+        (event.item as Record<string, unknown>).type === 'message',
+    );
 
     expect(completed).toMatchObject({
       response: {
+        completed_at: null,
         incomplete_details: { reason: 'max_output_tokens' },
+        output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
         status: 'incomplete',
       },
       type: 'response.incomplete',
     });
+    expect(textItemDone).toMatchObject({ item: { status: 'incomplete', type: 'message' } });
   });
 
   it('preserves real usage when later Gemini metadata has no counters', () => {
