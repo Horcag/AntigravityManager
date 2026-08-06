@@ -5,6 +5,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FastifyMultipartProvider,
+  isMultipartMediaEndpoint,
   isMultipartParserOrLimitError,
   MultipartOpenAIExceptionFilter,
 } from '@/modules/proxy-gateway/server/fastify-multipart.provider';
@@ -172,6 +173,21 @@ describe('OpenAI multipart media endpoints', () => {
         new Error('Part terminated early due to unexpected end of multipart data'),
       ),
     ).toBe(true);
+  });
+
+  it('recognizes known multipart errors through a bounded cause chain only', () => {
+    const wrapped = new Error('request failed', {
+      cause: new Error('parser failed', {
+        cause: Object.assign(new Error('Boundary required'), {
+          code: 'FST_INVALID_MULTIPART_CONTENT_TYPE',
+        }),
+      }),
+    });
+
+    expect(isMultipartParserOrLimitError(wrapped)).toBe(true);
+    expect(isMultipartParserOrLimitError(new Error('Multipart boundary might be required'))).toBe(
+      false,
+    );
   });
 
   it('preserves audio binary bytes and MIME type through a real multipart request', async () => {
@@ -392,6 +408,61 @@ describe('OpenAI multipart media endpoints', () => {
         code: 'multipart_parse_error',
       },
     });
+  });
+
+  it('normalizes an optional trailing slash only for media error handling', () => {
+    expect(isMultipartMediaEndpoint('/v1/audio/transcriptions/?source=wire-test')).toBe(true);
+    expect(isMultipartMediaEndpoint('/v1/audio/transcriptions-extra/')).toBe(false);
+  });
+
+  it('rejects invalid JSON image base64 locally with the image parameter', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: { prompt: 'make it blue', image: 'not valid base64!' },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'image must contain valid base64 data.',
+        type: 'invalid_request_error',
+        param: 'image',
+        code: 'invalid_value',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid JSON audio base64 locally with the file parameter', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: { model: 'gemini-3-flash', file: 'not valid base64!' },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'file must contain valid base64 data.',
+        type: 'invalid_request_error',
+        param: 'file',
+        code: 'invalid_value',
+      },
+    });
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
   });
 
   it('accepts sixteen OpenAI SDK image[] files without altering multipart parser limits', async () => {

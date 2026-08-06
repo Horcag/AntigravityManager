@@ -309,7 +309,12 @@ export class ProxyController {
       quality: body.quality,
     };
 
-    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', res);
+    await this.sendOpenAIImageGenerationResponse(
+      request,
+      body.prompt ?? '',
+      '/v1/images/generations',
+      res,
+    );
   }
 
   @Post('images/edits')
@@ -362,6 +367,12 @@ export class ProxyController {
     if (!this.validateImageInputCount(input.images, input.referenceImages, res)) {
       return;
     }
+    if (
+      !this.validateInlineBase64Inputs(input.images, 'image', res) ||
+      !this.validateInlineBase64Inputs(input.referenceImages, 'reference_images', res)
+    ) {
+      return;
+    }
 
     const imageParts = this.collectImageContentParts([...input.images, ...input.referenceImages]);
     if (imageParts.length === 0) {
@@ -397,7 +408,12 @@ export class ProxyController {
       quality: input.quality,
     };
 
-    await this.sendOpenAIImageGenerationResponse(request, input.prompt ?? '', res);
+    await this.sendOpenAIImageGenerationResponse(
+      request,
+      input.prompt ?? '',
+      '/v1/images/edits',
+      res,
+    );
   }
 
   @Post('audio/transcriptions')
@@ -457,6 +473,10 @@ export class ProxyController {
       return;
     }
 
+    const audioParam = input.file ? 'file' : 'audio';
+    if (!this.validateInlineBase64Inputs([input.file ?? input.audio], audioParam, res)) {
+      return;
+    }
     const inlineAudio = this.resolveInlineData(input.file ?? input.audio);
     if (!inlineAudio) {
       this.sendInvalidRequest(
@@ -2096,6 +2116,49 @@ export class ProxyController {
     return parts;
   }
 
+  private validateInlineBase64Inputs(
+    inputs: Array<InlineInput | undefined>,
+    param: string,
+    res: FastifyReply,
+  ): boolean {
+    if (inputs.every((input) => !this.hasInvalidBase64Data(input))) {
+      return true;
+    }
+
+    this.sendInvalidRequest(
+      res,
+      param + ' must contain valid base64 data.',
+      param,
+      'invalid_value',
+    );
+    return false;
+  }
+
+  private hasInvalidBase64Data(input: InlineInput | undefined): boolean {
+    if (!input) {
+      return false;
+    }
+
+    const value = isString(input) ? input : input.data;
+    if (!isString(value)) {
+      return false;
+    }
+
+    const dataUri = value.match(/^data:[^;]+;base64,(?<data>.*)$/);
+    if (value.startsWith('data:') && !dataUri) {
+      return true;
+    }
+
+    const data = (dataUri?.groups?.data ?? value).replace(/\s+/g, '');
+    if (data.length === 0 || data.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+      return true;
+    }
+
+    return (
+      Buffer.from(data, 'base64').toString('base64').replace(/=+$/, '') !== data.replace(/=+$/, '')
+    );
+  }
+
   private validateImageInputCount(
     images: InlineInput[],
     referenceImages: InlineInput[],
@@ -2261,13 +2324,14 @@ export class ProxyController {
   private async sendOpenAIImageGenerationResponse(
     request: OpenAIChatRequest,
     prompt: string,
+    endpoint: '/v1/images/generations' | '/v1/images/edits',
     res: FastifyReply,
   ): Promise<void> {
     try {
       const result = await this.proxyService.handleChatCompletions(request);
       if (result instanceof Observable) {
         this.logProxyEndpointError(
-          '/v1/images/generations',
+          endpoint,
           HttpStatus.INTERNAL_SERVER_ERROR,
           'Streaming image generation is not supported by this endpoint',
         );
@@ -2282,7 +2346,7 @@ export class ProxyController {
       const image = this.extractInlineBase64Image(isString(content) ? content : '');
       if (!image) {
         this.logProxyEndpointError(
-          '/v1/images/generations',
+          endpoint,
           HttpStatus.BAD_GATEWAY,
           'Upstream did not return inline image data',
         );
@@ -2335,12 +2399,12 @@ export class ProxyController {
           );
           return;
         } catch (fallbackError) {
-          this.sendOpenAIErrorResponse(res, '/v1/images/generations', fallbackError);
+          this.sendOpenAIErrorResponse(res, endpoint, fallbackError);
           return;
         }
       }
 
-      this.sendOpenAIErrorResponse(res, '/v1/images/generations', error);
+      this.sendOpenAIErrorResponse(res, endpoint, error);
     }
   }
 

@@ -21,17 +21,33 @@ const MULTIPART_PARSER_MESSAGES = new Set([
   'Boundary required',
   'Premature close',
 ]);
+const MAX_MULTIPART_ERROR_CAUSE_DEPTH = 4;
 
 export function isMultipartParserOrLimitError(error: unknown): error is Error {
-  if (!(error instanceof Error)) {
-    return false;
+  let currentError = error;
+  for (let depth = 0; depth <= MAX_MULTIPART_ERROR_CAUSE_DEPTH; depth += 1) {
+    if (!(currentError instanceof Error)) {
+      return false;
+    }
+
+    const code = (currentError as Error & { code?: unknown }).code;
+    if (
+      (typeof code === 'string' && MULTIPART_ERROR_CODES.has(code)) ||
+      MULTIPART_PARSER_MESSAGES.has(currentError.message)
+    ) {
+      return true;
+    }
+
+    currentError = (currentError as Error & { cause?: unknown }).cause;
   }
 
-  const code = (error as Error & { code?: unknown }).code;
-  return (
-    (typeof code === 'string' && MULTIPART_ERROR_CODES.has(code)) ||
-    MULTIPART_PARSER_MESSAGES.has(error.message)
-  );
+  return false;
+}
+
+export function isMultipartMediaEndpoint(url: string | undefined): boolean {
+  const pathname = url?.split('?', 1)[0] ?? '';
+  const normalizedPathname = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+  return MEDIA_ENDPOINTS.has(normalizedPathname);
 }
 
 @Catch()
@@ -46,7 +62,7 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
       .getRequest<{ url?: string; headers?: { 'content-type'?: string } }>();
     const contentType = request.headers?.['content-type']?.toLowerCase() ?? '';
     if (
-      MEDIA_ENDPOINTS.has(this.getPathname(request.url)) &&
+      isMultipartMediaEndpoint(request.url) &&
       contentType.includes('multipart/form-data') &&
       isMultipartParserOrLimitError(error)
     ) {
@@ -63,10 +79,6 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
     }
 
     super.catch(error, host);
-  }
-
-  private getPathname(url: string | undefined): string {
-    return url?.split('?', 1)[0] ?? '';
   }
 }
 
