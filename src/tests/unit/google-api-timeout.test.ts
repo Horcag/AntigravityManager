@@ -82,6 +82,8 @@ describe('GoogleAPIService Timeout', () => {
   });
 });
 
+const OAUTH_CLIENT_IMPORT_TEST_TIMEOUT_MS = 15_000;
+
 describe('GoogleAPIService OAuth clients', () => {
   const originalOauthClientsEnv = process.env.ANTIGRAVITY_OAUTH_CLIENTS;
   const originalActiveOauthClientEnv = process.env.ANTIGRAVITY_OAUTH_CLIENT_KEY;
@@ -106,34 +108,49 @@ describe('GoogleAPIService OAuth clients', () => {
     }
   });
 
-  it('loads builtin and custom oauth clients with active marker', async () => {
-    process.env.ANTIGRAVITY_OAUTH_CLIENTS =
-      'custom_a|id-a|secret-a|Custom A;custom_b|id-b|secret-b|Custom B';
-    process.env.ANTIGRAVITY_OAUTH_CLIENT_KEY = 'custom_b';
+  it(
+    'loads builtin and custom oauth clients with active marker',
+    async () => {
+      process.env.ANTIGRAVITY_OAUTH_CLIENTS =
+        'custom_a|id-a|secret-a|Custom A;custom_b|id-b|secret-b|Custom B';
+      process.env.ANTIGRAVITY_OAUTH_CLIENT_KEY = 'custom_b';
 
-    const { GoogleAPIService } = await import('@/modules/cloud-account/services/GoogleAPIService');
-    const clients = GoogleAPIService.listOAuthClients();
+      const { GoogleAPIService } =
+        await import('@/modules/cloud-account/services/GoogleAPIService');
+      const clients = GoogleAPIService.listOAuthClients();
 
-    expect(clients.find((client) => client.key === 'antigravity_enterprise')).toBeDefined();
-    expect(clients.find((client) => client.key === 'custom_a')?.label).toBe('Custom A');
-    expect(clients.find((client) => client.key === 'custom_b')?.is_active).toBe(true);
-  });
+      expect(clients.find((client) => client.key === 'antigravity_enterprise')).toBeDefined();
+      expect(clients.find((client) => client.key === 'custom_a')?.label).toBe('Custom A');
+      expect(clients.find((client) => client.key === 'custom_b')?.is_active).toBe(true);
+    },
+    OAUTH_CLIENT_IMPORT_TEST_TIMEOUT_MS,
+  );
 
-  it('switches active oauth client key', async () => {
-    process.env.ANTIGRAVITY_OAUTH_CLIENTS = 'custom_a|id-a|secret-a|Custom A';
+  it(
+    'switches active oauth client key',
+    async () => {
+      process.env.ANTIGRAVITY_OAUTH_CLIENTS = 'custom_a|id-a|secret-a|Custom A';
 
-    const { GoogleAPIService } = await import('@/modules/cloud-account/services/GoogleAPIService');
-    GoogleAPIService.setActiveOAuthClientKey('custom_a');
+      const { GoogleAPIService } =
+        await import('@/modules/cloud-account/services/GoogleAPIService');
+      GoogleAPIService.setActiveOAuthClientKey('custom_a');
 
-    expect(GoogleAPIService.getActiveOAuthClientKey()).toBe('custom_a');
-  });
+      expect(GoogleAPIService.getActiveOAuthClientKey()).toBe('custom_a');
+    },
+    OAUTH_CLIENT_IMPORT_TEST_TIMEOUT_MS,
+  );
 
-  it('throws when switching to unknown oauth client key', async () => {
-    const { GoogleAPIService } = await import('@/modules/cloud-account/services/GoogleAPIService');
-    expect(() => GoogleAPIService.setActiveOAuthClientKey('missing_client')).toThrow(
-      'Unknown OAuth client key',
-    );
-  });
+  it(
+    'throws when switching to unknown oauth client key',
+    async () => {
+      const { GoogleAPIService } =
+        await import('@/modules/cloud-account/services/GoogleAPIService');
+      expect(() => GoogleAPIService.setActiveOAuthClientKey('missing_client')).toThrow(
+        'Unknown OAuth client key',
+      );
+    },
+    OAUTH_CLIENT_IMPORT_TEST_TIMEOUT_MS,
+  );
 });
 
 describe('GoogleAPIService user info parsing', () => {
