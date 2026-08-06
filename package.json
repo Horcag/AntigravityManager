@@ -22,11 +22,12 @@
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
+    "audit:production-fuses": "node scripts/audit-production-fuses.mjs",
     "test": "vitest run",
     "test:watch": "vitest watch",
     "test:unit": "vitest",
     "test:e2e": "electron-forge package && playwright test",
-    "test:all": "vitest run && npm run test:e2e",
+    "test:all": "vitest run && npm run test:e2e && npm run package && npm run audit:production-fuses",
     "type-check": "tsc --noEmit"
   },
   "author": "Draculabo",
