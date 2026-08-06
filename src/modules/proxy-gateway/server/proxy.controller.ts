@@ -2211,7 +2211,7 @@ export class ProxyController {
 
     this.sendInvalidRequest(
       res,
-      param + ' must contain valid base64 image data.',
+      param + ' must contain valid base64 data.',
       param,
       'invalid_value',
     );
