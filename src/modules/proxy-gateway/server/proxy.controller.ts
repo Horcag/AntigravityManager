@@ -609,8 +609,13 @@ export class ProxyController {
       ) {
         throw this.invalidRequest('messages contains an unsupported role', 'messages');
       }
+      if (message.role !== 'assistant') {
+        this.validateChatMessageContent(message, index);
+      }
       this.validateChatToolMessage(message, index, declaredToolCallIds);
-      this.validateChatMessageContent(message, index);
+      if (message.role === 'assistant') {
+        this.validateChatMessageContent(message, index);
+      }
     }
     this.validateTools(body.tools, body.tool_choice);
     this.validateUnsupportedSamplingOptions(body);
@@ -913,27 +918,31 @@ export class ProxyController {
   }
 
   private validateResponsesToolOutputReferences(input: unknown[]): void {
-    const normalizedToolCallIds = new Set<string>();
-    for (const item of input) {
+    const declaredToolCallIds = new Set<string>();
+    for (const [index, item] of input.entries()) {
       const inputItem = this.toRecord(item);
       const type = inputItem ? this.responsesInputItemType(inputItem) : null;
       if (
         inputItem &&
         (type === 'function_call' || type === 'local_shell_call' || type === 'web_search_call')
       ) {
-        normalizedToolCallIds.add(this.responsesCallId(inputItem));
+        const callId = this.responsesCallId(inputItem);
+        if (declaredToolCallIds.has(callId)) {
+          const callIdParam = Object.hasOwn(inputItem, 'call_id') ? 'call_id' : 'id';
+          throw this.invalidRequest(
+            'tool call ids must be unique',
+            `input[${index}].${callIdParam}`,
+          );
+        }
+        declaredToolCallIds.add(callId);
       }
-    }
-
-    for (const [index, item] of input.entries()) {
-      const inputItem = this.toRecord(item);
       if (
         inputItem &&
-        this.responsesInputItemType(inputItem) === 'function_call_output' &&
-        !normalizedToolCallIds.has(this.responsesCallId(inputItem))
+        type === 'function_call_output' &&
+        !declaredToolCallIds.has(this.responsesCallId(inputItem))
       ) {
         throw this.invalidRequest(
-          'function_call_output must reference a function_call in input',
+          'function_call_output must reference an earlier function_call in input',
           `input[${index}].call_id`,
         );
       }
@@ -1161,7 +1170,7 @@ export class ProxyController {
     index: number,
   ): void {
     const { content } = message;
-    if (content === undefined || (content === null && message.role === 'assistant')) {
+    if (content === undefined || content === null) {
       if (
         message.role === 'assistant' &&
         Array.isArray(message.tool_calls) &&
@@ -1171,7 +1180,7 @@ export class ProxyController {
       }
       throw this.invalidRequest('messages content is required', `messages[${index}].content`);
     }
-    if (isString(content) || content === null) {
+    if (isString(content)) {
       return;
     }
     if (!Array.isArray(content)) {

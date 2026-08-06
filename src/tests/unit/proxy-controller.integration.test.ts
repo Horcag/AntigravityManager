@@ -217,6 +217,111 @@ describe('ProxyController Integration', () => {
     },
   );
 
+  it.each(['user', 'system', 'developer', 'tool'] as const)(
+    'rejects null content on a %s message through the assembled Fastify pipeline',
+    async (role) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = { handleChatCompletions: vi.fn() };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers: {
+            authorization: 'Bearer test-key',
+            'content-type': 'application/json',
+          },
+          payload: {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role,
+                content: null,
+                ...(role === 'tool' ? { tool_call_id: 'call_1' } : {}),
+              },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error).toMatchObject({
+          type: 'invalid_request_error',
+          param: 'messages[0].content',
+        });
+        expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it('validates Responses tool calls and outputs in input order through the assembled Fastify pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_resp',
+        object: 'chat.completion',
+        created: 1700000001,
+        model: 'gpt-4o',
+        choices: [{ index: 0, finish_reason: 'stop', message: { content: 'done' } }],
+      }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      const outputBeforeCall = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+            { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+          ],
+        },
+      });
+      expect(outputBeforeCall.statusCode).toBe(400);
+      expect(outputBeforeCall.json().error).toMatchObject({ param: 'input[0].call_id' });
+
+      const duplicateCall = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+            { type: 'local_shell_call', call_id: 'call_1', action: { exec: { command: 'dir' } } },
+          ],
+        },
+      });
+      expect(duplicateCall.statusCode).toBe(400);
+      expect(duplicateCall.json().error).toMatchObject({ param: 'input[1].call_id' });
+
+      const validCallThenOutput = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'function_call', id: 'call_1', name: 'lookup', arguments: '{}' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'result' },
+          ],
+        },
+      });
+      expect(validCallThenOutput.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
   it.each([
     [
       'an assistant message without content or tool calls',
