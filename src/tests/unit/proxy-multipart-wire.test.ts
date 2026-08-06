@@ -268,6 +268,113 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it('rejects a seventeenth multipart image before invoking upstream work', async () => {
+    app = await createApp();
+    await app.init();
+
+    const boundary = '----image-limit-overflow';
+    const images = Array.from({ length: 17 }, (_, index) => ({
+      headers: [
+        `Content-Disposition: form-data; name="image"; filename="${index}.png"`,
+        'Content-Type: image/png',
+      ],
+      value: Buffer.from([index]),
+    }));
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="prompt"'], value: 'combine images' },
+          ...images,
+        ]),
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'At most 16 image inputs are supported by this endpoint.',
+        type: 'invalid_request_error',
+        param: 'image',
+        code: 'invalid_request_error',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it('rejects a seventeenth JSON image before invoking upstream work', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: {
+          prompt: 'combine images',
+          image: 'data:image/png;base64,IMAGE_0',
+          reference_images: Array.from(
+            { length: 16 },
+            (_, index) => `data:image/png;base64,REFERENCE_${index}`,
+          ),
+        },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'At most 16 image inputs are supported by this endpoint.',
+        type: 'invalid_request_error',
+        param: 'image',
+        code: 'invalid_request_error',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it('rejects an explicit multipart image edit user before invoking upstream work', async () => {
+    app = await createApp();
+    await app.init();
+
+    const boundary = '----image-user';
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="prompt"'], value: 'make it blue' },
+          { headers: ['Content-Disposition: form-data; name="user"'], value: 'end-user-123' },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="image"; filename="source.png"',
+              'Content-Type: image/png',
+            ],
+            value: Buffer.from([137, 80, 78, 71]),
+          },
+        ]),
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message:
+          'user is not supported because this proxy cannot preserve end-user identifier semantics.',
+        type: 'invalid_request_error',
+        param: 'user',
+        code: 'unsupported_parameter',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('rejects unsupported image options through the assembled Nest and Fastify pipeline', async () => {
     app = await createApp();
     await app.init();

@@ -65,6 +65,7 @@ interface MediaInput {
   stream?: string;
   style?: string;
   inputFidelity?: string;
+  user?: string;
   language?: string;
   temperature?: number;
   invalidTemperature: boolean;
@@ -94,6 +95,7 @@ interface ImageOptionInput {
   style?: string;
   input_fidelity?: string;
   inputFidelity?: string;
+  user?: string;
 }
 
 @Controller('v1')
@@ -307,6 +309,9 @@ export class ProxyController {
         'mask is not supported because this proxy cannot preserve mask semantics.',
         'mask',
       );
+      return;
+    }
+    if (!this.validateImageInputCount(input.images, input.referenceImages, res)) {
       return;
     }
 
@@ -695,6 +700,14 @@ export class ProxyController {
         res,
         'input_fidelity is not supported by this proxy.',
         'input_fidelity',
+      );
+      return false;
+    }
+    if (input.user !== undefined) {
+      this.sendUnsupportedImageOption(
+        res,
+        'user is not supported because this proxy cannot preserve end-user identifier semantics.',
+        'user',
       );
       return false;
     }
@@ -1201,6 +1214,7 @@ export class ProxyController {
       stream?: boolean | string;
       style?: string;
       input_fidelity?: string;
+      user?: string;
       language?: string;
       temperature?: number | string;
       timestamp_granularities?: string[];
@@ -1249,14 +1263,18 @@ export class ProxyController {
       stream: field('stream') ?? (body.stream === undefined ? undefined : String(body.stream)),
       style: field('style') ?? body.style,
       inputFidelity: field('input_fidelity') ?? body.input_fidelity,
+      user: field('user') ?? body.user,
       language: field('language') ?? body.language,
       temperature: Number.isFinite(parsedTemperature) ? parsedTemperature : undefined,
       invalidTemperature:
         temperatureValue !== undefined &&
         (!Number.isFinite(parsedTemperature) || parsedTemperature < 0 || parsedTemperature > 1),
       timestampGranularities,
-      images: [...files('image'), ...(body.image ? [body.image] : [])],
-      referenceImages: [...files('reference_images'), ...(body.reference_images ?? [])],
+      images: files('image').length > 0 ? files('image') : body.image ? [body.image] : [],
+      referenceImages:
+        files('reference_images').length > 0
+          ? files('reference_images')
+          : (body.reference_images ?? []),
       mask: file('mask') ?? body.mask,
       file: file('file') ?? body.file,
       audio: file('audio') ?? body.audio,
@@ -1306,6 +1324,24 @@ export class ProxyController {
       });
     }
     return parts;
+  }
+
+  private validateImageInputCount(
+    images: InlineInput[],
+    referenceImages: InlineInput[],
+    res: FastifyReply,
+  ): boolean {
+    if (images.length + referenceImages.length <= 16) {
+      return true;
+    }
+
+    this.sendInvalidRequest(
+      res,
+      'At most 16 image inputs are supported by this endpoint.',
+      'image',
+      'invalid_request_error',
+    );
+    return false;
   }
 
   private resolveInlineData(
@@ -1464,7 +1500,6 @@ export class ProxyController {
             b64_json: image.data,
           },
         ],
-        ...this.toOpenAIImageUsage(result.usage),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Internal Server Error';
@@ -1519,27 +1554,6 @@ export class ProxyController {
     return {
       mimeType: matched.groups.mime,
       data: matched.groups.data,
-    };
-  }
-
-  private toOpenAIImageUsage(usage: OpenAIChatResponse['usage'] | undefined): {
-    usage?: { input_tokens: number; output_tokens: number; total_tokens: number };
-  } {
-    if (
-      !usage ||
-      !Number.isFinite(usage.prompt_tokens) ||
-      !Number.isFinite(usage.completion_tokens) ||
-      !Number.isFinite(usage.total_tokens)
-    ) {
-      return {};
-    }
-
-    return {
-      usage: {
-        input_tokens: usage.prompt_tokens,
-        output_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
-      },
     };
   }
 

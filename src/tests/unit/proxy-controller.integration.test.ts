@@ -724,7 +724,7 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('returns truthful image usage when the upstream response reports token counts', async () => {
+  it('omits image usage even when the upstream response reports aggregate chat token counts', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({
         choices: [{ message: { content: 'data:image/png;base64,AAAABBBB' } }],
@@ -736,11 +736,7 @@ describe('ProxyController Integration', () => {
 
     await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
 
-    expect(reply.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        usage: { input_tokens: 3, output_tokens: 5, total_tokens: 8 },
-      }),
-    );
+    expect(reply.send.mock.calls[0][0]).not.toHaveProperty('usage');
   });
 
   it('omits image usage when upstream token counts are incomplete', async () => {
@@ -839,6 +835,25 @@ describe('ProxyController Integration', () => {
         },
       });
     }
+  });
+
+  it('rejects an explicit image generation user before invoking upstream work', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a cat', user: 'end-user-123' }, reply as any);
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message:
+          'user is not supported because this proxy cannot preserve end-user identifier semantics.',
+        type: 'invalid_request_error',
+        param: 'user',
+        code: 'unsupported_parameter',
+      },
+    });
   });
 
   it('does not infer upstream status from image generation error text', async () => {
@@ -999,6 +1014,62 @@ describe('ProxyController Integration', () => {
         ],
       }),
     );
+  });
+
+  it('rejects more than sixteen JSON image inputs before invoking upstream work', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      {
+        prompt: 'combine images',
+        image: 'data:image/png;base64,IMAGE_0',
+        reference_images: Array.from(
+          { length: 16 },
+          (_, index) => `data:image/png;base64,REFERENCE_${index}`,
+        ),
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'At most 16 image inputs are supported by this endpoint.',
+        type: 'invalid_request_error',
+        param: 'image',
+        code: 'invalid_request_error',
+      },
+    });
+  });
+
+  it('rejects an explicit JSON image edit user before invoking upstream work', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      {
+        prompt: 'make it brighter',
+        image: 'data:image/png;base64,IMGBASE64',
+        user: 'end-user-123',
+      },
+      { headers: { 'content-type': 'application/json' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message:
+          'user is not supported because this proxy cannot preserve end-user identifier semantics.',
+        type: 'invalid_request_error',
+        param: 'user',
+        code: 'unsupported_parameter',
+      },
+    });
   });
 
   it('rejects unsupported image edit options with an OpenAI error envelope', async () => {
