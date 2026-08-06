@@ -107,6 +107,7 @@ test.describe.serial('Antigravity Manager', () => {
       env: {
         ...process.env,
         AGM_E2E_TEST: 'true',
+        HOME: path.join(e2eRoot, 'UserProfile'),
         USERPROFILE: path.join(e2eRoot, 'UserProfile'),
         APPDATA: path.join(e2eRoot, 'AppData', 'Roaming'),
         LOCALAPPDATA: path.join(e2eRoot, 'AppData', 'Local'),
@@ -148,6 +149,10 @@ test.describe.serial('Antigravity Manager', () => {
   });
 
   test('should launch and display home page', async () => {
+    expect(await electronApp.evaluate(() => process.env.HOME)).toBe(
+      path.join(e2eRoot, 'UserProfile'),
+    );
+
     const window = await electronApp.firstWindow();
     await window.waitForLoadState('domcontentloaded');
 
@@ -205,6 +210,7 @@ test.describe.serial('Antigravity Manager', () => {
     await page.addInitScript(injectCloudAccountsFailureScript);
     await page.reload();
     await page.waitForLoadState('domcontentloaded');
+    await page.locator('a[href="/"]').click();
     const mainContent = page.getByRole('main');
     await expect(mainContent.getByTestId('cloud-load-error-fallback')).toBeVisible({
       timeout: 15000,
