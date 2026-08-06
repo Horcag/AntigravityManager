@@ -88,6 +88,26 @@ interface MediaInput {
   audio?: InlineInput;
 }
 
+interface OpenAIResponsesRequest {
+  model?: string;
+  instructions?: string;
+  input?: unknown;
+  tools?: OpenAIChatRequest['tools'];
+  tool_choice?: OpenAIChatRequest['tool_choice'];
+  max_output_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  stream?: boolean;
+  previous_response_id?: unknown;
+  text?: unknown;
+  background?: unknown;
+  parallel_tool_calls?: unknown;
+  store?: unknown;
+  reasoning?: unknown;
+  truncation?: unknown;
+  max_tool_calls?: unknown;
+}
+
 interface ImageOptionInput {
   model?: string;
   n?: number | string;
@@ -549,9 +569,7 @@ export class ProxyController {
       ) {
         throw this.invalidRequest('messages contains an unsupported role', 'messages');
       }
-      if (!this.isValidMessageContent(message.content)) {
-        throw this.invalidRequest('messages contains unsupported content', 'messages');
-      }
+      this.validateChatMessageContent(message.content);
     }
     this.validateTools(body.tools, body.tool_choice);
     this.validateUnsupportedSamplingOptions(body);
@@ -644,6 +662,14 @@ export class ProxyController {
     if (!isNil(body.top_logprobs)) {
       throw this.unsupportedParameter('top_logprobs', 'log probabilities are not available');
     }
+    this.validateUnhonoredOptions(body, [
+      'service_tier',
+      'store',
+      'metadata',
+      'modalities',
+      'prediction',
+      'parallel_tool_calls',
+    ]);
   }
 
   private validateLegacyOnlyOptions(body: OpenAILegacyCompletionRequest): void {
@@ -786,16 +812,29 @@ export class ProxyController {
     throw this.invalidRequest('input must be non-empty', 'input');
   }
 
-  private validateResponsesOptions(body: {
-    max_output_tokens?: number;
-    temperature?: number;
-    top_p?: number;
-    stream?: boolean;
-  }): void {
+  private validateResponsesOptions(body: OpenAIResponsesRequest): void {
     this.validatePositiveInteger('max_output_tokens', body.max_output_tokens);
     this.validateNumericRange('temperature', body.temperature, 0, 2);
     this.validateNumericRange('top_p', body.top_p, 0, 1);
     this.validateStreamOptions(body.stream, undefined);
+    this.validateUnhonoredOptions(body, [
+      'previous_response_id',
+      'text',
+      'background',
+      'parallel_tool_calls',
+      'store',
+      'reasoning',
+      'truncation',
+      'max_tool_calls',
+    ]);
+  }
+
+  private validateUnhonoredOptions(body: object, params: string[]): void {
+    for (const param of params) {
+      if (Object.hasOwn(body, param)) {
+        throw this.unsupportedParameter(param, 'this option is not forwarded upstream');
+      }
+    }
   }
 
   private validateResponsesInputItem(item: unknown): void {
@@ -805,6 +844,10 @@ export class ProxyController {
     }
 
     const type = this.responsesInputItemType(inputItem);
+    if (type === 'reasoning') {
+      // Replayed reasoning is model-private context and cannot be represented upstream.
+      return;
+    }
     if (type === 'message') {
       this.validateResponsesMessage(inputItem);
       return;
@@ -895,9 +938,11 @@ export class ProxyController {
         continue;
       }
       if (blockType === 'input_image' || blockType === 'image_url') {
-        if (!this.resolveImageUrl(block)) {
+        const imageUrl = this.resolveImageUrl(block);
+        if (!imageUrl) {
           throw this.invalidRequest('image content blocks require an image URL', 'input.content');
         }
+        this.validateImageDataUrl(imageUrl, 'input.content');
         continue;
       }
       throw this.invalidRequest(
@@ -953,22 +998,38 @@ export class ProxyController {
     }
   }
 
-  private isValidMessageContent(
+  private validateChatMessageContent(
     content: OpenAIChatRequest['messages'][number]['content'],
-  ): boolean {
+  ): void {
     if (isString(content) || content === null) {
-      return true;
+      return;
     }
-    return (
-      Array.isArray(content) &&
-      content.every(
-        (part) =>
-          (part.type === 'text' && isString(part.text)) ||
-          (part.type === 'image_url' &&
-            isString(part.image_url?.url) &&
-            !isEmpty(part.image_url.url.trim())),
-      )
-    );
+    if (!Array.isArray(content)) {
+      throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+    for (const part of content) {
+      if (part.type === 'text' && isString(part.text)) {
+        continue;
+      }
+      if (
+        part.type === 'image_url' &&
+        isString(part.image_url?.url) &&
+        !isEmpty(part.image_url.url.trim())
+      ) {
+        this.validateImageDataUrl(part.image_url.url, 'messages');
+        continue;
+      }
+      throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+  }
+
+  private validateImageDataUrl(url: string, param: string): void {
+    if (!/^data:[\w/+.-]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(url)) {
+      throw this.unsupportedParameter(
+        param,
+        'remote image URLs are not supported by this gateway; use a data URL',
+      );
+    }
   }
 
   private requireNonEmptyString(value: unknown, param: string): asserts value is string {
@@ -1270,6 +1331,9 @@ export class ProxyController {
         if (!type) {
           continue;
         }
+        if (type === 'reasoning') {
+          continue;
+        }
 
         if (type === 'function_call' || type === 'local_shell_call' || type === 'web_search_call') {
           const callId =
@@ -1292,6 +1356,9 @@ export class ProxyController {
 
         const type = this.responsesInputItemType(itemObj);
         if (!type) {
+          continue;
+        }
+        if (type === 'reasoning') {
           continue;
         }
 

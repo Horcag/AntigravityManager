@@ -806,7 +806,7 @@ describe('ProxyController Integration', () => {
 
   it.each([
     ['a primitive item', ['invalid']],
-    ['an unknown item type', [{ type: 'reasoning', content: [] }]],
+    ['an unknown item type', [{ type: 'unknown_item_type', content: [] }]],
     ['a null item type', [{ type: null, role: 'user', content: 'hello' }]],
     ['an empty item type', [{ type: '', role: 'user', content: 'hello' }]],
     ['a non-string item type', [{ type: 123, role: 'user', content: 'hello' }]],
@@ -1754,6 +1754,154 @@ describe('ProxyController Integration', () => {
           type: 'invalid_request_error',
           param: 'user',
           code: 'unsupported_parameter',
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects remote OpenAI image URLs with an unsupported-parameter envelope before upstream', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const remoteImage = 'https://example.com/image.png';
+
+    try {
+      for (const [url, payload, param] of [
+        [
+          '/v1/chat/completions',
+          {
+            model: 'gpt-4o',
+            messages: [
+              { role: 'user', content: [{ type: 'image_url', image_url: { url: remoteImage } }] },
+            ],
+          },
+          'messages',
+        ],
+        [
+          '/v1/responses',
+          {
+            model: 'gpt-4o',
+            input: [{ role: 'user', content: [{ type: 'input_image', image_url: remoteImage }] }],
+          },
+          'input.content',
+        ],
+      ] as Array<[string, Record<string, unknown>, string]>) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+          error: {
+            message: `${param} is not supported by this gateway: remote image URLs are not supported by this gateway; use a data URL`,
+            type: 'invalid_request_error',
+            param,
+            code: 'unsupported_parameter',
+          },
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('accepts data URLs and skips replayed reasoning items without converting either to text', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_data_url',
+        created: 1700000003,
+        model: 'gpt-4o',
+        choices: [{ message: { content: 'done' } }],
+      }),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers,
+        payload: {
+          model: 'gpt-4o',
+          input: [
+            { type: 'reasoning', encrypted_content: 'replayed metadata' },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: 'describe this image' },
+                { type: 'input_image', image_url: 'data:image/png;base64,AAAA' },
+              ],
+            },
+          ],
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'describe this image' },
+                { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+              ],
+            },
+          ],
+        }),
+        'responses',
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects unhonored explicit Chat and Responses options before upstream', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const chatBase = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
+    const responsesBase = { model: 'gpt-4o', input: 'hi' };
+
+    try {
+      for (const [url, base, param, value] of [
+        ['/v1/chat/completions', chatBase, 'service_tier', 'priority'],
+        ['/v1/chat/completions', chatBase, 'store', true],
+        ['/v1/chat/completions', chatBase, 'metadata', { trace: 'x' }],
+        ['/v1/chat/completions', chatBase, 'modalities', ['text', 'audio']],
+        ['/v1/chat/completions', chatBase, 'prediction', { type: 'content', content: 'x' }],
+        ['/v1/chat/completions', chatBase, 'parallel_tool_calls', false],
+        ['/v1/responses', responsesBase, 'previous_response_id', 'resp_previous'],
+        ['/v1/responses', responsesBase, 'text', { format: { type: 'json_schema' } }],
+        ['/v1/responses', responsesBase, 'background', true],
+        ['/v1/responses', responsesBase, 'parallel_tool_calls', false],
+        ['/v1/responses', responsesBase, 'store', true],
+        ['/v1/responses', responsesBase, 'reasoning', { effort: 'high' }],
+        ['/v1/responses', responsesBase, 'truncation', 'auto'],
+        ['/v1/responses', responsesBase, 'max_tool_calls', 2],
+      ] as Array<[string, Record<string, unknown>, string, unknown]>) {
+        const response = await server.inject({
+          method: 'POST',
+          url,
+          headers,
+          payload: { ...base, [param]: value },
+        });
+        expect(response.statusCode, `expected ${param} to fail closed`).toBe(400);
+        expect(response.json()).toEqual({
+          error: {
+            message: `${param} is not supported by this gateway: this option is not forwarded upstream`,
+            type: 'invalid_request_error',
+            param,
+            code: 'unsupported_parameter',
+          },
         });
       }
       expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();

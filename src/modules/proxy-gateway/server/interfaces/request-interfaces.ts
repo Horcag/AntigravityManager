@@ -21,6 +21,12 @@ export interface OpenAIChatRequest {
   logprobs?: boolean | number | null;
   top_logprobs?: number;
   user?: string;
+  service_tier?: unknown;
+  store?: unknown;
+  metadata?: unknown;
+  modalities?: unknown;
+  prediction?: unknown;
+  parallel_tool_calls?: unknown;
   extra?: Record<string, unknown>;
 }
 
