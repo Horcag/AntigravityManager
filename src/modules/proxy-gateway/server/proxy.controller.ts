@@ -864,6 +864,12 @@ export class ProxyController {
     if (message.tool_calls === undefined) {
       return;
     }
+    if (message.role !== 'assistant') {
+      throw this.invalidRequest(
+        'tool_calls is only supported on assistant messages',
+        `messages[${index}].tool_calls`,
+      );
+    }
     if (!Array.isArray(message.tool_calls)) {
       throw this.invalidRequest('tool_calls must be an array', `messages[${index}].tool_calls`);
     }

@@ -11,7 +11,7 @@ The local proxy exposes these OpenAI-compatible endpoints:
 - POST /v1/audio/transcriptions
 - POST /v1/messages for the Anthropic-compatible surface
 
-Multipart error handling recognizes one optional trailing slash on the three media routes. Other route matching is unchanged.
+Multipart error handling recognizes one optional trailing slash on the image edits and audio transcriptions routes. Other route matching is unchanged.
 
 ## Media constraints
 

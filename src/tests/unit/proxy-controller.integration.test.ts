@@ -111,6 +111,51 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it.each(['system', 'developer', 'user', 'tool'] as const)(
+    'rejects tool_calls on a %s message through the assembled Fastify pipeline',
+    async (role) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = { handleChatCompletions: vi.fn() };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers: {
+            authorization: 'Bearer test-key',
+            'content-type': 'application/json',
+          },
+          payload: {
+            model: 'gpt-4o',
+            messages: [
+              {
+                role,
+                content: role === 'tool' ? 'tool result' : 'hello',
+                ...(role === 'tool' ? { tool_call_id: 'call_1' } : {}),
+                tool_calls: [],
+              },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+          error: {
+            message: 'tool_calls is only supported on assistant messages',
+            type: 'invalid_request_error',
+            param: 'messages[0].tool_calls',
+            code: null,
+          },
+        });
+        expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {
