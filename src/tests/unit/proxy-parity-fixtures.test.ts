@@ -315,7 +315,7 @@ describe('Proxy Parity Fixtures', () => {
     for (const functionCall of [
       { id: 'call_weather', name: 'get_weather', args: { city: 'Paris' } },
       { id: 'call_time', name: 'get_time', args: { city: 'Tokyo' } },
-      { id: 'call_weather', name: 'get_weather', args: { city: 'London' } },
+      { id: 'call_weather', name: 'get_weather', args: { city: 'Paris' } },
     ]) {
       stream.emit(
         'data',
