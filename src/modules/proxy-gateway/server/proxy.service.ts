@@ -3,6 +3,7 @@ import { isEmpty, isFunction, isNil, isNumber, isPlainObject, isString } from 'l
 import { AccountLeaseService } from './account-lease.service';
 import { GeminiClient } from './clients/gemini.client';
 import { UpstreamRequestError } from './clients/upstream-error';
+import { AccountPoolUnavailableException } from './openai-protocol-error';
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
@@ -184,7 +185,10 @@ export class ProxyService {
 
       const token = await this.selectRetryToken(retryState, targetModel, sessionKey);
       if (!token) {
-        throw new Error('No available accounts');
+        throw new AccountPoolUnavailableException(
+          'No healthy account is available',
+          HttpStatus.SERVICE_UNAVAILABLE,
+        );
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -447,7 +451,10 @@ export class ProxyService {
 
       const token = await this.selectRetryToken(retryState, targetModel);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw new AccountPoolUnavailableException(
+          'All available accounts are exhausted or rate limited',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -537,7 +544,10 @@ export class ProxyService {
 
       const token = await this.selectRetryToken(retryState, targetModel);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw new AccountPoolUnavailableException(
+          'All available accounts are exhausted or rate limited',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -748,7 +758,10 @@ export class ProxyService {
       // 1. Get Token
       const token = await this.selectRetryToken(retryState, targetModel, sessionKey);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw new AccountPoolUnavailableException(
+          'All available accounts are exhausted or rate limited',
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,

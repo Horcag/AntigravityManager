@@ -10,6 +10,8 @@ import {
   Req,
   Logger,
   Optional,
+  Param,
+  UseFilters,
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
@@ -31,9 +33,17 @@ import {
 } from '../antigravity/ModelMapping';
 import { getServerConfig } from '../../../server/server-config';
 import { AccountLeaseService } from './account-lease.service';
+import { UpstreamRequestError } from './clients/upstream-error';
+import {
+  OpenAIProtocolException,
+  ProxyProtocolExceptionFilter,
+  mapOpenAIProtocolError,
+  sendOpenAIProtocolError,
+} from './openai-protocol-error';
 
 @Controller('v1')
 @UseGuards(ProxyGuard)
+@UseFilters(ProxyProtocolExceptionFilter)
 export class ProxyController {
   private readonly logger = new Logger(ProxyController.name);
 
@@ -47,38 +57,37 @@ export class ProxyController {
   @Get('models')
   listModels(@Res() res: FastifyReply) {
     try {
-      const config = getServerConfig();
-      const customMapping = config?.custom_mapping ?? {};
-      const modelIds = getOpenAICompatibleModels(
-        customMapping,
-        this.accountLeaseService?.getAllCollectedModels(),
-      );
-
-      const data = modelIds.map((id) => ({
-        id,
-        object: 'model',
-        created: MODEL_LIST_CREATED_AT,
-        owned_by: MODEL_LIST_OWNER,
-      }));
+      const data = this.buildOpenAIModelList();
 
       res.status(HttpStatus.OK).send({
         object: 'list',
         data,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to list models';
-      this.logger.error(message, error instanceof Error ? error.stack : undefined);
-      res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
-        error: {
-          message,
-          type: 'server_error',
-        },
-      });
+      this.logger.error('Failed to list models', error instanceof Error ? error.stack : undefined);
+      sendOpenAIProtocolError(res, error);
     }
+  }
+
+  @Get('models/:model')
+  getModel(@Param('model') model: string, @Res() res: FastifyReply) {
+    const matched = this.buildOpenAIModelList().find((item) => item.id === model);
+    if (!matched) {
+      sendOpenAIProtocolError(
+        res,
+        new OpenAIProtocolException(`The model '${model}' does not exist`, HttpStatus.NOT_FOUND, {
+          param: 'model',
+          code: 'model_not_found',
+        }),
+      );
+      return;
+    }
+    res.status(HttpStatus.OK).send(matched);
   }
 
   @Post('chat/completions')
   async chatCompletions(@Body() body: OpenAIChatRequest, @Res() res: FastifyReply) {
+    this.validateChatRequest(body);
     await this.respondOpenAIChatCompletions(body, res);
   }
 
@@ -95,8 +104,10 @@ export class ProxyController {
     },
     @Res() res: FastifyReply,
   ) {
+    this.requireNonEmptyString(body.model, 'model');
+    this.validateCompletionPrompt(body.prompt);
     const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3-flash',
+      model: body.model,
       messages: [
         {
           role: 'user',
@@ -138,6 +149,9 @@ export class ProxyController {
     },
     @Res() res: FastifyReply,
   ) {
+    this.requireNonEmptyString(body.model, 'model');
+    this.validateResponsesInput(body.input);
+    this.validateTools(body.tools, body.tool_choice);
     const request = this.buildResponsesChatRequest(body);
 
     try {
@@ -165,6 +179,7 @@ export class ProxyController {
     },
     @Res() res: FastifyReply,
   ) {
+    this.requireNonEmptyString(body.prompt, 'prompt');
     const request: OpenAIChatRequest = {
       model: body.model ?? 'gemini-3-pro-image',
       messages: [
@@ -196,10 +211,9 @@ export class ProxyController {
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
+    this.requireNonEmptyString(body.prompt, 'prompt');
     if (!this.hasMultipartBoundary(req)) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .send('Invalid `boundary` for `multipart/form-data` request');
+      sendOpenAIProtocolError(res, this.invalidRequest('Invalid multipart/form-data boundary'));
       return;
     }
 
@@ -247,43 +261,39 @@ export class ProxyController {
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
+    this.requireNonEmptyString(body.model, 'model');
     if (!this.hasMultipartBoundary(req)) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .send('Invalid `boundary` for `multipart/form-data` request');
+      sendOpenAIProtocolError(res, this.invalidRequest('Invalid multipart/form-data boundary'));
       return;
     }
 
     const inlineAudio = this.resolveInlineData(body.file ?? body.audio);
     if (!inlineAudio) {
-      res.status(HttpStatus.BAD_REQUEST).send({
-        error: {
-          message: "Missing 'file' or 'audio' input. Provide base64 content or a data URL.",
-          type: 'invalid_request_error',
-        },
-      });
+      sendOpenAIProtocolError(
+        res,
+        this.invalidRequest(
+          "Missing 'file' or 'audio' input. Provide base64 content or a data URL.",
+        ),
+      );
       return;
     }
 
     try {
-      const result = await this.proxyService.handleGeminiGenerateContent(
-        body.model ?? 'gemini-3-flash',
-        {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: body.prompt ?? 'Please transcribe the provided speech audio accurately.',
-                },
-                {
-                  inlineData: inlineAudio,
-                },
-              ],
-            },
-          ],
-        },
-      );
+      const result = await this.proxyService.handleGeminiGenerateContent(body.model, {
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: body.prompt ?? 'Please transcribe the provided speech audio accurately.',
+              },
+              {
+                inlineData: inlineAudio,
+              },
+            ],
+          },
+        ],
+      });
 
       const text = result.candidates?.[0]?.content?.parts
         ?.map((part) => part.text ?? '')
@@ -337,6 +347,118 @@ export class ProxyController {
       return prompt.join('\n');
     }
     return prompt;
+  }
+
+  private buildOpenAIModelList(): Array<{
+    id: string;
+    object: 'model';
+    created: number;
+    owned_by: string;
+  }> {
+    const config = getServerConfig();
+    return getOpenAICompatibleModels(
+      config?.custom_mapping ?? {},
+      this.accountLeaseService?.getAllCollectedModels(),
+    ).map((id) => ({
+      id,
+      object: 'model' as const,
+      created: MODEL_LIST_CREATED_AT,
+      owned_by: MODEL_LIST_OWNER,
+    }));
+  }
+
+  private validateChatRequest(body: OpenAIChatRequest): void {
+    this.requireNonEmptyString(body.model, 'model');
+    if (!Array.isArray(body.messages) || body.messages.length === 0) {
+      throw this.invalidRequest('messages must be a non-empty array', 'messages');
+    }
+    for (const message of body.messages) {
+      if (
+        !message ||
+        !['system', 'developer', 'user', 'assistant', 'tool'].includes(message.role)
+      ) {
+        throw this.invalidRequest('messages contains an unsupported role', 'messages');
+      }
+      if (!this.isValidMessageContent(message.content)) {
+        throw this.invalidRequest('messages contains unsupported content', 'messages');
+      }
+    }
+    this.validateTools(body.tools, body.tool_choice);
+  }
+
+  private validateCompletionPrompt(prompt: string | string[] | undefined): void {
+    const isValid =
+      (isString(prompt) && !isEmpty(prompt.trim())) ||
+      (Array.isArray(prompt) &&
+        prompt.length > 0 &&
+        prompt.every((item) => isString(item) && !isEmpty(item.trim())));
+    if (!isValid) {
+      throw this.invalidRequest('prompt must be a non-empty string or string array', 'prompt');
+    }
+  }
+
+  private validateResponsesInput(input: unknown): void {
+    if (isString(input) && !isEmpty(input.trim())) {
+      return;
+    }
+    if (Array.isArray(input) && input.length > 0) {
+      return;
+    }
+    throw this.invalidRequest('input must be non-empty', 'input');
+  }
+
+  private validateTools(
+    tools: OpenAIChatRequest['tools'] | undefined,
+    toolChoice: OpenAIChatRequest['tool_choice'] | undefined,
+  ): void {
+    if (
+      tools &&
+      (!Array.isArray(tools) ||
+        tools.some((tool) => tool.type !== 'function' || !tool.function?.name))
+    ) {
+      throw this.invalidRequest('tools must contain function declarations with names', 'tools');
+    }
+    if (
+      toolChoice &&
+      toolChoice !== 'auto' &&
+      toolChoice !== 'none' &&
+      toolChoice !== 'required' &&
+      (!isPlainObject(toolChoice) ||
+        toolChoice.type !== 'function' ||
+        !isPlainObject(toolChoice.function) ||
+        !isString(toolChoice.function.name) ||
+        isEmpty(toolChoice.function.name.trim()))
+    ) {
+      throw this.invalidRequest('tool_choice is invalid', 'tool_choice');
+    }
+  }
+
+  private isValidMessageContent(
+    content: OpenAIChatRequest['messages'][number]['content'],
+  ): boolean {
+    if (isString(content) || content === null) {
+      return true;
+    }
+    return (
+      Array.isArray(content) &&
+      content.every(
+        (part) =>
+          (part.type === 'text' && isString(part.text)) ||
+          (part.type === 'image_url' &&
+            isString(part.image_url?.url) &&
+            !isEmpty(part.image_url.url.trim())),
+      )
+    );
+  }
+
+  private requireNonEmptyString(value: unknown, param: string): asserts value is string {
+    if (!isString(value) || isEmpty(value.trim())) {
+      throw this.invalidRequest(`${param} is required`, param);
+    }
+  }
+
+  private invalidRequest(message: string, param?: string): OpenAIProtocolException {
+    return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param });
   }
 
   private toLegacyTextCompletionsResponse(response: OpenAIChatResponse): Record<string, unknown> {
@@ -822,13 +944,10 @@ export class ProxyController {
         if (res.raw.writableEnded) {
           return;
         }
-        const message = error instanceof Error ? error.message : String(error);
+        const mapped = mapOpenAIProtocolError(error);
         res.raw.write(
           `data: ${JSON.stringify({
-            error: {
-              message,
-              type: 'server_error',
-            },
+            error: mapped.error,
           })}\n\n`,
         );
         res.raw.end();
@@ -858,12 +977,10 @@ export class ProxyController {
           HttpStatus.INTERNAL_SERVER_ERROR,
           'Streaming image generation is not supported by this endpoint',
         );
-        res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
-          error: {
-            message: 'Streaming image generation is not supported by this endpoint',
-            type: 'invalid_request_error',
-          },
-        });
+        sendOpenAIProtocolError(
+          res,
+          this.invalidRequest('Streaming image generation is not supported by this endpoint'),
+        );
         return;
       }
 
@@ -875,12 +992,13 @@ export class ProxyController {
           HttpStatus.BAD_GATEWAY,
           'Upstream did not return inline image data',
         );
-        res.status(HttpStatus.BAD_GATEWAY).send({
-          error: {
-            message: 'Upstream did not return inline image data',
-            type: 'invalid_response_error',
-          },
-        });
+        sendOpenAIProtocolError(
+          res,
+          new OpenAIProtocolException(
+            'Upstream did not return inline image data',
+            HttpStatus.BAD_GATEWAY,
+          ),
+        );
         return;
       }
 
@@ -893,7 +1011,7 @@ export class ProxyController {
         ],
       });
     } catch (error) {
-      let message = error instanceof Error ? error.message : 'Internal Server Error';
+      const message = error instanceof Error ? error.message : 'Internal Server Error';
 
       if (this.isProjectContextErrorMessage(message)) {
         try {
@@ -914,13 +1032,21 @@ export class ProxyController {
             });
             return;
           }
-          message = 'Upstream did not return inline image data';
+          sendOpenAIProtocolError(
+            res,
+            new OpenAIProtocolException(
+              'Upstream did not return inline image data',
+              HttpStatus.BAD_GATEWAY,
+            ),
+          );
+          return;
         } catch (fallbackError) {
-          message = fallbackError instanceof Error ? fallbackError.message : message;
+          this.sendOpenAIErrorResponse(res, '/v1/images/generations', fallbackError);
+          return;
         }
       }
 
-      this.sendOpenAIErrorResponse(res, '/v1/images/generations', error, message);
+      this.sendOpenAIErrorResponse(res, '/v1/images/generations', error);
     }
   }
 
@@ -1048,15 +1174,10 @@ export class ProxyController {
     error: unknown,
     overrideMessage?: string,
   ): void {
-    const message = overrideMessage ?? this.resolveErrorMessageText(error);
-    const status = this.resolveErrorHttpStatus(message);
-    this.logProxyEndpointError(endpoint, status, message, error);
-    res.status(status).send({
-      error: {
-        message,
-        type: 'server_error',
-      },
-    });
+    const responseError = this.withOverriddenErrorMessage(error, overrideMessage);
+    const mapped = mapOpenAIProtocolError(responseError);
+    this.logProxyEndpointError(endpoint, mapped.status, mapped.error.message, error);
+    sendOpenAIProtocolError(res, responseError);
   }
 
   private sendAnthropicErrorResponse(
@@ -1065,54 +1186,38 @@ export class ProxyController {
     error: unknown,
     overrideMessage?: string,
   ): void {
-    const message = overrideMessage ?? this.resolveErrorMessageText(error);
-    const status = this.resolveErrorHttpStatus(message);
-    this.logProxyEndpointError(endpoint, status, message, error);
-    res.status(status).send({
+    const responseError = this.withOverriddenErrorMessage(error, overrideMessage);
+    const mapped = mapOpenAIProtocolError(responseError);
+    this.logProxyEndpointError(endpoint, mapped.status, mapped.error.message, error);
+    res.status(mapped.status).send({
       type: 'error',
       error: {
-        type: 'api_error',
-        message,
+        type: mapped.error.type === 'invalid_request_error' ? 'invalid_request_error' : 'api_error',
+        message: mapped.error.message,
       },
     });
   }
 
-  private resolveErrorHttpStatus(message: string): HttpStatus {
-    const lowered = message.toLowerCase();
-    if (lowered.includes('all accounts failed or unhealthy')) {
-      return HttpStatus.SERVICE_UNAVAILABLE;
+  private withOverriddenErrorMessage(error: unknown, overrideMessage?: string): unknown {
+    if (!overrideMessage) {
+      return error;
     }
-    if (lowered.includes('all accounts exhausted') || lowered.includes('no available accounts')) {
-      return HttpStatus.TOO_MANY_REQUESTS;
+    if (error instanceof UpstreamRequestError) {
+      return new UpstreamRequestError({
+        message: overrideMessage,
+        status: error.status,
+        headers: error.headers,
+        body: error.body,
+      });
     }
-    if (
-      lowered.includes('network socket disconnected') ||
-      lowered.includes('secure tls connection was established') ||
-      lowered.includes('socket hang up') ||
-      lowered.includes('econnreset') ||
-      lowered.includes('eai_again')
-    ) {
-      return HttpStatus.SERVICE_UNAVAILABLE;
+    if (error instanceof OpenAIProtocolException) {
+      return new OpenAIProtocolException(overrideMessage, error.getStatus(), error.protocolError);
     }
-    if (lowered.includes('401') || lowered.includes('unauthorized')) {
-      return HttpStatus.UNAUTHORIZED;
+    if (error instanceof Error) {
+      const overriddenError = new Error(overrideMessage, { cause: error });
+      return overriddenError;
     }
-    if (lowered.includes('403') || lowered.includes('forbidden')) {
-      return HttpStatus.FORBIDDEN;
-    }
-    if (lowered.includes('429') || lowered.includes('rate limit') || lowered.includes('quota')) {
-      return HttpStatus.TOO_MANY_REQUESTS;
-    }
-    if (lowered.includes('503') || lowered.includes('service unavailable')) {
-      return HttpStatus.SERVICE_UNAVAILABLE;
-    }
-    if (lowered.includes('502') || lowered.includes('bad gateway')) {
-      return HttpStatus.BAD_GATEWAY;
-    }
-    if (lowered.includes('504') || lowered.includes('timeout')) {
-      return HttpStatus.GATEWAY_TIMEOUT;
-    }
-    return HttpStatus.INTERNAL_SERVER_ERROR;
+    return new Error(overrideMessage);
   }
 
   private logProxyEndpointError(

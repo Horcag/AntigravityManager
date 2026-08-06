@@ -1,7 +1,29 @@
-import { describe, expect, it, vi } from 'vitest';
+import { Module, UnauthorizedException } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { FastifyAdapter } from '@nestjs/platform-fastify';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { of } from 'rxjs';
 
+import { getServerConfig } from '../../server/server-config';
+import { AccountLeaseService } from '../../modules/proxy-gateway/server/account-lease.service';
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
+import { UpstreamRequestError } from '../../modules/proxy-gateway/server/clients/upstream-error';
+import { GeminiController } from '../../modules/proxy-gateway/server/gemini.controller';
+import { ProxyGuard } from '../../modules/proxy-gateway/server/proxy.guard';
+import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import {
+  AccountPoolUnavailableException,
+  mapOpenAIProtocolError,
+  ProxyProtocolExceptionFilter,
+} from '../../modules/proxy-gateway/server/openai-protocol-error';
+
+vi.mock('../../server/server-config', () => ({
+  getServerConfig: vi.fn(),
+}));
+
+afterEach(() => {
+  vi.mocked(getServerConfig).mockReset();
+});
 
 function createReplyMock() {
   const reply: Record<string, any> = {};
@@ -11,7 +33,285 @@ function createReplyMock() {
   return reply;
 }
 
+async function createHttpApp(proxyService: object) {
+  @Module({
+    controllers: [ProxyController, GeminiController],
+    providers: [
+      ProxyGuard,
+      { provide: ProxyService, useValue: proxyService },
+      { provide: AccountLeaseService, useValue: { getAllCollectedModels: () => new Set() } },
+    ],
+  })
+  class HttpTestModule {}
+
+  const app = await NestFactory.create(HttpTestModule, new FastifyAdapter(), { logger: false });
+  await app.init();
+  return app;
+}
+
 describe('ProxyController Integration', () => {
+  it('uses structured upstream status and retry-after without parsing error text', () => {
+    expect(
+      mapOpenAIProtocolError(
+        new UpstreamRequestError({
+          message: 'upstream throttled request',
+          status: 429,
+          headers: { retryAfter: '30' },
+        }),
+      ),
+    ).toEqual({
+      status: 429,
+      retryAfter: '30',
+      error: {
+        message: 'upstream throttled request',
+        type: 'rate_limit_error',
+        param: null,
+        code: null,
+      },
+    });
+    expect(mapOpenAIProtocolError(new SyntaxError('local parser saw 429 quota')).status).toBe(500);
+    expect(
+      mapOpenAIProtocolError(
+        new UpstreamRequestError({ message: 'upstream resource missing', status: 404 }),
+      ),
+    ).toMatchObject({
+      status: 404,
+      error: { type: 'invalid_request_error', param: null, code: null },
+    });
+    expect(
+      mapOpenAIProtocolError(
+        new AccountPoolUnavailableException(
+          'All available accounts are exhausted or rate limited',
+          429,
+        ),
+      ).status,
+    ).toBe(429);
+  });
+
+  it('preserves structured status and retry headers when an error message is overridden', () => {
+    const controller = new ProxyController({} as any);
+    const reply = createReplyMock();
+
+    (controller as any).sendOpenAIErrorResponse(
+      reply,
+      '/v1/images/generations',
+      new UpstreamRequestError({
+        message: 'upstream unavailable',
+        status: 503,
+        headers: { retryAfter: '15' },
+      }),
+      'Image fallback failed',
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(503);
+    expect(reply.header).toHaveBeenCalledWith('retry-after', '15');
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'Image fallback failed',
+        type: 'server_error',
+        param: null,
+        code: null,
+      },
+    });
+  });
+
+  it('preserves protocol contracts through the assembled Nest and Fastify pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockRejectedValue(
+        new UpstreamRequestError({
+          message: 'upstream throttled request',
+          status: 429,
+          headers: { retryAfter: '30' },
+        }),
+      ),
+      handleAnthropicMessages: vi.fn().mockRejectedValue(new Error('anthropic upstream failure')),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const authorizedHeaders = { authorization: 'Bearer test-key' };
+
+    try {
+      const guardFailure = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        payload: { model: 'gemini-3.5-flash-medium', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(guardFailure.statusCode).toBe(401);
+      expect(guardFailure.json()).toEqual({
+        error: {
+          message: 'API key validation failed',
+          type: 'authentication_error',
+          param: null,
+          code: null,
+        },
+      });
+
+      const anthropicFailure = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: authorizedHeaders,
+        payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(anthropicFailure.statusCode).toBe(500);
+      expect(anthropicFailure.json()).toEqual({
+        type: 'error',
+        error: { type: 'api_error', message: 'anthropic upstream failure' },
+      });
+
+      const invalidRequest = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authorizedHeaders,
+        payload: { model: '', messages: [] },
+      });
+      expect(invalidRequest.statusCode).toBe(400);
+      expect(invalidRequest.json().error).toMatchObject({
+        type: 'invalid_request_error',
+        param: 'model',
+      });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+
+      const model = await server.inject({
+        method: 'GET',
+        url: '/v1/models/gemini-3.5-flash-medium',
+        headers: authorizedHeaders,
+      });
+      expect(model.statusCode).toBe(200);
+      expect(model.json()).toMatchObject({ id: 'gemini-3.5-flash-medium', object: 'model' });
+
+      const modelMiss = await server.inject({
+        method: 'GET',
+        url: '/v1/models/does-not-exist',
+        headers: authorizedHeaders,
+      });
+      expect(modelMiss.statusCode).toBe(404);
+      expect(modelMiss.json()).toEqual({
+        error: {
+          message: "The model 'does-not-exist' does not exist",
+          type: 'invalid_request_error',
+          param: 'model',
+          code: 'model_not_found',
+        },
+      });
+
+      const upstreamFailure = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authorizedHeaders,
+        payload: { model: 'gemini-3.5-flash-medium', messages: [{ role: 'user', content: 'hi' }] },
+      });
+      expect(upstreamFailure.statusCode).toBe(429);
+      expect(upstreamFailure.headers['retry-after']).toBe('30');
+      expect(upstreamFailure.json().error.type).toBe('rate_limit_error');
+
+      const geminiResponse = await server.inject({
+        method: 'GET',
+        url: '/v1beta/models/unknown-model',
+        headers: authorizedHeaders,
+      });
+      expect(geminiResponse.statusCode).toBe(200);
+      expect(geminiResponse.json()).toEqual({
+        name: 'models/unknown-model',
+        displayName: 'unknown-model',
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('returns the OpenAI server-error envelope for assembled upstream 5xx failures', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi
+        .fn()
+        .mockRejectedValue(
+          new UpstreamRequestError({ message: 'upstream unavailable', status: 503 }),
+        ),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { authorization: 'Bearer test-key' },
+        payload: { model: 'gemini-3.5-flash-medium', messages: [{ role: 'user', content: 'hi' }] },
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        error: {
+          message: 'upstream unavailable',
+          type: 'server_error',
+          param: null,
+          code: null,
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('maps guard authentication failures into the OpenAI envelope', () => {
+    const reply = createReplyMock();
+    new ProxyProtocolExceptionFilter().catch(
+      new UnauthorizedException('API key validation failed'),
+      {
+        switchToHttp: () => ({
+          getRequest: () => ({ url: '/v1/chat/completions' }),
+          getResponse: () => reply,
+        }),
+      } as any,
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(401);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'API key validation failed',
+        type: 'authentication_error',
+        param: null,
+        code: null,
+      },
+    });
+  });
+
+  it('rejects invalid chat input before calling ProxyService', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await expect(
+      controller.chatCompletions({ model: '', messages: [] } as any, reply as any),
+    ).rejects.toMatchObject({ protocolError: { param: 'model' } });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it('retrieves a listed model and returns canonical model-not-found error', () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const hit = createReplyMock();
+    const miss = createReplyMock();
+
+    controller.getModel('gemini-3.5-flash-medium', hit as any);
+    controller.getModel('does-not-exist', miss as any);
+
+    expect(hit.status).toHaveBeenCalledWith(200);
+    expect(hit.send).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'gemini-3.5-flash-medium', object: 'model' }),
+    );
+    expect(miss.status).toHaveBeenCalledWith(404);
+    expect(miss.send).toHaveBeenCalledWith({
+      error: {
+        message: "The model 'does-not-exist' does not exist",
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found',
+      },
+    });
+  });
+
   it('lists Antigravity public presets alongside discovered chat models', () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
@@ -72,6 +372,28 @@ describe('ProxyController Integration', () => {
     expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
     expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
     expect(reply.status).toHaveBeenCalledWith(200);
+  });
+
+  it('accepts the official developer chat role without remapping it', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.chatCompletions(
+      {
+        model: 'gemini-3.5-flash-medium',
+        messages: [{ role: 'developer', content: 'Keep replies concise.' }],
+      } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [{ role: 'developer', content: 'Keep replies concise.' }],
+      }),
+    );
   });
 
   it('returns stream response with SSE headers for parity stream path', async () => {
@@ -381,7 +703,23 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('maps image generation upstream quota errors to 429', async () => {
+  it('defaults the image generation model when it is omitted', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '![img](data:image/png;base64,AAAABBBB)' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gemini-3-pro-image' }),
+    );
+  });
+
+  it('does not infer upstream status from image generation error text', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockRejectedValue(new Error('429 quota exceeded')),
     };
@@ -396,7 +734,7 @@ describe('ProxyController Integration', () => {
       reply as any,
     );
 
-    expect(reply.status).toHaveBeenCalledWith(429);
+    expect(reply.status).toHaveBeenCalledWith(500);
   });
 
   it('falls back to Gemini image generation when chat path hits project context error', async () => {
@@ -485,6 +823,26 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
   });
 
+  it('defaults the image edit model when it is omitted', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '![img](data:image/png;base64,CCCCDDDD)' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageEdits(
+      { prompt: 'make it brighter', image: 'data:image/png;base64,IMGBASE64' },
+      { headers: { 'content-type': 'multipart/form-data; boundary=----parity' } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gemini-3-pro-image' }),
+    );
+  });
+
   it('rejects image edits request without multipart boundary', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
@@ -508,7 +866,14 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
     expect(reply.status).toHaveBeenCalledWith(400);
-    expect(reply.send).toHaveBeenCalledWith('Invalid `boundary` for `multipart/form-data` request');
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'Invalid multipart/form-data boundary',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    });
   });
 
   it('supports audio transcriptions endpoint', async () => {
@@ -566,7 +931,14 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
     expect(reply.status).toHaveBeenCalledWith(400);
-    expect(reply.send).toHaveBeenCalledWith('Invalid `boundary` for `multipart/form-data` request');
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'Invalid multipart/form-data boundary',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    });
   });
 
   it('supports Anthropic messages endpoint', async () => {
