@@ -2812,6 +2812,117 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('converts parameterized, whitespace-wrapped image data URLs into normalized Anthropic image blocks', () => {
+    const service = new ProxyService({} as never, {} as never) as unknown as {
+      convertOpenAIToClaude: (request: {
+        model: string;
+        messages: Array<{
+          role: 'user';
+          content: Array<{ type: 'image_url'; image_url: { url: string } }>;
+        }>;
+      }) => {
+        messages: Array<{ content: unknown }>;
+      };
+    };
+
+    const result = service.convertOpenAIToClaude({
+      model: 'claude-test',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: 'DATA:IMAGE/PNG;charset=utf-8;BASE64,QU\nJDRA==' },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(result.messages[0]?.content).toEqual([
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: 'image/png', data: 'QUJDRA==' },
+      },
+    ]);
+
+    const rejectedDataUrl = service.convertOpenAIToClaude({
+      model: 'claude-test',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image_url',
+              image_url: { url: 'data:text/html;base64,PGgxPk5vPC9oMT4=' },
+            },
+          ],
+        },
+      ],
+    });
+    expect(rejectedDataUrl.messages[0]?.content).toBe('');
+  });
+
+  it('rejects non-image JSON image edits and normalizes accepted composite image data URLs', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+      }),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const [payload, param] of [
+        [{ prompt: 'edit', image: 'data:text/html;base64,PGgxPk5vPC9oMT4=' }, 'image'],
+        [
+          {
+            prompt: 'edit',
+            image: 'QUJDRA==',
+            reference_images: [{ data: 'QUJDRA==', mimeType: 'text/html' }],
+          },
+          'reference_images',
+        ],
+      ] as Array<[Record<string, unknown>, string]>) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/images/edits',
+          headers,
+          payload,
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          error: { type: 'invalid_request_error', param, code: 'invalid_value' },
+        });
+      }
+
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        headers,
+        payload: { prompt: 'edit', image: 'DATA:IMAGE/PNG;charset=utf-8;BASE64,QU\nJDRA==' },
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          messages: [
+            expect.objectContaining({
+              content: expect.arrayContaining([
+                { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJDRA==' } },
+              ]),
+            }),
+          ],
+        }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects malformed image data URLs on Chat and Responses paths before upstream', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

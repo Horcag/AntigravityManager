@@ -56,6 +56,7 @@ import {
 } from './openai-protocol-error';
 import { isMultipartParserOrLimitError } from './fastify-multipart.provider';
 import { type OpenAIResponsesConfiguration } from '../antigravity/OpenAIResponsesStreamingMapper';
+import { parseImageDataUrl } from './image-data-url';
 
 type InlineInput = string | { data?: string; mimeType?: string };
 
@@ -368,8 +369,8 @@ export class ProxyController {
       return;
     }
     if (
-      !this.validateInlineBase64Inputs(input.images, 'image', res) ||
-      !this.validateInlineBase64Inputs(input.referenceImages, 'reference_images', res)
+      !this.validateInlineImageInputs(input.images, 'image', res) ||
+      !this.validateInlineImageInputs(input.referenceImages, 'reference_images', res)
     ) {
       return;
     }
@@ -1312,10 +1313,7 @@ export class ProxyController {
       );
     }
 
-    const dataUrl = url.match(
-      /^data:(?<mime>image\/[A-Za-z0-9!#$&^_.+-]+)(?:;[A-Za-z0-9!#$&^_.+-]+=(?:[A-Za-z0-9!#$&^_.+%+-]+|"[^"]*"))*;base64,(?<data>[\s\S]*)$/i,
-    );
-    if (!dataUrl?.groups?.data || this.hasInvalidBase64Data(dataUrl.groups.data)) {
+    if (!parseImageDataUrl(url)) {
       throw this.invalidRequest(
         `${param} must contain a valid base64 image data URL`,
         param,
@@ -2183,6 +2181,43 @@ export class ProxyController {
     return false;
   }
 
+  private validateInlineImageInputs(
+    inputs: Array<InlineInput | undefined>,
+    param: string,
+    res: FastifyReply,
+  ): boolean {
+    const hasInvalidImage = inputs.some((input) => {
+      if (!input) {
+        return false;
+      }
+
+      const value = isString(input) ? input : input.data;
+      if (!isString(value)) {
+        return true;
+      }
+      if (/^data:/i.test(value)) {
+        return !parseImageDataUrl(value);
+      }
+
+      return (
+        (!isString(input) &&
+          (!input.mimeType || !/^image\/[A-Za-z0-9!#$&^_.+-]+$/i.test(input.mimeType))) ||
+        this.hasInvalidBase64Data(value)
+      );
+    });
+    if (!hasInvalidImage) {
+      return true;
+    }
+
+    this.sendInvalidRequest(
+      res,
+      param + ' must contain valid base64 image data.',
+      param,
+      'invalid_value',
+    );
+    return false;
+  }
+
   private hasInvalidBase64Data(input: InlineInput | undefined): boolean {
     if (!input) {
       return false;
@@ -2238,6 +2273,14 @@ export class ProxyController {
     }
 
     if (isString(input)) {
+      const dataUrl = parseImageDataUrl(input);
+      if (dataUrl) {
+        return {
+          mimeType: dataUrl.mimeType,
+          data: dataUrl.data,
+        };
+      }
+
       const dataUri = input.match(/^data:(?<mime>[^;]+);base64,(?<data>[A-Za-z0-9+/=]+)$/);
       if (dataUri?.groups?.mime && dataUri.groups.data) {
         return {
@@ -2262,8 +2305,12 @@ export class ProxyController {
       if (!data) {
         return null;
       }
+      const dataUrl = parseImageDataUrl(data);
+      if (dataUrl) {
+        return dataUrl;
+      }
       return {
-        mimeType: this.asString(inputRecord.mimeType) ?? defaultMimeType,
+        mimeType: this.asString(inputRecord.mimeType)?.toLowerCase() ?? defaultMimeType,
         data,
       };
     }

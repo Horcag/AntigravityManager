@@ -45,6 +45,7 @@ import {
   type ProxyUpstreamFailureClassification,
 } from './proxy-retry-policy';
 import { ProxyModelRoutingPolicy } from './proxy-model-routing-policy';
+import { parseImageDataUrl } from './image-data-url';
 
 interface StreamIdleTimer {
   reset: () => void;
@@ -2099,17 +2100,17 @@ export class ProxyService {
 
       if (part.type === 'image_url' && part.image_url?.url) {
         const url = part.image_url.url;
-        const dataUri = url.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
-        if (dataUri?.groups?.mime && dataUri.groups.data) {
+        const dataUrl = parseImageDataUrl(url);
+        if (dataUrl) {
           blocks.push({
             type: 'image',
             source: {
               type: 'base64',
-              media_type: dataUri.groups.mime,
-              data: dataUri.groups.data,
+              media_type: dataUrl.mimeType,
+              data: dataUrl.data,
             },
           });
-        } else {
+        } else if (!/^data:/i.test(url)) {
           blocks.push({ type: 'text', text: `[image_url] ${url}` });
         }
       }
