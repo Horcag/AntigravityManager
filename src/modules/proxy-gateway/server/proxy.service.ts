@@ -383,7 +383,7 @@ export class ProxyService {
           const trimmed = line.trim();
           if (!trimmed.startsWith('data:')) continue;
           const dataStr = trimmed.slice('data:'.length).trim();
-          if (dataStr === '[DONE]') continue;
+          if (dataStr.length === 0 || dataStr === '[DONE]') continue;
 
           try {
             const json = JSON.parse(dataStr);
@@ -998,7 +998,7 @@ export class ProxyService {
           }
 
           const dataStr = trimmed.slice('data:'.length).trim();
-          if (dataStr === '[DONE]') {
+          if (dataStr.length === 0 || dataStr === '[DONE]') {
             continue;
           }
 
@@ -1178,7 +1178,7 @@ export class ProxyService {
           return;
         }
         const dataString = trimmed.slice('data:'.length).trim();
-        if (dataString === '[DONE]') {
+        if (dataString.length === 0 || dataString === '[DONE]') {
           return;
         }
         try {

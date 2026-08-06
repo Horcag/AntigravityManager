@@ -295,6 +295,50 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
+  it('skips empty SSE keepalives without corrupting an Anthropic stream', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    const payload = JSON.stringify({
+      candidates: [
+        {
+          content: { parts: [{ text: 'keepalive stream text' }] },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    stream.emit('data', Buffer.from(`data:\n\ndata: \n\ndata: ${payload}\n\n`));
+    stream.emit('end');
+    await completed;
+
+    const eventTypes = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => line.slice('data: '.length))
+      .filter((eventPayload) => eventPayload !== '[DONE]')
+      .map((eventPayload) => JSON.parse(eventPayload).type);
+
+    expect(eventTypes).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ]);
+    expect(chunks.join('')).toContain('keepalive stream text');
+    expect(eventTypes).not.toContain('error');
+  });
+
   it('injects Claude beta headers when handling Gemini-compatible Claude models', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());

@@ -102,6 +102,23 @@ describe('ProxyService Responses streaming', () => {
     ]);
   });
 
+  it('skips empty SSE keepalives before a normal Responses completion', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const upstream = Readable.from([
+      Buffer.from(
+        'data:\n\ndata: \n\ndata:{"response":{"candidates":[{"content":{"parts":[{"text":"kept alive"}]},"finishReason":"STOP"}]}}\n\n',
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(createResponsesStream(service, upstream).pipe(toArray()))
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.map((event) => event.type)).toContain('response.output_text.delta');
+    expect(events.map((event) => event.type)).toContain('response.completed');
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(JSON.stringify(events)).toContain('kept alive');
+  });
+
   it('carries actual usage through a synthetic Responses completion event', async () => {
     const service = new ProxyService({} as never, {} as never);
     const stream = createSyntheticResponsesStream(service, {
