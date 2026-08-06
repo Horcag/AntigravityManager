@@ -106,23 +106,15 @@ describe('Path Utilities', () => {
   });
 
   it('should get correct executable path', async () => {
+    setPlatform('linux');
     vi.spyOn(fs, 'existsSync').mockImplementation((candidate) => {
       const candidateStr = String(candidate);
-      if (process.platform === 'linux') {
-        return candidateStr === '/usr/share/antigravity/antigravity';
-      } else if (process.platform === 'darwin') {
-        return candidateStr === '/Applications/Antigravity.app/Contents/MacOS/Antigravity';
-      }
-      return false;
+      return candidateStr === '/usr/share/antigravity/antigravity';
     });
     const paths = await import('../../shared/platform/paths');
     const execPath = paths.getAntigravityExecutablePath();
 
-    const expectedPath =
-      process.platform === 'darwin'
-        ? '/Applications/Antigravity.app/Contents/MacOS/Antigravity'
-        : '/usr/share/antigravity/antigravity';
-    expect(execPath).toBe(expectedPath);
+    expect(execPath).toBe('/usr/share/antigravity/antigravity');
   });
 
   it('should skip non-writable derived portable user-data paths on Linux', async () => {
@@ -176,7 +168,9 @@ describe('Path Utilities', () => {
       },
     ];
 
-    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'existsSync').mockImplementation((candidatePath) => {
+      return String(candidatePath) === 'D:\\Profiles\\AG IDE';
+    });
     findProcessMock.mockResolvedValue(runningProcesses);
 
     const paths = await import('../../shared/platform/paths');
@@ -715,6 +709,7 @@ ProcessId=12345
     vi.resetModules();
     setPlatform('win32');
 
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
     childProcessMock.execSync.mockImplementation(() => {
       throw new Error('Windows process command unavailable');
     });
