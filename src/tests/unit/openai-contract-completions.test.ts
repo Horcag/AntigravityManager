@@ -423,7 +423,7 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(parseSseData(withoutUsage.chunks).at(-1)).toBe('[DONE]');
   });
 
-  it('keeps stable tool call ids/indexes and finishes with tool_calls', async () => {
+  it('deduplicates repeated tool call ids while preserving the first call and tool_calls finish', async () => {
     const service = createService();
     const stream = new EventEmitter();
     const observable = invokePrivate<Observable<string>>(
@@ -469,9 +469,12 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(toolCalls.map((call) => [call.id, call.index])).toEqual([
       ['call_a', 0],
       ['call_b', 1],
-      ['call_a', 0],
     ]);
     expect(toolCalls.every((call) => call.type === 'function')).toBe(true);
+    expect(toolCalls.map((call) => call.function)).toEqual([
+      { name: 'alpha', arguments: '{"a":1}' },
+      { name: 'beta', arguments: '{}' },
+    ]);
     expect(payloads.at(-1)?.choices).toEqual([
       { index: 0, delta: {}, finish_reason: 'tool_calls' },
     ]);

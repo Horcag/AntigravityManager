@@ -300,7 +300,7 @@ describe('Proxy Parity Fixtures', () => {
     }
   });
 
-  it('assigns stable distinct indices to streamed tool calls', async () => {
+  it('deduplicates repeated streamed tool calls with stable distinct indices', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
     const outputChunks: string[] = [];
@@ -338,9 +338,13 @@ describe('Proxy Parity Fixtures', () => {
     expect(chunks.filter((chunk) => chunk.choices[0].delta.role === 'assistant')).toHaveLength(1);
 
     const toolCallChunks = chunks.filter((chunk) => chunk.choices[0].delta.tool_calls);
-    expect(toolCallChunks.map((chunk) => chunk.choices[0].index)).toEqual([0, 0, 0]);
+    expect(toolCallChunks.map((chunk) => chunk.choices[0].index)).toEqual([0, 0]);
     expect(toolCallChunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].index)).toEqual([
-      0, 1, 0,
+      0, 1,
+    ]);
+    expect(toolCallChunks.map((chunk) => chunk.choices[0].delta.tool_calls[0].id)).toEqual([
+      'call_weather',
+      'call_time',
     ]);
     expect(outputChunks.at(-1)).toBe('data: [DONE]\n\n');
   });
