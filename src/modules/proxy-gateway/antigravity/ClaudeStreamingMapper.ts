@@ -1,4 +1,4 @@
-import { GeminiPart, Usage, UsageMetadata } from './types';
+import { GeminiPart, GroundingMetadata, Usage, UsageMetadata } from './types';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
@@ -45,7 +45,7 @@ export class StreamingState {
 
   // Web Search / Grounding buffers
   public webSearchQuery: string | null = null;
-  public groundingChunks: any[] | null = null;
+  public groundingChunks: GroundingMetadata['groundingChunks'] | null = null;
 
   private parseErrorCount: number = 0;
 
@@ -238,6 +238,63 @@ export class StreamingState {
 
   public markToolUsed() {
     this.usedTool = true;
+  }
+
+  /**
+   * Retain only displayable grounding data and merge repeated SSE metadata frames.
+   */
+  public recordGroundingMetadata(value: unknown): boolean {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return false;
+    }
+
+    const grounding = value as Record<string, unknown>;
+    const queries = Array.isArray(grounding.webSearchQueries)
+      ? grounding.webSearchQueries.filter(
+          (query): query is string => typeof query === 'string' && query.trim().length > 0,
+        )
+      : [];
+    const existingQueries = this.webSearchQuery ? this.webSearchQuery.split(', ') : [];
+    const uniqueQueries = [...new Set([...existingQueries, ...queries])];
+    if (uniqueQueries.length > 0) {
+      this.webSearchQuery = uniqueQueries.join(', ');
+    }
+
+    const chunks = Array.isArray(grounding.groundingChunks)
+      ? grounding.groundingChunks.flatMap((chunk) => {
+          if (typeof chunk !== 'object' || chunk === null || Array.isArray(chunk)) {
+            return [];
+          }
+          const web = (chunk as Record<string, unknown>).web;
+          if (typeof web !== 'object' || web === null || Array.isArray(web)) {
+            return [];
+          }
+          const webRecord = web as Record<string, unknown>;
+          const title = typeof webRecord.title === 'string' ? webRecord.title : undefined;
+          const uri = typeof webRecord.uri === 'string' ? webRecord.uri : undefined;
+          return title || uri ? [{ web: { title, uri } }] : [];
+        })
+      : [];
+
+    if (chunks.length > 0) {
+      const existingChunks = this.groundingChunks ?? [];
+      const existingKeys = new Set(
+        existingChunks.map((chunk) => `${chunk.web?.title ?? ''}\u0000${chunk.web?.uri ?? ''}`),
+      );
+      this.groundingChunks = [
+        ...existingChunks,
+        ...chunks.filter((chunk) => {
+          const key = `${chunk.web?.title ?? ''}\u0000${chunk.web?.uri ?? ''}`;
+          if (existingKeys.has(key)) {
+            return false;
+          }
+          existingKeys.add(key);
+          return true;
+        }),
+      ];
+    }
+
+    return queries.length > 0 || chunks.length > 0;
   }
 
   public currentBlockType(): BlockType {

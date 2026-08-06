@@ -282,6 +282,72 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
   });
 
+  it('preserves a zero-parameter function call during fallback collection and normalizes args', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream) as Promise<any>;
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_empty","name":"no_args"}}]}}]}\n\n',
+      ),
+    );
+    stream.emit('end');
+
+    await expect(resultPromise).resolves.toMatchObject({
+      candidates: [
+        { content: { parts: [{ functionCall: { args: {}, id: 'call_empty', name: 'no_args' } }] } },
+      ],
+    });
+  });
+
+  it('rejects a fallback function call whose present args are not an object', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream);
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"bad_args","args":[]}}]}}]}\n\n',
+      ),
+    );
+    stream.emit('end');
+
+    await expect(resultPromise).rejects.toThrow('Empty response stream');
+  });
+
+  it('preserves and deduplicates grounding metadata during fallback collection', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultPromise = service.testCollectStream(stream) as Promise<any>;
+    const groundingMetadata = {
+      groundingChunks: [{ web: { title: 'Gemini Docs', uri: 'https://example.com/docs' } }],
+      webSearchQueries: ['gemini api'],
+    };
+
+    for (const candidate of [
+      { content: { parts: [{ text: 'fallback answer' }] }, groundingMetadata },
+      { groundingMetadata },
+    ]) {
+      stream.emit('data', Buffer.from(`data: ${JSON.stringify({ candidates: [candidate] })}\n\n`));
+    }
+    stream.emit('end');
+
+    await expect(resultPromise).resolves.toMatchObject({
+      candidates: [
+        {
+          content: { parts: [{ text: 'fallback answer' }] },
+          groundingMetadata: {
+            groundingChunks: [{ web: { title: 'Gemini Docs', uri: 'https://example.com/docs' } }],
+            webSearchQueries: ['gemini api'],
+          },
+        },
+      ],
+    });
+  });
+
   it.each([
     ['object', { code: 429, message: 'quota exhausted' }, 'quota exhausted'],
     ['string', 'quota exhausted', 'quota exhausted'],
@@ -502,6 +568,101 @@ describe('ProxyService Empty Stream Retry Logic', () => {
 
     expect(chunks.join('')).toContain('final stream');
     expect(chunks.join('')).toContain('message_stop');
+  });
+
+  it('emits one Anthropic message with deduplicated grounding metadata across stream frames', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+    const groundingMetadata = {
+      groundingChunks: [{ web: { title: 'Gemini Docs', uri: 'https://example.com/docs' } }],
+      webSearchQueries: ['gemini api'],
+    };
+
+    for (const candidate of [
+      { content: { parts: [{ text: 'grounded answer' }] }, groundingMetadata },
+      { groundingMetadata },
+    ]) {
+      stream.emit('data', Buffer.from(`data: ${JSON.stringify({ candidates: [candidate] })}\n\n`));
+    }
+    stream.emit('end');
+    await completed;
+
+    const output = chunks.join('');
+    expect(output).toContain('grounded answer');
+    expect(output.match(/Searched for you/g)).toHaveLength(1);
+    expect(output.match(/https:\/\/example\.com\/docs/g)).toHaveLength(1);
+    expect(output.match(/"type":"message_start"/g)).toHaveLength(1);
+    expect(output.match(/"type":"message_stop"/g)).toHaveLength(1);
+  });
+
+  it('treats grounding-only Anthropic stream output as usable', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        `data: ${JSON.stringify({
+          candidates: [
+            {
+              groundingMetadata: {
+                groundingChunks: [{ web: { title: 'Source', uri: 'https://example.com/source' } }],
+                webSearchQueries: ['source lookup'],
+              },
+            },
+          ],
+        })}\n\n`,
+      ),
+    );
+    stream.emit('end');
+    await completed;
+
+    const output = chunks.join('');
+    expect(output).toContain('Searched for you');
+    expect(output).toContain('https://example.com/source');
+    expect(output.match(/"type":"message_start"/g)).toHaveLength(1);
+    expect(output.match(/"type":"message_stop"/g)).toHaveLength(1);
+  });
+
+  it('emits a zero-parameter function call from an Anthropic stream', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_empty","name":"no_args"}}]}}]}\n\n',
+      ),
+    );
+    stream.emit('end');
+    await completed;
+
+    expect(chunks.join('')).toContain('"input_json_delta"');
+    expect(chunks.join('')).toContain('"partial_json":"{}"');
   });
 
   it('emits every ordered Anthropic block from a multipart upstream SSE frame', async () => {

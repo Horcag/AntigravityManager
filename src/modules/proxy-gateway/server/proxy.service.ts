@@ -25,6 +25,7 @@ import {
 import {
   ClaudeRequest,
   ClaudeResponse,
+  GroundingMetadata,
   GeminiInternalRequest,
   GeminiPart as InternalGeminiPart,
 } from '../antigravity/types';
@@ -414,8 +415,9 @@ export class ProxyService {
 
           const candidate = json?.candidates?.[0];
           const parts = candidate?.content?.parts;
+          const hasGrounding = state.recordGroundingMetadata(candidate?.groundingMetadata);
           const hasUsableCandidate =
-            Array.isArray(parts) && parts.some((part) => this.isGeminiPart(part));
+            hasGrounding || (Array.isArray(parts) && parts.some((part) => this.isGeminiPart(part)));
 
           if (candidate?.finishReason) {
             lastFinishReason = candidate.finishReason;
@@ -1094,6 +1096,7 @@ export class ProxyService {
       let buffer = '';
       let receivedData = false;
       const mergedParts: InternalGeminiPart[] = [];
+      let groundingMetadata: GroundingMetadata | undefined;
       const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
       let finishReason: string | undefined;
       let usageMetadata: GeminiResponse['usageMetadata'];
@@ -1169,6 +1172,10 @@ export class ProxyService {
           }
 
           const candidate = parsed?.candidates?.[0];
+          groundingMetadata = this.mergeGroundingMetadata(
+            groundingMetadata,
+            candidate?.groundingMetadata,
+          );
           const parts = candidate?.content?.parts;
           if (Array.isArray(parts)) {
             for (const part of parts) {
@@ -1214,21 +1221,23 @@ export class ProxyService {
         if (settled) {
           return;
         }
-        if (!receivedData || mergedParts.length === 0) {
+        if (!receivedData || (mergedParts.length === 0 && !groundingMetadata)) {
           rejectOnce(new Error('Empty response stream'));
           return;
         }
 
+        const candidate: NonNullable<GeminiResponse['candidates']>[number] & {
+          groundingMetadata?: GroundingMetadata;
+        } = {
+          content: {
+            role: 'model',
+            parts: mergedParts,
+          },
+          finishReason,
+          groundingMetadata,
+        };
         resolveOnce({
-          candidates: [
-            {
-              content: {
-                role: 'model',
-                parts: mergedParts,
-              },
-              finishReason,
-            },
-          ],
+          candidates: [candidate],
           usageMetadata,
         });
       };
@@ -1569,6 +1578,56 @@ export class ProxyService {
       return null;
     }
     return { groundingChunks, webSearchQueries };
+  }
+
+  private mergeGroundingMetadata(
+    existing: GroundingMetadata | undefined,
+    value: unknown,
+  ): GroundingMetadata | undefined {
+    const grounding = this.toUnknownRecord(value);
+    if (!grounding) {
+      return existing;
+    }
+
+    const webSearchQueries = Array.isArray(grounding.webSearchQueries)
+      ? grounding.webSearchQueries.filter(
+          (query): query is string => isString(query) && !isEmpty(query.trim()),
+        )
+      : [];
+    const groundingChunks = Array.isArray(grounding.groundingChunks)
+      ? grounding.groundingChunks.flatMap((chunk) => {
+          const web = this.toUnknownRecord(this.toUnknownRecord(chunk)?.web);
+          if (!web) {
+            return [];
+          }
+          const title = isString(web.title) ? web.title : undefined;
+          const uri = isString(web.uri) ? web.uri : undefined;
+          return title || uri ? [{ web: { title, uri } }] : [];
+        })
+      : [];
+    if (webSearchQueries.length === 0 && groundingChunks.length === 0) {
+      return existing;
+    }
+
+    const mergedQueries = [
+      ...new Set([...(existing?.webSearchQueries ?? []), ...webSearchQueries]),
+    ];
+    const mergedChunks = [...(existing?.groundingChunks ?? [])];
+    const chunkKeys = new Set(
+      mergedChunks.map((chunk) => `${chunk.web?.title ?? ''}\u0000${chunk.web?.uri ?? ''}`),
+    );
+    for (const chunk of groundingChunks) {
+      const key = `${chunk.web?.title ?? ''}\u0000${chunk.web?.uri ?? ''}`;
+      if (!chunkKeys.has(key)) {
+        mergedChunks.push(chunk);
+        chunkKeys.add(key);
+      }
+    }
+
+    return {
+      groundingChunks: mergedChunks.length > 0 ? mergedChunks : undefined,
+      webSearchQueries: mergedQueries.length > 0 ? mergedQueries : undefined,
+    };
   }
 
   private toResponsesUsageMetadata(value: unknown): GeminiResponsesUsageMetadata | undefined {
@@ -2661,7 +2720,10 @@ export class ProxyService {
       functionCall !== null &&
       isString(functionCall.name) &&
       !isEmpty(functionCall.name) &&
-      isPlainObject(functionCall.args);
+      (!Object.hasOwn(functionCall, 'args') || isPlainObject(functionCall.args));
+    if (hasFunctionCall && !Object.hasOwn(functionCall, 'args')) {
+      functionCall.args = {};
+    }
     const inlineData = this.toUnknownRecord(part.inlineData);
     const hasInlineData =
       inlineData !== null &&
