@@ -5,12 +5,56 @@ export interface OpenAIChatRequest {
   top_p?: number;
   max_tokens?: number;
   stream?: boolean;
+  stream_options?: OpenAIStreamOptions;
+  stop?: string | string[];
   size?: string;
   quality?: string;
   tools?: OpenAITool[];
   tool_choice?: OpenAIToolChoice;
-  response_format?: { type?: string };
+  response_format?: OpenAIResponseFormat;
+  n?: number;
+  seed?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  logit_bias?: Record<string, number>;
+  logprobs?: boolean | number | null;
+  top_logprobs?: number;
+  user?: string;
   extra?: Record<string, unknown>;
+}
+
+export interface OpenAIStreamOptions {
+  include_usage?: boolean;
+}
+
+export interface OpenAIResponseFormat {
+  type?: string;
+  json_schema?: unknown;
+}
+
+/**
+ * Legacy `/v1/completions` request. Kept separate from the Chat request because the
+ * legacy surface carries options (suffix/echo/best_of) that Chat never had.
+ */
+export interface OpenAILegacyCompletionRequest {
+  model?: string;
+  prompt?: string | string[];
+  max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  stream?: boolean;
+  stream_options?: OpenAIStreamOptions;
+  stop?: string | string[];
+  n?: number;
+  seed?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
+  logit_bias?: Record<string, number>;
+  logprobs?: number | null;
+  suffix?: string | null;
+  echo?: boolean;
+  best_of?: number;
+  user?: string;
 }
 
 export type OpenAIToolChoice =

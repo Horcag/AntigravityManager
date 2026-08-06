@@ -4,7 +4,7 @@
     "\"name\":\"get_weather\"",
     "\"arguments\":\"{\\\"city\\\":\\\"Paris\\\"}\"",
     "\"content\":\"The weather is cloudy.\"",
-    "\"finish_reason\":\"stop\"",
+    "\"finish_reason\":\"tool_calls\"",
     "data: [DONE]"
   ]
 }

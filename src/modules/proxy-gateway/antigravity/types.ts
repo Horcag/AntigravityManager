@@ -60,6 +60,11 @@ export interface ClaudeRequest {
   top_k?: number;
   thinking?: ThinkingConfig;
   metadata?: Metadata;
+  /**
+   * Response MIME type requested by the caller (OpenAI `response_format`).
+   * Forwarded to Gemini `generationConfig.responseMimeType`.
+   */
+  response_mime_type?: string;
 }
 
 export type ClaudeToolChoice = 'none' | 'auto' | 'required' | { type: 'tool'; name: string };

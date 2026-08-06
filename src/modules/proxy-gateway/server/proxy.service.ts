@@ -3,7 +3,7 @@ import { isEmpty, isFunction, isNil, isNumber, isPlainObject, isString } from 'l
 import { AccountLeaseService } from './account-lease.service';
 import { GeminiClient } from './clients/gemini.client';
 import { UpstreamRequestError } from './clients/upstream-error';
-import { AccountPoolUnavailableException } from './openai-protocol-error';
+import { AccountPoolUnavailableException, OpenAIProtocolException } from './openai-protocol-error';
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
@@ -51,7 +51,21 @@ interface StreamIdleTimer {
   dispose: () => void;
 }
 
-type OpenAIOutputProtocol = 'chat-completions' | 'responses';
+type OpenAIOutputProtocol = 'chat-completions' | 'responses' | 'text-completions';
+
+/** Wire shape emitted by the OpenAI streaming mappers. */
+type OpenAIStreamVariant = 'chat' | 'text';
+
+interface OpenAIStreamOptions {
+  variant: OpenAIStreamVariant;
+  includeUsage: boolean;
+}
+
+interface OpenAIStreamUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
 
 @Injectable()
 export class ProxyService {
@@ -743,6 +757,11 @@ export class ProxyService {
       `OpenAI-compatible request received: model=${request.model}, mappedModel=${targetModel}, stream=${request.stream}`,
     );
 
+    // Deterministic request conversion happens before any account is leased so a local
+    // mapping failure never selects an account or penalizes one.
+    const claudeRequest = this.convertOpenAIToClaude(request);
+    const streamOptions = this.resolveOpenAIStreamOptions(request, outputProtocol);
+
     // Retry loop for account selection
     let lastError: unknown = null;
     const maxRetries = 3;
@@ -775,7 +794,6 @@ export class ProxyService {
       };
 
       try {
-        const claudeRequest = this.convertOpenAIToClaude(request);
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
         const geminiBody = transformClaudeRequestIn(
@@ -800,6 +818,7 @@ export class ProxyService {
               stream,
               request.model,
               outputProtocol,
+              streamOptions,
               signatureContext,
             );
           } catch (streamError) {
@@ -825,7 +844,7 @@ export class ProxyService {
             );
             return outputProtocol === 'responses'
               ? this.createSyntheticResponsesStream(openaiResponse)
-              : this.createSyntheticOpenAIStream(openaiResponse);
+              : this.createSyntheticOpenAIStream(openaiResponse, streamOptions);
           }
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -850,7 +869,6 @@ export class ProxyService {
             `OpenAI compatibility request hit project context issue, retrying without project: ${err.message}`,
           );
           try {
-            const claudeRequest = this.convertOpenAIToClaude(request);
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
               claudeRequest,
@@ -871,6 +889,7 @@ export class ProxyService {
                 stream,
                 request.model,
                 outputProtocol,
+                streamOptions,
                 signatureContext,
               );
             }
@@ -1024,12 +1043,42 @@ export class ProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     outputProtocol: OpenAIOutputProtocol,
+    streamOptions: OpenAIStreamOptions,
     signatureContext?: SignatureContext,
   ): Observable<string> {
     if (outputProtocol === 'responses') {
       return this.processResponsesStreamResponse(upstreamStream, model, signatureContext);
     }
-    return this.processStreamResponse(upstreamStream, model, signatureContext);
+    return this.processStreamResponse(upstreamStream, model, signatureContext, streamOptions);
+  }
+
+  private resolveOpenAIStreamOptions(
+    request: OpenAIChatRequest,
+    outputProtocol: OpenAIOutputProtocol,
+  ): OpenAIStreamOptions {
+    return {
+      variant: outputProtocol === 'text-completions' ? 'text' : 'chat',
+      includeUsage: request.stream_options?.include_usage === true,
+    };
+  }
+
+  private mapGeminiUsageMetadata(usage: unknown): OpenAIStreamUsage {
+    const record = this.toUnknownRecord(usage) ?? {};
+    const promptTokens = isNumber(record.promptTokenCount) ? record.promptTokenCount : 0;
+    const thoughtsTokens = isNumber(record.thoughtsTokenCount) ? record.thoughtsTokenCount : 0;
+    const candidatesTokens = isNumber(record.candidatesTokenCount)
+      ? record.candidatesTokenCount
+      : 0;
+    const completionTokens = candidatesTokens + thoughtsTokens;
+    const totalTokens = isNumber(record.totalTokenCount)
+      ? record.totalTokenCount
+      : promptTokens + completionTokens;
+
+    return {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: totalTokens,
+    };
   }
 
   private processResponsesStreamResponse(
@@ -1303,228 +1352,291 @@ export class ProxyService {
     return value as Record<string, unknown>;
   }
 
+  private buildOpenAIStreamChunk(
+    identity: { streamId: string; created: number; model: string },
+    streamOptions: OpenAIStreamOptions,
+    choices: Array<Record<string, unknown>>,
+    usage?: OpenAIStreamUsage,
+  ): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
+      id: identity.streamId,
+      object: streamOptions.variant === 'text' ? 'text_completion' : 'chat.completion.chunk',
+      created: identity.created,
+      model: identity.model,
+      choices,
+    };
+    // Official semantics: usage is present-but-null on normal chunks only when the
+    // caller opted in, and never fabricated otherwise.
+    if (streamOptions.includeUsage) {
+      payload.usage = usage ?? null;
+    }
+    return payload;
+  }
+
+  private buildOpenAIContentChoice(
+    variant: OpenAIStreamVariant,
+    text: string,
+  ): Record<string, unknown> {
+    if (variant === 'text') {
+      return { text, index: 0, logprobs: null, finish_reason: null };
+    }
+    return { index: 0, delta: { content: text }, finish_reason: null };
+  }
+
+  private buildOpenAIFinishChoice(
+    variant: OpenAIStreamVariant,
+    finishReason: string | null,
+  ): Record<string, unknown> {
+    if (variant === 'text') {
+      return { text: '', index: 0, logprobs: null, finish_reason: finishReason };
+    }
+    return { index: 0, delta: {}, finish_reason: finishReason };
+  }
+
   // Handle SSE Stream conversion
   private processStreamResponse(
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     signatureContext?: SignatureContext,
+    streamOptions: OpenAIStreamOptions = { variant: 'chat', includeUsage: false },
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
       let hasEmittedChunk = false;
       let hasSentDone = false;
+      let terminated = false;
+      let emittedToolCall = false;
+      let lastUsage: OpenAIStreamUsage | null = null;
       const toolCallIndices = new Map<string, number>();
       /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
       let streamSignature: string | null = null;
 
       const streamId = `chatcmpl-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
+      const identity = { streamId, created, model };
+      const isTextVariant = streamOptions.variant === 'text';
       if (this.shouldEmitCloudCodeMeta()) {
         subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
       }
 
-      const pushChunk = (payload: Record<string, unknown>): void => {
+      const pushChoice = (choice: Record<string, unknown>): void => {
         hasEmittedChunk = true;
-        subscriber.next(`data: ${JSON.stringify(payload)}\n\n`);
+        subscriber.next(
+          `data: ${JSON.stringify(this.buildOpenAIStreamChunk(identity, streamOptions, [choice]))}\n\n`,
+        );
       };
 
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
-        if (!hasSentDone) {
-          subscriber.next('data: [DONE]\n\n');
-          hasSentDone = true;
+      const sendDone = (): void => {
+        if (hasSentDone) {
+          return;
         }
-        subscriber.complete();
+        // Only emit the usage-only frame when upstream actually reported usage.
+        // Fabricating a zero-token frame would be a lie on the wire.
+        if (streamOptions.includeUsage && lastUsage) {
+          subscriber.next(
+            `data: ${JSON.stringify(
+              this.buildOpenAIStreamChunk(identity, streamOptions, [], lastUsage),
+            )}\n\n`,
+          );
+        }
+        subscriber.next('data: [DONE]\n\n');
+        hasSentDone = true;
+      };
+
+      const failStream = (error: Error): void => {
+        if (terminated) {
+          return;
+        }
+        terminated = true;
+        idleTimer.clear();
+        this.logger.error(`OpenAI-compatible stream error: ${error.message}`);
+        subscriber.error(error);
+      };
+
+      // An idle stream is a failed stream: terminate through the error path so the
+      // client never mistakes a stalled upstream for a successful completion.
+      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
+        failStream(new Error('Upstream stream idle timeout after 300s'));
       });
 
       idleTimer.reset();
 
+      const handleLine = (line: string): void => {
+        if (terminated) {
+          return;
+        }
+        const trimmed = line.trim();
+        // Upstreams emit both "data:" and "data: " forms.
+        if (!trimmed.startsWith('data:')) return;
+
+        const dataStr = trimmed.slice('data:'.length).trim();
+        if (dataStr.length === 0 || dataStr === '[DONE]') return;
+
+        let json: any;
+        try {
+          json = JSON.parse(dataStr);
+        } catch {
+          // A malformed upstream payload is a real failure: surface one terminal
+          // stream error instead of silently completing as a successful stream.
+          failStream(new Error('Malformed upstream stream payload'));
+          return;
+        }
+
+        if (json?.error) {
+          const upstreamMessage = isString(json.error?.message) ? json.error.message : undefined;
+          failStream(new Error(upstreamMessage ?? 'Upstream stream returned an error payload'));
+          return;
+        }
+
+        {
+          const candidate = json?.candidates?.[0];
+          const parts = candidate?.content?.parts || [];
+
+          if (json?.usageMetadata) {
+            lastUsage = this.mapGeminiUsageMetadata(json.usageMetadata);
+          }
+
+          for (const part of parts) {
+            const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
+            if (signature) {
+              streamSignature = signature;
+            }
+
+            if (part.thought && part.text) {
+              if (isTextVariant) {
+                // Legacy completions have no reasoning channel.
+                continue;
+              }
+              pushChoice({
+                index: 0,
+                delta: { reasoning_content: part.text },
+                finish_reason: null,
+              });
+              continue;
+            }
+
+            if (part.functionCall) {
+              const toolCallId =
+                part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
+              const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
+              toolCallIndices.set(toolCallId, toolCallIndex);
+              // Capture for replay under the id the client actually sees (upstream id when
+              // Gemini supplies one, otherwise the generated id), keyed by the account/model
+              // that produced it.
+              const capturedSignature = signature ?? streamSignature;
+              if (capturedSignature && signatureContext) {
+                SignatureStore.store(
+                  {
+                    accountId: signatureContext.accountId,
+                    model: signatureContext.model,
+                    toolCallId: toolCallId,
+                  },
+                  capturedSignature,
+                );
+              }
+              if (isTextVariant) {
+                // Legacy completions cannot express tool calls.
+                continue;
+              }
+              emittedToolCall = true;
+              pushChoice({
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: toolCallIndex,
+                      id: toolCallId,
+                      type: 'function',
+                      function: {
+                        name: part.functionCall.name,
+                        arguments: JSON.stringify(part.functionCall.args || {}),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              });
+              continue;
+            }
+
+            if (part.inlineData) {
+              const mimeType = part.inlineData.mimeType || 'image/jpeg';
+              const data = part.inlineData.data || '';
+              const imageMarkdown = `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
+              pushChoice(this.buildOpenAIContentChoice(streamOptions.variant, imageMarkdown));
+              continue;
+            }
+
+            if (part.text) {
+              pushChoice(this.buildOpenAIContentChoice(streamOptions.variant, part.text));
+            }
+          }
+
+          if (candidate?.finishReason) {
+            const mappedFinishReason = emittedToolCall
+              ? 'tool_calls'
+              : this.mapGeminiFinishReasonToOpenAIFinishReason(candidate.finishReason);
+            pushChoice(this.buildOpenAIFinishChoice(streamOptions.variant, mappedFinishReason));
+            terminated = true;
+            idleTimer.clear();
+            sendDone();
+            subscriber.complete();
+            return;
+          }
+        }
+      };
+
       upstreamStream.on('data', (chunk: Buffer) => {
+        if (terminated) {
+          return;
+        }
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) continue;
-
-          const dataStr = trimmed.slice(6);
-          if (dataStr === '[DONE]') continue;
-
-          try {
-            const json = JSON.parse(dataStr);
-            const candidate = json.candidates?.[0];
-            const parts = candidate?.content?.parts || [];
-
-            for (const part of parts) {
-              const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
-              if (signature) {
-                streamSignature = signature;
-              }
-
-              if (part.thought && part.text) {
-                const reasoningChunk = {
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created: created,
-                  model: model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { reasoning_content: part.text },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                pushChunk(reasoningChunk);
-                continue;
-              }
-
-              if (part.functionCall) {
-                const toolCallId =
-                  part.functionCall.id || [part.functionCall.name, uuidv4()].join('-');
-                const toolCallIndex = toolCallIndices.get(toolCallId) ?? toolCallIndices.size;
-                toolCallIndices.set(toolCallId, toolCallIndex);
-                // Capture for replay under the id the client actually sees (upstream id when
-                // Gemini supplies one, otherwise the generated id), keyed by the account/model
-                // that produced it.
-                const capturedSignature = signature ?? streamSignature;
-                if (capturedSignature && signatureContext) {
-                  SignatureStore.store(
-                    {
-                      accountId: signatureContext.accountId,
-                      model: signatureContext.model,
-                      toolCallId: toolCallId,
-                    },
-                    capturedSignature,
-                  );
-                }
-                const toolCallChunk = {
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created: created,
-                  model: model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: {
-                        tool_calls: [
-                          {
-                            index: toolCallIndex,
-                            id: toolCallId,
-                            type: 'function',
-                            function: {
-                              name: part.functionCall.name,
-                              arguments: JSON.stringify(part.functionCall.args || {}),
-                            },
-                          },
-                        ],
-                      },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                pushChunk(toolCallChunk);
-                continue;
-              }
-
-              if (part.inlineData) {
-                const mimeType = part.inlineData.mimeType || 'image/jpeg';
-                const data = part.inlineData.data || '';
-                const imageMarkdown = `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
-                const imageChunk = {
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created: created,
-                  model: model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: imageMarkdown },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                pushChunk(imageChunk);
-                continue;
-              }
-
-              if (part.text) {
-                const contentChunk = {
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created: created,
-                  model: model,
-                  choices: [
-                    {
-                      index: 0,
-                      delta: { content: part.text },
-                      finish_reason: null,
-                    },
-                  ],
-                };
-                pushChunk(contentChunk);
-              }
-            }
-
-            if (candidate?.finishReason) {
-              const finishChunk = {
-                id: streamId,
-                object: 'chat.completion.chunk',
-                created: created,
-                model: model,
-                choices: [
-                  {
-                    index: 0,
-                    delta: {},
-                    finish_reason: this.mapGeminiFinishReasonToOpenAIFinishReason(
-                      candidate.finishReason,
-                    ),
-                  },
-                ],
-              };
-              pushChunk(finishChunk);
-              subscriber.next('data: [DONE]\n\n');
-              hasSentDone = true;
-              subscriber.complete();
-            }
-          } catch {
-            // ignore parse errors
+          if (terminated) {
+            return;
           }
+          handleLine(line);
         }
       });
 
       upstreamStream.on('end', () => {
-        idleTimer.clear();
+        if (terminated) {
+          return;
+        }
+        // Upstream may end without a trailing newline: flush the decoder and process
+        // whatever data line is still buffered before deciding how the stream ends.
+        buffer += decoder.decode();
+        const pending = buffer;
+        buffer = '';
+        for (const line of pending.split('\n')) {
+          if (terminated) {
+            return;
+          }
+          handleLine(line);
+        }
+        if (terminated) {
+          return;
+        }
         if (!hasEmittedChunk) {
-          pushChunk({
-            id: streamId,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [
-              {
-                index: 0,
-                delta: { content: '' },
-                finish_reason: null,
-              },
-            ],
-          });
+          // No candidate, no content, no finish reason: this is a failed stream, not an
+          // empty success. Terminate through the error path and emit no [DONE].
+          failStream(new Error('Upstream stream ended without any usable content'));
+          return;
         }
-        if (!hasSentDone) {
-          subscriber.next('data: [DONE]\n\n');
-          hasSentDone = true;
-        }
+        terminated = true;
+        idleTimer.clear();
+        sendDone();
         subscriber.complete();
       });
 
       upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
         // Convert to clean Error to avoid circular reference issues (socket objects)
-        const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
-        this.logger.error(`OpenAI-compatible stream error: ${cleanError.message}`);
-        subscriber.error(cleanError);
+        failStream(err instanceof Error ? new Error(err.message) : new Error(String(err)));
       });
 
       return () => {
@@ -1533,13 +1645,20 @@ export class ProxyService {
     });
   }
 
-  private createSyntheticOpenAIStream(response: OpenAIChatResponse): Observable<string> {
+  private createSyntheticOpenAIStream(
+    response: OpenAIChatResponse,
+    streamOptions: OpenAIStreamOptions = { variant: 'chat', includeUsage: false },
+  ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const streamId = response.id || `chatcmpl-${uuidv4()}`;
       const created = response.created || Math.floor(Date.now() / 1000);
       const model = response.model;
+      const identity = { streamId, created, model };
       const choice = response.choices?.[0];
-      const finishReason = choice?.finish_reason ?? 'stop';
+      const toolCalls = choice?.message?.tool_calls ?? [];
+      // Legacy text completions have no tool-call channel, so they never claim tool_calls.
+      const emitsToolCalls = streamOptions.variant !== 'text' && toolCalls.length > 0;
+      const finishReason = emitsToolCalls ? 'tool_calls' : (choice?.finish_reason ?? 'stop');
       const content =
         choice?.message && isString(choice.message.content) ? choice.message.content : '';
       const chunkSize = 80;
@@ -1548,51 +1667,71 @@ export class ProxyService {
         subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
       }
 
-      if (content.length === 0) {
-        const finishChunk = {
-          id: streamId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: finishReason,
-            },
-          ],
-          usage: response.usage,
-        };
-        subscriber.next(`data: ${JSON.stringify(finishChunk)}\n\n`);
+      const pushChoice = (payloadChoice: Record<string, unknown>): void => {
+        subscriber.next(
+          `data: ${JSON.stringify(
+            this.buildOpenAIStreamChunk(identity, streamOptions, [payloadChoice]),
+          )}\n\n`,
+        );
+      };
+
+      const sendDone = (): void => {
+        // Never invent usage the upstream response did not carry.
+        if (streamOptions.includeUsage && response.usage) {
+          subscriber.next(
+            `data: ${JSON.stringify(
+              this.buildOpenAIStreamChunk(identity, streamOptions, [], {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens,
+              }),
+            )}\n\n`,
+          );
+        }
         subscriber.next('data: [DONE]\n\n');
         subscriber.complete();
-        return;
-      }
+      };
 
       for (let index = 0; index < content.length; index += chunkSize) {
         const piece = content.slice(index, index + chunkSize);
         const isLast = index + chunkSize >= content.length;
-        const chunk = {
-          id: streamId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [
-            {
-              index: 0,
-              delta: { content: piece },
-              finish_reason: isLast ? finishReason : null,
-            },
-          ],
-          usage: isLast
-            ? response.usage
-            : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        };
-        subscriber.next(`data: ${JSON.stringify(chunk)}\n\n`);
+        const payloadChoice = this.buildOpenAIContentChoice(streamOptions.variant, piece);
+        // The finish chunk is deferred when tool-call deltas still have to be emitted.
+        if (isLast && !emitsToolCalls) {
+          payloadChoice.finish_reason = finishReason;
+        }
+        pushChoice(payloadChoice);
       }
 
-      subscriber.next('data: [DONE]\n\n');
-      subscriber.complete();
+      if (emitsToolCalls) {
+        // Replay the actual calls on the wire with their original ids and deterministic
+        // indexes, so a synthetic fallback stream is not silently stripped of tool calls.
+        toolCalls.forEach((toolCall, toolCallIndex) => {
+          pushChoice({
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: toolCallIndex,
+                  id: toolCall.id,
+                  type: 'function',
+                  function: {
+                    name: toolCall.function.name,
+                    arguments: toolCall.function.arguments,
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+          });
+        });
+      }
+
+      if (content.length === 0 || emitsToolCalls) {
+        pushChoice(this.buildOpenAIFinishChoice(streamOptions.variant, finishReason));
+      }
+
+      sendDone();
     });
   }
 
@@ -1702,7 +1841,9 @@ export class ProxyService {
     const anthropicMessages: ClaudeRequest['messages'] = [];
 
     for (const msg of messages) {
-      if (msg.role === 'system') {
+      // `developer` is the current OpenAI spelling of `system`; both are instructions,
+      // never user turns.
+      if (msg.role === 'system' || msg.role === 'developer') {
         const systemText = this.extractOpenAITextContent(msg.content);
         if (systemText) {
           systemPromptParts.push(systemText);
@@ -1756,6 +1897,8 @@ export class ProxyService {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
       top_p: request.top_p,
+      stop_sequences: this.convertOpenAIStopSequences(request.stop),
+      response_mime_type: this.convertOpenAIResponseFormat(request.response_format),
       stream: request.stream,
       metadata: {
         ...(request.extra ?? {}),
@@ -1777,22 +1920,77 @@ export class ProxyService {
 
     const namedChoice = this.toUnknownRecord(toolChoice);
     if (namedChoice?.type !== 'function') {
-      throw new Error(
-        'OpenAI tool_choice must be none, auto, required, or a named function selection',
+      throw this.invalidOpenAIRequest(
+        'tool_choice must be none, auto, required, or a named function selection',
+        'tool_choice',
       );
     }
 
     const functionChoice = this.toUnknownRecord(namedChoice.function);
     const name = isString(functionChoice?.name) ? functionChoice.name.trim() : '';
     if (!name) {
-      throw new Error('OpenAI tool_choice.function.name is required for named function selection');
+      throw this.invalidOpenAIRequest(
+        'tool_choice.function.name is required for named function selection',
+        'tool_choice',
+      );
     }
 
     const hasNamedTool = tools?.some((tool) => tool.function?.name === name);
     if (!hasNamedTool) {
-      throw new Error('OpenAI tool_choice function "' + name + '" is not among the provided tools');
+      throw this.invalidOpenAIRequest(
+        `tool_choice function "${name}" is not among the provided tools`,
+        'tool_choice',
+      );
     }
     return { type: 'tool', name };
+  }
+
+  private convertOpenAIStopSequences(stop: OpenAIChatRequest['stop']): string[] | undefined {
+    if (isNil(stop)) {
+      return undefined;
+    }
+
+    const entries = isString(stop) ? [stop] : stop;
+    if (!Array.isArray(entries)) {
+      throw this.invalidOpenAIRequest('stop must be a string or an array of strings', 'stop');
+    }
+    if (entries.length === 0) {
+      return undefined;
+    }
+    if (entries.length > 4) {
+      throw this.invalidOpenAIRequest('stop supports at most 4 sequences', 'stop');
+    }
+    for (const entry of entries) {
+      if (!isString(entry) || isEmpty(entry)) {
+        throw this.invalidOpenAIRequest('stop entries must be non-empty strings', 'stop');
+      }
+    }
+    return [...entries];
+  }
+
+  private convertOpenAIResponseFormat(
+    responseFormat: OpenAIChatRequest['response_format'],
+  ): string | undefined {
+    if (isNil(responseFormat)) {
+      return undefined;
+    }
+    const type = responseFormat.type;
+    if (isNil(type) || type === 'text') {
+      return undefined;
+    }
+    if (type === 'json_object') {
+      return 'application/json';
+    }
+    // json_schema (and anything unknown) is rejected rather than silently dropped
+    // until real schema passthrough exists.
+    throw this.invalidOpenAIRequest(
+      `response_format type '${isString(type) ? type : String(type)}' is not supported`,
+      'response_format',
+    );
+  }
+
+  private invalidOpenAIRequest(message: string, param: string): OpenAIProtocolException {
+    return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param });
   }
 
   private convertOpenAIPartsToAnthropicContent(

@@ -15,7 +15,16 @@ import {
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { MultipartFile } from '@fastify/multipart';
-import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
+import {
+  isBoolean,
+  isEmpty,
+  isFunction,
+  isNil,
+  isNumber,
+  isObjectLike,
+  isPlainObject,
+  isString,
+} from 'lodash-es';
 import { ProxyService } from './proxy.service';
 import { Observable } from 'rxjs';
 import {
@@ -23,6 +32,8 @@ import {
   AnthropicChatRequest,
   OpenAIChatResponse,
   OpenAIContentPart,
+  OpenAILegacyCompletionRequest,
+  OpenAIStreamOptions,
   GeminiRequest,
   GeminiResponse,
 } from './interfaces/request-interfaces';
@@ -151,18 +162,14 @@ export class ProxyController {
   @Post('completions')
   async completions(
     @Body()
-    body: {
-      model?: string;
-      prompt?: string | string[];
-      max_tokens?: number;
-      temperature?: number;
-      top_p?: number;
-      stream?: boolean;
-    },
+    body: OpenAILegacyCompletionRequest,
     @Res() res: FastifyReply,
   ) {
     this.requireNonEmptyString(body.model, 'model');
     this.validateCompletionPrompt(body.prompt);
+    this.validateUnsupportedSamplingOptions(body);
+    this.validateLegacyOnlyOptions(body);
+    const stop = this.normalizeStopSequences(body.stop);
     const request: OpenAIChatRequest = {
       model: body.model,
       messages: [
@@ -174,10 +181,12 @@ export class ProxyController {
       max_tokens: body.max_tokens,
       temperature: body.temperature,
       top_p: body.top_p,
+      stop,
       stream: body.stream,
+      stream_options: body.stream_options,
     };
     try {
-      const result = await this.proxyService.handleChatCompletions(request);
+      const result = await this.proxyService.handleChatCompletions(request, 'text-completions');
       if (body.stream && this.isObservableLike(result)) {
         this.writeSseResponse(res, result);
         return;
@@ -531,6 +540,10 @@ export class ProxyController {
       }
     }
     this.validateTools(body.tools, body.tool_choice);
+    this.validateUnsupportedSamplingOptions(body);
+    this.validateChatOnlyOptions(body);
+    this.validateResponseFormat(body.response_format);
+    this.normalizeStopSequences(body.stop);
   }
 
   private validateCompletionPrompt(prompt: string | string[] | undefined): void {
@@ -542,6 +555,177 @@ export class ProxyController {
     if (!isValid) {
       throw this.invalidRequest('prompt must be a non-empty string or string array', 'prompt');
     }
+    if (Array.isArray(prompt) && prompt.length > 1) {
+      // Joining several prompts into one upstream call would silently collapse the
+      // per-prompt choices the legacy contract promises.
+      throw this.invalidRequest(
+        'prompt arrays with more than one entry are not supported; send one prompt per request',
+        'prompt',
+      );
+    }
+  }
+
+  /**
+   * Rejects sampling options this gateway cannot honour before any account is
+   * leased. Harmless defaults (n=1, zero penalties, empty logit_bias) pass through.
+   */
+  private validateUnsupportedSamplingOptions(body: {
+    n?: number;
+    seed?: number;
+    presence_penalty?: number;
+    frequency_penalty?: number;
+    logit_bias?: Record<string, number>;
+    temperature?: number;
+    top_p?: number;
+    stream?: boolean;
+    stream_options?: OpenAIStreamOptions;
+  }): void {
+    if (!isNil(body.n) && body.n !== 1) {
+      throw this.unsupportedParameter('n', 'only n=1 is supported');
+    }
+    if (!isNil(body.seed)) {
+      throw this.unsupportedParameter('seed', 'deterministic seeding is not supported');
+    }
+    for (const param of ['presence_penalty', 'frequency_penalty'] as const) {
+      const value = body[param];
+      if (isNil(value)) {
+        continue;
+      }
+      if (!isNumber(value) || !Number.isFinite(value)) {
+        throw this.invalidRequest(`${param} must be a number`, param);
+      }
+      if (value !== 0) {
+        throw this.unsupportedParameter(param, 'only the default value 0 is supported');
+      }
+    }
+    if (!isNil(body.logit_bias)) {
+      if (!isPlainObject(body.logit_bias)) {
+        throw this.invalidRequest('logit_bias must be an object', 'logit_bias');
+      }
+      if (!isEmpty(body.logit_bias)) {
+        throw this.unsupportedParameter('logit_bias', 'token biasing is not supported');
+      }
+    }
+    this.validateNumericRange('temperature', body.temperature, 0, 2);
+    this.validateNumericRange('top_p', body.top_p, 0, 1);
+    this.validateStreamOptions(body.stream, body.stream_options);
+  }
+
+  private validateChatOnlyOptions(body: OpenAIChatRequest): void {
+    if (!isNil(body.logprobs) && body.logprobs !== false) {
+      throw this.unsupportedParameter('logprobs', 'log probabilities are not available');
+    }
+    if (!isNil(body.top_logprobs)) {
+      throw this.unsupportedParameter('top_logprobs', 'log probabilities are not available');
+    }
+  }
+
+  private validateLegacyOnlyOptions(body: OpenAILegacyCompletionRequest): void {
+    if (!isNil(body.logprobs)) {
+      throw this.unsupportedParameter('logprobs', 'log probabilities are not available');
+    }
+    if (!isNil(body.suffix)) {
+      throw this.unsupportedParameter('suffix', 'insertion completions are not supported');
+    }
+    if (!isNil(body.echo) && body.echo !== false) {
+      throw this.unsupportedParameter('echo', 'prompt echo is not supported');
+    }
+    if (!isNil(body.best_of) && body.best_of !== 1) {
+      throw this.unsupportedParameter('best_of', 'only best_of=1 is supported');
+    }
+  }
+
+  private validateStreamOptions(
+    stream: boolean | undefined,
+    streamOptions: OpenAIStreamOptions | undefined,
+  ): void {
+    if (isNil(streamOptions)) {
+      return;
+    }
+    if (!isPlainObject(streamOptions)) {
+      throw this.invalidRequest('stream_options must be an object', 'stream_options');
+    }
+    if (!isNil(streamOptions.include_usage) && !isBoolean(streamOptions.include_usage)) {
+      throw this.invalidRequest('stream_options.include_usage must be a boolean', 'stream_options');
+    }
+    if (stream !== true) {
+      throw this.invalidRequest(
+        'stream_options can only be set when stream is true',
+        'stream_options',
+      );
+    }
+  }
+
+  private validateNumericRange(
+    param: string,
+    value: number | undefined,
+    min: number,
+    max: number,
+  ): void {
+    if (isNil(value)) {
+      return;
+    }
+    if (!isNumber(value) || !Number.isFinite(value)) {
+      throw this.invalidRequest(`${param} must be a number`, param);
+    }
+    if (value < min || value > max) {
+      throw this.invalidRequest(`${param} must be between ${min} and ${max}`, param);
+    }
+  }
+
+  private validateResponseFormat(format: OpenAIChatRequest['response_format']): void {
+    if (isNil(format)) {
+      return;
+    }
+    if (!isPlainObject(format)) {
+      throw this.invalidRequest('response_format must be an object', 'response_format');
+    }
+    const type = format.type;
+    if (isNil(type) || type === 'text' || type === 'json_object') {
+      return;
+    }
+    if (type === 'json_schema') {
+      throw this.unsupportedParameter(
+        'response_format',
+        "response_format type 'json_schema' is not supported; use 'json_object'",
+      );
+    }
+    throw this.invalidRequest(
+      `response_format type '${isString(type) ? type : String(type)}' is not supported`,
+      'response_format',
+    );
+  }
+
+  /** Validates and normalizes `stop` into the Gemini stopSequences shape. */
+  private normalizeStopSequences(stop: string | string[] | undefined): string[] | undefined {
+    if (isNil(stop)) {
+      return undefined;
+    }
+
+    const entries = isString(stop) ? [stop] : stop;
+    if (!Array.isArray(entries)) {
+      throw this.invalidRequest('stop must be a string or an array of strings', 'stop');
+    }
+    if (entries.length === 0) {
+      return undefined;
+    }
+    if (entries.length > 4) {
+      throw this.invalidRequest('stop supports at most 4 sequences', 'stop');
+    }
+    for (const entry of entries) {
+      if (!isString(entry) || isEmpty(entry)) {
+        throw this.invalidRequest('stop entries must be non-empty strings', 'stop');
+      }
+    }
+    return [...entries];
+  }
+
+  private unsupportedParameter(param: string, reason: string): OpenAIProtocolException {
+    return new OpenAIProtocolException(
+      `${param} is not supported by this gateway: ${reason}`,
+      HttpStatus.BAD_REQUEST,
+      { param, code: 'unsupported_parameter' },
+    );
   }
 
   private validateResponsesInput(input: unknown): void {

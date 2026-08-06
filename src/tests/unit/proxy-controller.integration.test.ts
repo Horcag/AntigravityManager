@@ -463,6 +463,7 @@ describe('ProxyController Integration', () => {
         model: 'gpt-4o',
         messages: [{ role: 'user', content: 'hello world' }],
       }),
+      'text-completions',
     );
     expect(reply.status).toHaveBeenCalledWith(200);
     expect(reply.send).toHaveBeenCalledWith(
@@ -1324,5 +1325,140 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
     expect(reply.status).toHaveBeenCalledWith(200);
+  });
+
+  it('rejects unsupported chat options through the assembled pipeline without any upstream call', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const baseChat = {
+      model: 'gemini-3.5-flash-medium',
+      messages: [{ role: 'user', content: 'hi' }],
+    };
+
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ n: 2 }, 'n'],
+      [{ seed: 42 }, 'seed'],
+      [{ presence_penalty: 0.5 }, 'presence_penalty'],
+      [{ frequency_penalty: -0.2 }, 'frequency_penalty'],
+      [{ logit_bias: { '123': 5 } }, 'logit_bias'],
+      [{ logprobs: true }, 'logprobs'],
+      [{ top_logprobs: 3 }, 'top_logprobs'],
+      [{ response_format: { type: 'json_schema', json_schema: {} } }, 'response_format'],
+      [{ response_format: { type: 'yaml' } }, 'response_format'],
+      [{ temperature: 3 }, 'temperature'],
+      [{ top_p: 1.5 }, 'top_p'],
+      [{ stop: ['a', 'b', 'c', 'd', 'e'] }, 'stop'],
+      [{ stop: ['a', ''] }, 'stop'],
+      [{ stream_options: { include_usage: true } }, 'stream_options'],
+    ];
+
+    try {
+      for (const [overrides, param] of cases) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/chat/completions',
+          headers,
+          payload: { ...baseChat, ...overrides },
+        });
+        expect(response.statusCode, `expected 400 for ${param}`).toBe(400);
+        expect(response.json().error).toMatchObject({ type: 'invalid_request_error', param });
+      }
+
+      // Harmless defaults still pass through to the service.
+      proxyService.handleChatCompletions.mockResolvedValue({ ok: true });
+      const accepted = await server.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers,
+        payload: {
+          ...baseChat,
+          n: 1,
+          presence_penalty: 0,
+          frequency_penalty: 0,
+          logit_bias: {},
+          logprobs: false,
+          temperature: 1,
+          top_p: 0.9,
+          response_format: { type: 'json_object' },
+          stop: 'END',
+        },
+      });
+      expect(accepted.statusCode).toBe(200);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects unsupported legacy completion options through the assembled pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const baseLegacy = { model: 'gemini-3.5-flash-medium', prompt: 'hi' };
+
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ suffix: ' tail' }, 'suffix'],
+      [{ echo: true }, 'echo'],
+      [{ best_of: 3 }, 'best_of'],
+      [{ logprobs: 2 }, 'logprobs'],
+      [{ n: 4 }, 'n'],
+      [{ seed: 7 }, 'seed'],
+      [{ prompt: ['first', 'second'] }, 'prompt'],
+    ];
+
+    try {
+      for (const [overrides, param] of cases) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/completions',
+          headers,
+          payload: { ...baseLegacy, ...overrides },
+        });
+        expect(response.statusCode, `expected 400 for ${param}`).toBe(400);
+        expect(response.json().error).toMatchObject({ type: 'invalid_request_error', param });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('forwards legacy completion stop sequences and streams through the legacy protocol', async () => {
+    const legacyStream = of(
+      'data: {"object":"text_completion","choices":[{"text":"hi","index":0,"logprobs":null,"finish_reason":null}]}\n\n',
+      'data: [DONE]\n\n',
+    );
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue(legacyStream),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.completions(
+      {
+        model: 'gpt-4o',
+        prompt: 'hello world',
+        stop: ['<<END>>'],
+        stream: true,
+        stream_options: { include_usage: true },
+      } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stop: ['<<END>>'],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+      'text-completions',
+    );
+    expect(reply.header).toHaveBeenCalledWith('Content-Type', 'text/event-stream');
+    expect(reply.send).toHaveBeenCalledWith(legacyStream);
   });
 });
