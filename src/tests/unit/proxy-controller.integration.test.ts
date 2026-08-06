@@ -595,6 +595,88 @@ describe('ProxyController Integration', () => {
     );
   });
 
+  it('accepts type-omitted Responses messages and valid function calls', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_easy_input',
+        created: 1700000003,
+        model: 'gpt-4o',
+        choices: [{ message: { content: 'done' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses(
+      {
+        model: 'gpt-4o',
+        input: [
+          { role: 'developer', content: 'Be concise.' },
+          { role: 'user', content: [{ type: 'input_text', text: 'Find docs.' }] },
+          {
+            type: 'function_call',
+            call_id: 'call_docs',
+            name: 'search_docs',
+            arguments: '{"query":"Responses"}',
+          },
+        ],
+      },
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: expect.arrayContaining([
+          { role: 'developer', content: 'Be concise.' },
+          { role: 'user', content: 'Find docs.' },
+          expect.objectContaining({
+            role: 'assistant',
+            tool_calls: [
+              expect.objectContaining({
+                id: 'call_docs',
+                function: expect.objectContaining({ name: 'search_docs' }),
+              }),
+            ],
+          }),
+        ]),
+      }),
+      'responses',
+    );
+  });
+
+  it.each([
+    ['a primitive item', ['invalid']],
+    ['an unknown item type', [{ type: 'reasoning', content: [] }]],
+    ['an invalid message role', [{ role: 'tool', content: 'result' }]],
+    ['an invalid message content block', [{ role: 'user', content: [{ type: 'input_audio' }] }]],
+    [
+      'a function call without a call id',
+      [{ type: 'function_call', name: 'lookup', arguments: '{}' }],
+    ],
+    [
+      'a function call without a name',
+      [{ type: 'function_call', call_id: 'call_1', arguments: '{}' }],
+    ],
+    [
+      'a function call with object arguments',
+      [{ type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: {} }],
+    ],
+    ['a malformed tool output', [{ type: 'function_call_output', call_id: 'call_1', output: {} }]],
+    ['a malformed local shell call', [{ type: 'local_shell_call', call_id: 'call_1', action: {} }]],
+    ['a malformed web search call', [{ type: 'web_search_call', call_id: 'call_1', action: {} }]],
+  ])('rejects Responses input containing %s before an upstream call', async (_caseName, input) => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await expect(
+      controller.responses({ model: 'gpt-4o', input }, reply as any),
+    ).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('supports OpenAI responses compatibility endpoint in stream mode with SSE headers', async () => {
     const stream = of('data: {"id":"chatcmpl_resp_stream"}\n\n');
     const proxyService = {
@@ -1299,6 +1381,49 @@ describe('ProxyController Integration', () => {
         message: 'Only response_format=json and response_format=text are supported by this proxy.',
         type: 'invalid_request_error',
         param: 'response_format',
+        code: 'unsupported_option',
+      },
+    });
+  });
+
+  it.each([
+    [
+      'a scalar JSON timestamp granularity',
+      { timestamp_granularities: 'word' },
+      'application/json',
+    ],
+    [
+      'an array JSON timestamp granularity',
+      { timestamp_granularities: ['segment', 'word'] },
+      'application/json',
+    ],
+    [
+      'the SDK multipart timestamp granularity field',
+      { 'timestamp_granularities[]': { type: 'field', value: 'word' } },
+      'multipart/form-data; boundary=----timestamps',
+    ],
+  ])('rejects %s before transcribing', async (_caseName, timestampFields, contentType) => {
+    const proxyService = { handleGeminiGenerateContent: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.audioTranscriptions(
+      {
+        model: 'gemini-3-flash',
+        file: 'data:audio/mpeg;base64,QUJDRA==',
+        ...timestampFields,
+      },
+      { headers: { 'content-type': contentType } } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'timestamp_granularities is not supported by this proxy.',
+        type: 'invalid_request_error',
+        param: 'timestamp_granularities',
         code: 'unsupported_option',
       },
     });

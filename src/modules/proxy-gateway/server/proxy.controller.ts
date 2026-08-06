@@ -371,7 +371,7 @@ export class ProxyController {
       language?: string;
       response_format?: string;
       temperature?: number | string;
-      timestamp_granularities?: string[];
+      timestamp_granularities?: string | string[];
       file?: InlineInput;
       audio?: InlineInput;
     },
@@ -751,9 +751,122 @@ export class ProxyController {
       return;
     }
     if (Array.isArray(input) && input.length > 0) {
+      for (const item of input) {
+        this.validateResponsesInputItem(item);
+      }
       return;
     }
     throw this.invalidRequest('input must be non-empty', 'input');
+  }
+
+  private validateResponsesInputItem(item: unknown): void {
+    const inputItem = this.toRecord(item);
+    if (!inputItem) {
+      throw this.invalidRequest('input items must be objects', 'input');
+    }
+
+    const type = this.responsesInputItemType(inputItem);
+    if (type === 'message') {
+      this.validateResponsesMessage(inputItem);
+      return;
+    }
+    if (type === 'function_call') {
+      this.requireResponsesCallId(inputItem);
+      this.requireNonEmptyString(inputItem.name, 'input.name');
+      if (!isString(inputItem.arguments)) {
+        throw this.invalidRequest('function_call arguments must be a string', 'input.arguments');
+      }
+      return;
+    }
+    if (type === 'function_call_output' || type === 'custom_tool_call_output') {
+      this.requireResponsesCallId(inputItem);
+      this.validateResponsesOutput(inputItem.output);
+      return;
+    }
+    if (type === 'local_shell_call') {
+      this.requireResponsesCallId(inputItem);
+      const action = this.toRecord(inputItem.action);
+      const exec = this.toRecord(action?.exec);
+      this.requireNonEmptyString(exec?.command, 'input.action.exec.command');
+      return;
+    }
+    if (type === 'web_search_call') {
+      this.requireResponsesCallId(inputItem);
+      const action = this.toRecord(inputItem.action);
+      this.requireNonEmptyString(action?.query, 'input.action.query');
+      return;
+    }
+    throw this.invalidRequest('input contains an unsupported item type', 'input');
+  }
+
+  private responsesInputItemType(item: Record<string, unknown>): string | null {
+    const type = this.asString(item.type);
+    if (type) {
+      return type;
+    }
+    return item.role !== undefined && item.content !== undefined ? 'message' : null;
+  }
+
+  private validateResponsesMessage(item: Record<string, unknown>): void {
+    const role = this.asString(item.role);
+    if (!role || !['user', 'assistant', 'system', 'developer'].includes(role)) {
+      throw this.invalidRequest('message role is invalid', 'input.role');
+    }
+    if (isString(item.content)) {
+      return;
+    }
+    if (!Array.isArray(item.content) || item.content.length === 0) {
+      throw this.invalidRequest(
+        'message content must be a string or a non-empty array',
+        'input.content',
+      );
+    }
+    for (const blockValue of item.content) {
+      const block = this.toRecord(blockValue);
+      const blockType = this.asString(block?.type);
+      if (!block || !blockType) {
+        throw this.invalidRequest('message content contains an invalid block', 'input.content');
+      }
+      if (blockType === 'input_text' || blockType === 'text' || blockType === 'output_text') {
+        if (!isString(block.text)) {
+          throw this.invalidRequest(
+            'text content blocks require a string text value',
+            'input.content',
+          );
+        }
+        continue;
+      }
+      if (blockType === 'input_image' || blockType === 'image_url') {
+        if (!this.resolveImageUrl(block)) {
+          throw this.invalidRequest('image content blocks require an image URL', 'input.content');
+        }
+        continue;
+      }
+      throw this.invalidRequest(
+        'message content contains an unsupported block type',
+        'input.content',
+      );
+    }
+  }
+
+  private requireResponsesCallId(item: Record<string, unknown>): void {
+    // Some existing clients use the legacy item id as the Responses call id.
+    const callId = this.asString(item.call_id) ?? this.asString(item.id);
+    this.requireNonEmptyString(callId, 'input.call_id');
+  }
+
+  private validateResponsesOutput(output: unknown): void {
+    if (isString(output)) {
+      return;
+    }
+    const outputRecord = this.toRecord(output);
+    if (isString(outputRecord?.content)) {
+      return;
+    }
+    throw this.invalidRequest(
+      'tool call output must be a string or an object with string content',
+      'input.output',
+    );
   }
 
   private validateTools(
@@ -1080,7 +1193,7 @@ export class ProxyController {
           continue;
         }
 
-        const type = this.asString(itemObj.type);
+        const type = this.responsesInputItemType(itemObj);
         if (!type) {
           continue;
         }
@@ -1104,7 +1217,7 @@ export class ProxyController {
           continue;
         }
 
-        const type = this.asString(itemObj.type);
+        const type = this.responsesInputItemType(itemObj);
         if (!type) {
           continue;
         }
@@ -1432,7 +1545,7 @@ export class ProxyController {
       user?: string;
       language?: string;
       temperature?: number | string;
-      timestamp_granularities?: string[];
+      timestamp_granularities?: string | string[];
       image?: InlineInput;
       reference_images?: InlineInput[];
       mask?: InlineInput;
@@ -1456,8 +1569,9 @@ export class ProxyController {
           ? Number(temperatureValue)
           : Number.NaN;
     const timestampGranularities = [
-      ...(body.timestamp_granularities ?? []),
+      ...this.asStringArray(body.timestamp_granularities),
       ...this.asStringArray(multipart.fields.timestamp_granularities),
+      ...this.asStringArray(multipart.fields['timestamp_granularities[]']),
     ];
 
     return {
