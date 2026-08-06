@@ -2375,6 +2375,9 @@ export class ProxyService {
     if (stopReason === 'tool_use') {
       return 'tool_calls';
     }
+    if (stopReason === 'refusal') {
+      return 'content_filter';
+    }
 
     return stopReason;
   }

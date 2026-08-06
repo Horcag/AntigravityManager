@@ -968,6 +968,35 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(payloads.every((payload) => payload.object === 'text_completion')).toBe(true);
   });
 
+  it.each([
+    ['STOP', 'stop'],
+    ['MAX_TOKENS', 'length'],
+    ['SAFETY', 'content_filter'],
+    ['RECITATION', 'content_filter'],
+  ])(
+    'preserves Gemini %s termination semantics for non-stream Chat, legacy, and Responses outputs',
+    async (finishReason, expectedFinishReason) => {
+      const service = createService();
+      mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+      mockGeminiClient.generateInternal.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'result' }] }, finishReason }],
+      });
+
+      for (const outputProtocol of ['chat-completions', 'text-completions', 'responses'] as const) {
+        const response = (await service.handleChatCompletions(
+          {
+            model: 'gpt-4o',
+            stream: false,
+            messages: [{ role: 'user', content: 'hello' }],
+          } as never,
+          outputProtocol,
+        )) as { choices: Array<{ finish_reason: string | null }> };
+
+        expect(response.choices[0]?.finish_reason).toBe(expectedFinishReason);
+      }
+    },
+  );
+
   it('maps system and developer messages into the system prompt, never user content', () => {
     const service = createService();
     const claudeRequest = invokePrivate<{

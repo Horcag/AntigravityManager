@@ -235,12 +235,16 @@ class NonStreamingProcessor {
 
   private buildResponse(geminiResponse: GeminiResponse): ClaudeResponse {
     const finishReason = geminiResponse.candidates?.[0]?.finishReason;
+    const normalizedFinishReason = finishReason?.toUpperCase();
 
     let stopReason = 'end_turn';
     if (this.hasToolCall) {
       stopReason = 'tool_use';
-    } else if (finishReason === 'MAX_TOKENS') {
+    } else if (normalizedFinishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
+    } else if (normalizedFinishReason === 'SAFETY' || normalizedFinishReason === 'RECITATION') {
+      // Anthropic has no safety stop reason; refusal is its valid non-normal terminal state.
+      stopReason = 'refusal';
     }
 
     const usage = this.buildUsage(geminiResponse);
