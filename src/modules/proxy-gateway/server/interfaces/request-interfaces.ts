@@ -156,7 +156,7 @@ export type AnthropicContent =
   | {
       type: 'tool_result';
       tool_use_id: string;
-      content: string | AnthropicContent[];
+      content?: string | AnthropicContent[];
       is_error?: boolean;
     }
   | { type: 'redacted_thinking'; data: string };

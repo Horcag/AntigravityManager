@@ -1309,6 +1309,12 @@ export class ProxyController {
         continue;
       }
       if (block.type === 'tool_result' && isString(block.tool_use_id)) {
+        if (
+          block.content === undefined ||
+          (Array.isArray(block.content) && block.content.length === 0)
+        ) {
+          continue;
+        }
         this.validateAnthropicContent(block.content);
         continue;
       }

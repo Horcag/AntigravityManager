@@ -131,7 +131,7 @@ export interface ToolUseBlock {
 export interface ToolResultBlock {
   type: 'tool_result';
   tool_use_id: string;
-  content: string | ContentBlock[]; // Supports text or nested blocks
+  content?: string | ContentBlock[]; // Supports text or nested blocks
   is_error?: boolean;
 }
 

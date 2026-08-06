@@ -620,6 +620,87 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('accepts empty Anthropic tool results through the assembled messages pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const basePayload = {
+      model: 'claude-sonnet-4-5',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'lookup_weather', input: {} }],
+        },
+      ],
+    };
+
+    try {
+      for (const content of [undefined, []] as const) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: {
+            ...basePayload,
+            messages: [
+              ...basePayload.messages,
+              {
+                role: 'user',
+                content: [
+                  content === undefined
+                    ? { type: 'tool_result', tool_use_id: 'tool_1' }
+                    : { type: 'tool_result', tool_use_id: 'tool_1', content },
+                ],
+              },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(200);
+      }
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledTimes(2);
+      expect(
+        proxyService.handleAnthropicMessages.mock.calls.map(([request]) => {
+          const mapped = transformClaudeRequestIn(request, 'project_1', 'test-agent');
+
+          return mapped.request.contents.at(-1)?.parts[0]?.functionResponse?.response.result;
+        }),
+      ).toEqual(['Command executed successfully.', 'Command executed successfully.']);
+
+      for (const content of [null, 42, [{ type: 'text' }], [{ type: 'unsupported' }]]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: {
+            ...basePayload,
+            messages: [
+              ...basePayload.messages,
+              {
+                role: 'user',
+                content: [{ type: 'tool_result', tool_use_id: 'tool_1', content }],
+              },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          type: 'error',
+          error: { type: 'invalid_request_error' },
+        });
+      }
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
