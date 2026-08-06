@@ -699,6 +699,96 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it.each([['aGVsbG8='], [{ data: 'aGVsbG8=', mimeType: 'image/png' }]])(
+    'rejects a non-array JSON reference_images value before invoking upstream work',
+    async (referenceImages) => {
+      app = await createApp();
+      await app.init();
+
+      const response = await app
+        .getHttpAdapter()
+        .getInstance()
+        .inject({
+          method: 'POST',
+          url: '/v1/images/edits',
+          payload: {
+            prompt: 'make it blue',
+            image: 'data:image/png;base64,iVBORw0KGgo=',
+            reference_images: referenceImages,
+          },
+        });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          message: 'reference_images must be an array.',
+          type: 'invalid_request_error',
+          param: 'reference_images',
+          code: 'invalid_value',
+        },
+      });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    },
+  );
+
+  it('treats a null JSON reference_images value as absent', async () => {
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: {
+          prompt: 'make it blue',
+          image: 'data:image/png;base64,iVBORw0KGgo=',
+          reference_images: null,
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
+  });
+
+  it('accepts a one-item JSON reference_images array', async () => {
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: {
+          prompt: 'make it blue',
+          image: 'data:image/png;base64,iVBORw0KGgo=',
+          reference_images: ['data:image/png;base64,iVBORw0KGgo='],
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({ image_url: expect.any(Object) }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
   it('normalizes bare JSON audio base64 from its recognized signature', async () => {
     const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]);
     proxyService.handleGeminiGenerateContent.mockResolvedValue({

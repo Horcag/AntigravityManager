@@ -356,6 +356,19 @@ export class ProxyController {
   ) {
     if (!this.isMultipartContentType(req)) {
       this.requireJsonObject(body);
+      if (
+        body.reference_images !== undefined &&
+        body.reference_images !== null &&
+        !Array.isArray(body.reference_images)
+      ) {
+        this.sendInvalidRequest(
+          res,
+          'reference_images must be an array.',
+          'reference_images',
+          'invalid_value',
+        );
+        return;
+      }
     }
     const multipart = await this.readMultipartMediaInput(req, body, res);
     if (!multipart) {
