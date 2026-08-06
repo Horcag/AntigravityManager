@@ -9,6 +9,7 @@ import { getServerConfig } from '../../../server/server-config';
 import {
   extractApiKeyToken,
   hasConfiguredApiKey,
+  hasMatchingApiKey,
   RequestHeaders,
 } from './guards/api-key-auth.util';
 
@@ -32,7 +33,7 @@ export class ProxyGuard implements CanActivate {
       return true;
     }
 
-    if (clientToken === apiKey) {
+    if (hasMatchingApiKey(clientToken, apiKey)) {
       return true;
     }
     this.logger.warn(`Rejected unauthorized request from ${request.ip}`);

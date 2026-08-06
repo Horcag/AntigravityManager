@@ -1,4 +1,5 @@
 import {
+  All,
   Controller,
   Post,
   Get,
@@ -557,6 +558,14 @@ export class ProxyController {
       created: MODEL_LIST_CREATED_AT,
       owned_by: MODEL_LIST_OWNER,
     }));
+  }
+
+  @All('*')
+  unmatchedOpenAIRoute(@Req() request: FastifyRequest): never {
+    throw new OpenAIProtocolException(
+      `Route ${request.method}:${request.url} not found`,
+      HttpStatus.NOT_FOUND,
+    );
   }
 
   private validateChatRequest(body: OpenAIChatRequest): void {

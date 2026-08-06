@@ -83,7 +83,7 @@ export class ProxyProtocolExceptionFilter implements ExceptionFilter {
     const request = context.getRequest<FastifyRequest>();
     const reply = context.getResponse<FastifyReply>();
 
-    if (request.url.split('?')[0] === '/v1/messages') {
+    if (request.method === 'POST' && request.url.split('?')[0] === '/v1/messages') {
       const mapped = mapOpenAIProtocolError(exception);
       reply.status(mapped.status).send({
         type: 'error',

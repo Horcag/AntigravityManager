@@ -106,6 +106,26 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
+  it('returns the OpenAI envelope for an unmatched /v1 route through Fastify', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'GET', url: '/v1/unsupported?source=wire-test' });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Route GET:/v1/unsupported?source=wire-test not found',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    });
+  });
+
   it('preserves audio binary bytes and MIME type through a real multipart request', async () => {
     proxyService.handleGeminiGenerateContent.mockResolvedValue({
       candidates: [{ content: { parts: [{ text: 'hello world' }] } }],

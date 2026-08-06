@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { isEmpty, isString } from 'lodash-es';
 
 export type RequestHeaderValue = string | string[] | undefined;
@@ -6,6 +7,19 @@ export type RequestHeaders = Record<string, RequestHeaderValue>;
 
 export function hasConfiguredApiKey(apiKey: string | undefined): apiKey is string {
   return isString(apiKey) && !isEmpty(apiKey.trim());
+}
+
+export function hasMatchingApiKey(clientToken: string | null, apiKey: string): boolean {
+  if (!clientToken) {
+    return false;
+  }
+
+  const clientTokenBuffer = Buffer.from(clientToken);
+  const apiKeyBuffer = Buffer.from(apiKey);
+  return (
+    clientTokenBuffer.length === apiKeyBuffer.length &&
+    timingSafeEqual(clientTokenBuffer, apiKeyBuffer)
+  );
 }
 
 export function extractApiKeyToken(headers: RequestHeaders): string | null {
