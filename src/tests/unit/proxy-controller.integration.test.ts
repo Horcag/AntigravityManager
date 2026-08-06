@@ -51,6 +51,146 @@ async function createHttpApp(proxyService: object) {
 }
 
 describe('ProxyController Integration', () => {
+  it('rejects null and non-object JSON bodies through the assembled Fastify pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json',
+    };
+    const expectedError = {
+      error: {
+        message: 'request body must be a JSON object',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    };
+
+    try {
+      for (const url of [
+        '/v1/chat/completions',
+        '/v1/completions',
+        '/v1/responses',
+        '/v1/images/generations',
+      ]) {
+        for (const payload of ['null', '[]']) {
+          const response = await server.inject({
+            method: 'POST',
+            url,
+            headers,
+            payload,
+          });
+          expect(response.statusCode, `expected 400 for ${url} with ${payload}`).toBe(400);
+          expect(response.json()).toEqual(expectedError);
+        }
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const cases: Array<[string, Record<string, unknown>, string, string]> = [
+      [
+        '/v1/chat/completions',
+        { model: 'gemini-3-flash', messages: [{ role: 'user', content: 'hi' }], max_tokens: 0 },
+        'max_tokens',
+        'max_tokens must be a positive integer',
+      ],
+      [
+        '/v1/chat/completions',
+        {
+          model: 'gemini-3-flash',
+          messages: [{ role: 'user', content: 'hi' }],
+          max_completion_tokens: 1.5,
+        },
+        'max_completion_tokens',
+        'max_completion_tokens must be a positive integer',
+      ],
+      [
+        '/v1/chat/completions',
+        { model: 'gemini-3-flash', messages: [{ role: 'user', content: 'hi' }], stream: 'false' },
+        'stream',
+        'stream must be a boolean',
+      ],
+      [
+        '/v1/completions',
+        { model: 'gemini-3-flash', prompt: 'hi', max_tokens: 0 },
+        'max_tokens',
+        'max_tokens must be a positive integer',
+      ],
+      [
+        '/v1/completions',
+        { model: 'gemini-3-flash', prompt: 'hi', stream: 'false' },
+        'stream',
+        'stream must be a boolean',
+      ],
+      [
+        '/v1/responses',
+        { model: 'gemini-3-flash', input: 'hi', max_output_tokens: 1.5 },
+        'max_output_tokens',
+        'max_output_tokens must be a positive integer',
+      ],
+      [
+        '/v1/responses',
+        { model: 'gemini-3-flash', input: 'hi', stream: 'false' },
+        'stream',
+        'stream must be a boolean',
+      ],
+      [
+        '/v1/responses',
+        { model: 'gemini-3-flash', input: 'hi', temperature: 3 },
+        'temperature',
+        'temperature must be between 0 and 2',
+      ],
+      [
+        '/v1/responses',
+        { model: 'gemini-3-flash', input: 'hi', top_p: -0.1 },
+        'top_p',
+        'top_p must be between 0 and 1',
+      ],
+      [
+        '/v1/images/generations',
+        { model: ' ', prompt: 'draw a cat' },
+        'model',
+        'model is required',
+      ],
+      [
+        '/v1/images/edits',
+        { model: ' ', prompt: 'make it blue', image: { data: 'AA==' } },
+        'model',
+        'model is required',
+      ],
+    ];
+
+    try {
+      for (const [url, payload, param, message] of cases) {
+        const response = await server.inject({ method: 'POST', url, headers, payload });
+        expect(response.statusCode, `expected 400 for ${url} ${param}`).toBe(400);
+        expect(response.json()).toEqual({
+          error: {
+            message,
+            type: 'invalid_request_error',
+            param,
+            code: null,
+          },
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('uses structured upstream status and retry-after without parsing error text', () => {
     expect(
       mapOpenAIProtocolError(

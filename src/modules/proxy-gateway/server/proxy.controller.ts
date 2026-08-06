@@ -89,6 +89,7 @@ interface MediaInput {
 }
 
 interface ImageOptionInput {
+  model?: string;
   n?: number | string;
   response_format?: string;
   responseFormat?: string;
@@ -165,11 +166,13 @@ export class ProxyController {
     body: OpenAILegacyCompletionRequest,
     @Res() res: FastifyReply,
   ) {
+    this.requireJsonObject(body);
     this.requireNonEmptyString(body.model, 'model');
     this.validateCompletionPrompt(body.prompt);
     this.validateUnsupportedSamplingOptions(body);
     this.validateUnsupportedIdentityOptions(body);
     this.validateLegacyOnlyOptions(body);
+    this.validatePositiveInteger('max_tokens', body.max_tokens);
     const stop = this.normalizeStopSequences(body.stop);
     const request: OpenAIChatRequest = {
       model: body.model,
@@ -216,9 +219,11 @@ export class ProxyController {
     },
     @Res() res: FastifyReply,
   ) {
+    this.requireJsonObject(body);
     this.requireNonEmptyString(body.model, 'model');
     this.validateResponsesInput(body.input);
     this.validateTools(body.tools, body.tool_choice);
+    this.validateResponsesOptions(body);
     const request = this.buildResponsesChatRequest(body);
 
     try {
@@ -257,6 +262,7 @@ export class ProxyController {
     },
     @Res() res: FastifyReply,
   ) {
+    this.requireJsonObject(body);
     this.requireNonEmptyString(body.prompt, 'prompt');
     if (!this.validateImageOptions(body, res)) {
       return;
@@ -525,6 +531,7 @@ export class ProxyController {
   }
 
   private validateChatRequest(body: OpenAIChatRequest): void {
+    this.requireJsonObject(body);
     this.requireNonEmptyString(body.model, 'model');
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       throw this.invalidRequest('messages must be a non-empty array', 'messages');
@@ -544,20 +551,18 @@ export class ProxyController {
     this.validateUnsupportedSamplingOptions(body);
     this.validateUnsupportedIdentityOptions(body);
     this.validateChatOnlyOptions(body);
-    this.validateMaxCompletionTokens(body.max_completion_tokens);
+    this.validatePositiveInteger('max_tokens', body.max_tokens);
+    this.validatePositiveInteger('max_completion_tokens', body.max_completion_tokens);
     this.validateResponseFormat(body.response_format);
     this.normalizeStopSequences(body.stop);
   }
 
-  private validateMaxCompletionTokens(value: number | undefined): void {
-    if (isNil(value)) {
+  private validatePositiveInteger(param: string, value: unknown): void {
+    if (value === undefined) {
       return;
     }
     if (!isNumber(value) || !Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
-      throw this.invalidRequest(
-        'max_completion_tokens must be a positive integer',
-        'max_completion_tokens',
-      );
+      throw this.invalidRequest(`${param} must be a positive integer`, param);
     }
   }
 
@@ -654,6 +659,9 @@ export class ProxyController {
     stream: boolean | undefined,
     streamOptions: OpenAIStreamOptions | undefined,
   ): void {
+    if (stream !== undefined && !isBoolean(stream)) {
+      throw this.invalidRequest('stream must be a boolean', 'stream');
+    }
     if (isNil(streamOptions)) {
       return;
     }
@@ -770,6 +778,18 @@ export class ProxyController {
       return;
     }
     throw this.invalidRequest('input must be non-empty', 'input');
+  }
+
+  private validateResponsesOptions(body: {
+    max_output_tokens?: number;
+    temperature?: number;
+    top_p?: number;
+    stream?: boolean;
+  }): void {
+    this.validatePositiveInteger('max_output_tokens', body.max_output_tokens);
+    this.validateNumericRange('temperature', body.temperature, 0, 2);
+    this.validateNumericRange('top_p', body.top_p, 0, 1);
+    this.validateStreamOptions(body.stream, undefined);
   }
 
   private validateResponsesInputItem(item: unknown): void {
@@ -951,6 +971,12 @@ export class ProxyController {
     }
   }
 
+  private requireJsonObject(value: unknown): asserts value is object {
+    if (!isPlainObject(value)) {
+      throw this.invalidRequest('request body must be a JSON object');
+    }
+  }
+
   private invalidRequest(message: string, param?: string): OpenAIProtocolException {
     return new OpenAIProtocolException(message, HttpStatus.BAD_REQUEST, { param });
   }
@@ -961,6 +987,15 @@ export class ProxyController {
     const outputCompression = input.output_compression ?? input.outputCompression;
     const partialImages = input.partial_images ?? input.partialImages;
     const inputFidelity = input.input_fidelity ?? input.inputFidelity;
+
+    if (input.model !== undefined) {
+      try {
+        this.requireNonEmptyString(input.model, 'model');
+      } catch (error) {
+        sendOpenAIProtocolError(res, error);
+        return false;
+      }
+    }
 
     if (input.n !== undefined && input.n !== 1 && input.n !== '1') {
       this.sendUnsupportedImageOption(res, 'Only n=1 is supported by this proxy.', 'n');
