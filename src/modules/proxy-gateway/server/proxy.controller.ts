@@ -309,6 +309,9 @@ export class ProxyController {
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
+    if (!this.isMultipartContentType(req)) {
+      this.requireJsonObject(body);
+    }
     const multipart = await this.readMultipartMediaInput(req, body, res);
     if (!multipart) {
       return;
@@ -384,6 +387,9 @@ export class ProxyController {
     @Req() req: FastifyRequest,
     @Res() res: FastifyReply,
   ) {
+    if (!this.isMultipartContentType(req)) {
+      this.requireJsonObject(body);
+    }
     const multipart = await this.readMultipartMediaInput(req, body, res);
     if (!multipart) {
       return;

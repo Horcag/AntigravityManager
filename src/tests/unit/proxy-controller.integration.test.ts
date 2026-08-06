@@ -53,7 +53,11 @@ async function createHttpApp(proxyService: object) {
 describe('ProxyController Integration', () => {
   it('rejects null and non-object JSON bodies through the assembled Fastify pipeline', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
-    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn(),
+      handleGeminiGenerateContent: vi.fn(),
+    };
     const app = await createHttpApp(proxyService);
     const server = app.getHttpAdapter().getInstance();
     const headers = {
@@ -75,6 +79,8 @@ describe('ProxyController Integration', () => {
         '/v1/completions',
         '/v1/responses',
         '/v1/images/generations',
+        '/v1/images/edits',
+        '/v1/audio/transcriptions',
       ]) {
         for (const payload of ['null', '[]']) {
           const response = await server.inject({
@@ -87,7 +93,18 @@ describe('ProxyController Integration', () => {
           expect(response.json()).toEqual(expectedError);
         }
       }
+      for (const url of ['/v1/images/edits', '/v1/audio/transcriptions']) {
+        const response = await server.inject({
+          method: 'POST',
+          url,
+          headers,
+          payload: '"not-an-object"',
+        });
+        expect(response.statusCode, `expected 400 for ${url} with a scalar`).toBe(400);
+        expect(response.json()).toEqual(expectedError);
+      }
       expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }
