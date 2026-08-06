@@ -1283,6 +1283,7 @@ export class ProxyController {
     }
     this.validateAnthropicTools(body.tools);
     this.validateAnthropicSystem(body.system);
+    this.validateAnthropicStopSequences(body.stop_sequences);
   }
 
   private validateAnthropicContent(content: unknown): void {
@@ -1369,6 +1370,25 @@ export class ProxyController {
       )
     ) {
       throw this.invalidRequest('system must be a string or text block array', 'system');
+    }
+  }
+
+  private validateAnthropicStopSequences(
+    stopSequences: AnthropicChatRequest['stop_sequences'],
+  ): void {
+    if (stopSequences === undefined) {
+      return;
+    }
+    if (
+      !Array.isArray(stopSequences) ||
+      stopSequences.length === 0 ||
+      stopSequences.length > 5 ||
+      stopSequences.some((sequence) => !isString(sequence) || isEmpty(sequence))
+    ) {
+      throw this.invalidRequest(
+        'stop_sequences must be an array of 1 to 5 non-empty strings',
+        'stop_sequences',
+      );
     }
   }
 

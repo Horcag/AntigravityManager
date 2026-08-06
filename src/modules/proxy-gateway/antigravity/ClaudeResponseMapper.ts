@@ -251,6 +251,8 @@ class NonStreamingProcessor {
       model: geminiResponse.modelVersion || '',
       content: this.contentBlocks,
       stop_reason: stopReason,
+      // Gemini does not identify a matched stop sequence, so Anthropic responses must not guess.
+      stop_sequence: null,
       ...(usage ? { usage } : {}),
     };
   }

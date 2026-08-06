@@ -43,4 +43,34 @@ describe('ClaudeRequestMapper thinking support', () => {
       expect(body.request.generationConfig?.thinkingConfig).toBeUndefined();
     },
   );
+
+  it('keeps caller stop sequences first, deduplicates them, and reserves only remaining capacity for guards', () => {
+    const body = transformClaudeRequestIn({
+      ...createThinkingRequest('gemini-3-flash'),
+      stop_sequences: ['custom', '<|user|>', 'custom', '[DONE]', 'another'],
+    });
+
+    expect(body.request.generationConfig?.stopSequences).toEqual([
+      'custom',
+      '<|user|>',
+      '[DONE]',
+      'another',
+      '<|endoftext|>',
+    ]);
+  });
+
+  it('does not truncate five distinct caller stop sequences to add internal guards', () => {
+    const body = transformClaudeRequestIn({
+      ...createThinkingRequest('gemini-3-flash'),
+      stop_sequences: ['one', 'two', 'three', 'four', 'five'],
+    });
+
+    expect(body.request.generationConfig?.stopSequences).toEqual([
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+    ]);
+  });
 });

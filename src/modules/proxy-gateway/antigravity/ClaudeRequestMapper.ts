@@ -72,6 +72,14 @@ const SAFETY_SETTINGS: SafetySetting[] = [
   { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' },
   { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'OFF' },
 ];
+const INTERNAL_STOP_SEQUENCES = [
+  '<|user|>',
+  '<|endoftext|>',
+  '<|end_of_turn|>',
+  '[DONE]',
+  '\n\nHuman:',
+];
+const MAX_GEMINI_STOP_SEQUENCES = 5;
 
 /**
  * Transforms Claude request into Gemini internal request format
@@ -827,7 +835,9 @@ function buildGenerationConfig(
   if (claudeReq.max_tokens !== undefined) {
     config.maxOutputTokens = claudeReq.max_tokens;
   }
-  config.stopSequences = ['<|user|>', '<|endoftext|>', '<|end_of_turn|>', '[DONE]', '\n\nHuman:'];
+  config.stopSequences = Array.from(
+    new Set([...(claudeReq.stop_sequences ?? []), ...INTERNAL_STOP_SEQUENCES]),
+  ).slice(0, MAX_GEMINI_STOP_SEQUENCES);
   return config;
 }
 

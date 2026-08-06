@@ -33,4 +33,15 @@ describe('ClaudeResponseMapper termination reasons', () => {
 
     expect(response.stop_reason).toBe('tool_use');
   });
+
+  it('serializes the required non-stream stop_sequence key as null', () => {
+    const response = transformResponse({
+      candidates: [
+        { content: { role: 'model', parts: [{ text: 'result' }] }, finishReason: 'STOP' },
+      ],
+    });
+
+    expect(response).toMatchObject({ stop_sequence: null });
+    expect(Object.hasOwn(response, 'stop_sequence')).toBe(true);
+  });
 });

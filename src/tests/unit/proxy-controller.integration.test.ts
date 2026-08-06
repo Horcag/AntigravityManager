@@ -533,9 +533,19 @@ describe('ProxyController Integration', () => {
 
   it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const anthropicResult = {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'gemini-3-flash',
+      content: [{ type: 'text', text: 'done' }],
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: 3, output_tokens: 1 },
+    };
     const proxyService = {
       handleChatCompletions: vi.fn(),
-      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+      handleAnthropicMessages: vi.fn().mockResolvedValue(anthropicResult),
     };
     const app = await createHttpApp(proxyService);
     const server = app.getHttpAdapter().getInstance();
@@ -595,6 +605,24 @@ describe('ProxyController Integration', () => {
           error: { type: 'invalid_request_error' },
         });
       }
+      const invalidStops = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers,
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: 'hi' }],
+          stop_sequences: [],
+        },
+      });
+      expect(invalidStops.statusCode).toBe(400);
+      expect(invalidStops.json()).toEqual({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'stop_sequences must be an array of 1 to 5 non-empty strings',
+        },
+      });
       expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
       expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
 
@@ -611,10 +639,18 @@ describe('ProxyController Integration', () => {
             },
           ],
           tools: [{ name: 'lookup_weather', input_schema: { type: 'object' } }],
+          stop_sequences: ['custom', '<|user|>', 'custom', '[DONE]', 'another'],
         },
       });
       expect(validAnthropic.statusCode).toBe(200);
+      expect(validAnthropic.json()).toEqual(anthropicResult);
       expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+      const [request] = proxyService.handleAnthropicMessages.mock.calls[0];
+      expect(
+        transformClaudeRequestIn(request, 'project_1', 'test-agent').request.generationConfig,
+      ).toMatchObject({
+        stopSequences: ['custom', '<|user|>', '[DONE]', 'another', '<|endoftext|>'],
+      });
     } finally {
       await app.close();
     }
