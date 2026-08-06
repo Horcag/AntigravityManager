@@ -25,7 +25,7 @@ export interface GeminiResponsesUsageMetadata {
 export interface OpenAIResponsesConfiguration {
   instructions: string | null;
   max_output_tokens: number | null;
-  metadata: Record<string, never>;
+  metadata: Record<string, string>;
   parallel_tool_calls: true;
   previous_response_id: null;
   reasoning: null;
@@ -410,23 +410,22 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private configuration(): OpenAIResponsesConfiguration {
-    return (
-      this.options.configuration ?? {
-        instructions: null,
-        max_output_tokens: null,
-        metadata: {},
-        parallel_tool_calls: true,
-        previous_response_id: null,
-        reasoning: null,
-        store: false,
-        temperature: 1,
-        text: { format: { type: 'text' } },
-        tool_choice: 'auto',
-        tools: [],
-        top_p: 1,
-        truncation: 'disabled',
-      }
-    );
+    const configuration = this.options.configuration ?? {
+      instructions: null,
+      max_output_tokens: null,
+      metadata: {},
+      parallel_tool_calls: true,
+      previous_response_id: null,
+      reasoning: null,
+      store: false,
+      temperature: 1,
+      text: { format: { type: 'text' } },
+      tool_choice: 'auto',
+      tools: [],
+      top_p: 1,
+      truncation: 'disabled',
+    };
+    return { ...configuration, metadata: { ...configuration.metadata } };
   }
 
   private usage(): Record<string, unknown> | null {

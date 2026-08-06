@@ -13,12 +13,18 @@ function parseEvent(frame: string): Record<string, unknown> {
 function createResponsesStream(
   service: ProxyService,
   upstreamStream: NodeJS.ReadableStream,
+  configuration?: Record<string, unknown>,
 ): Observable<unknown> {
   const method: unknown = Reflect.get(service, 'processResponsesStreamResponse');
   if (typeof method !== 'function') {
     throw new Error('Responses stream processor is unavailable');
   }
-  const result: unknown = Reflect.apply(method, service, [upstreamStream, 'gemini-3-pro']);
+  const result: unknown = Reflect.apply(method, service, [
+    upstreamStream,
+    'gemini-3-pro',
+    undefined,
+    configuration,
+  ]);
   if (!(result instanceof Observable)) {
     throw new Error('Responses stream processor did not return an Observable');
   }
@@ -28,12 +34,13 @@ function createResponsesStream(
 function createSyntheticResponsesStream(
   service: ProxyService,
   response: Record<string, unknown>,
+  configuration?: Record<string, unknown>,
 ): Observable<unknown> {
   const method: unknown = Reflect.get(service, 'createSyntheticResponsesStream');
   if (typeof method !== 'function') {
     throw new Error('Synthetic Responses stream creator is unavailable');
   }
-  const result: unknown = Reflect.apply(method, service, [response]);
+  const result: unknown = Reflect.apply(method, service, [response, configuration]);
   if (!(result instanceof Observable)) {
     throw new Error('Synthetic Responses stream creator did not return an Observable');
   }
@@ -41,6 +48,57 @@ function createSyntheticResponsesStream(
 }
 
 describe('ProxyService Responses streaming', () => {
+  it('preserves metadata in every live and synthetic Responses snapshot', async () => {
+    const service = new ProxyService({} as never, {} as never);
+    const configuration = {
+      instructions: null,
+      max_output_tokens: null,
+      metadata: { request_id: 'req_123' },
+      parallel_tool_calls: true as const,
+      previous_response_id: null,
+      reasoning: null,
+      store: false as const,
+      temperature: 1,
+      text: { format: { type: 'text' as const } },
+      tool_choice: 'auto',
+      tools: [],
+      top_p: 1,
+      truncation: 'disabled' as const,
+    };
+    const liveEvents = (
+      await lastValueFrom(
+        createResponsesStream(
+          service,
+          Readable.from([
+            Buffer.from(
+              'data: {"response":{"candidates":[{"content":{"parts":[{"text":"ok"}]} ,"finishReason":"STOP"}]}}\n\n',
+            ),
+          ]),
+          configuration,
+        ).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+    const syntheticEvents = (
+      await lastValueFrom(
+        createSyntheticResponsesStream(
+          service,
+          { choices: [{ message: { content: 'ok' } }], model: 'gemini-3-pro' },
+          configuration,
+        ).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    for (const events of [liveEvents, syntheticEvents]) {
+      const responseSnapshots = events.filter((event) => event.response !== undefined);
+      expect(responseSnapshots).not.toHaveLength(0);
+      for (const event of responseSnapshots) {
+        expect((event.response as Record<string, unknown>).metadata).toEqual(
+          configuration.metadata,
+        );
+      }
+    }
+  });
+
   it('keeps an otherwise idle Responses connection alive with SSE comments', async () => {
     vi.useFakeTimers();
     try {

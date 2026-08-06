@@ -2396,6 +2396,69 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('preserves valid Responses metadata without forwarding it upstream', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'chatcmpl_metadata',
+        created: 1700000010,
+        model: 'gpt-4o',
+        choices: [{ message: { content: 'done' } }],
+      }),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const metadata = { request_id: 'req_123', tenant: 'example' };
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers: { authorization: 'Bearer test-key' },
+        payload: { model: 'gpt-4o', input: 'hi', metadata },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().metadata).toEqual(metadata);
+      expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+        expect.not.objectContaining({ metadata: expect.anything() }),
+        'responses',
+        expect.objectContaining({ metadata }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  it.each([null, [], { valid: 1 }, { nested: { value: 'nope' } }])(
+    'rejects invalid Responses metadata %j before upstream',
+    async (metadata) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/responses',
+          headers: { authorization: 'Bearer test-key' },
+          payload: { model: 'gpt-4o', input: 'hi', metadata },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error).toMatchObject({
+          message: 'metadata must be an object with string values',
+          param: 'metadata',
+        });
+        expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it('rejects a response_format object without a usable type instead of treating it as text', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

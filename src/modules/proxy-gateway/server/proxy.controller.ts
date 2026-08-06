@@ -109,6 +109,7 @@ interface OpenAIResponsesRequest {
   reasoning?: unknown;
   truncation?: unknown;
   max_tool_calls?: unknown;
+  metadata?: unknown;
 }
 
 interface ImageOptionInput {
@@ -835,6 +836,7 @@ export class ProxyController {
     this.validateNumericRange('temperature', body.temperature, 0, 2);
     this.validateNumericRange('top_p', body.top_p, 0, 1);
     this.validateStreamOptions(body.stream, undefined);
+    this.validateResponsesMetadata(body.metadata);
     this.validateUnhonoredOptions(body, [
       'previous_response_id',
       'text',
@@ -845,6 +847,27 @@ export class ProxyController {
       'truncation',
       'max_tool_calls',
     ]);
+  }
+
+  private validateResponsesMetadata(metadata: unknown): void {
+    this.responsesMetadata(metadata);
+  }
+
+  private responsesMetadata(metadata: unknown): Record<string, string> {
+    if (metadata === undefined) {
+      return {};
+    }
+    if (typeof metadata !== 'object' || metadata === null || !isPlainObject(metadata)) {
+      throw this.invalidRequest('metadata must be an object with string values', 'metadata');
+    }
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(metadata)) {
+      if (!isString(value)) {
+        throw this.invalidRequest('metadata must be an object with string values', 'metadata');
+      }
+      result[key] = value;
+    }
+    return result;
   }
 
   private validateUnhonoredOptions(body: object, params: string[]): void {
@@ -1379,6 +1402,7 @@ export class ProxyController {
       model: response.model,
       output,
       ...configuration,
+      metadata: { ...configuration.metadata },
       // The Responses contract types usage as nullable, so an unknown usage is reported
       // as null instead of a fabricated zero breakdown.
       usage: response.usage
@@ -1614,7 +1638,7 @@ export class ProxyController {
           ? body.instructions
           : null,
       max_output_tokens: body.max_output_tokens ?? null,
-      metadata: {},
+      metadata: this.responsesMetadata(body.metadata),
       parallel_tool_calls: true,
       previous_response_id: null,
       reasoning: null,
