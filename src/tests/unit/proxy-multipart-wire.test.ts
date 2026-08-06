@@ -5,6 +5,7 @@ import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FastifyMultipartProvider,
+  isMultipartParserOrLimitError,
   MultipartOpenAIExceptionFilter,
 } from '@/modules/proxy-gateway/server/fastify-multipart.provider';
 import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
@@ -163,6 +164,14 @@ describe('OpenAI multipart media endpoints', () => {
       type: 'error',
       error: { type: 'api_error', message: 'anthropic upstream failure' },
     });
+  });
+
+  it('recognizes the production wrapped truncated multipart parser error', () => {
+    expect(
+      isMultipartParserOrLimitError(
+        new Error('Part terminated early due to unexpected end of multipart data'),
+      ),
+    ).toBe(true);
   });
 
   it('preserves audio binary bytes and MIME type through a real multipart request', async () => {

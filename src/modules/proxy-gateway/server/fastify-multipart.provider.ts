@@ -17,6 +17,7 @@ const MULTIPART_ERROR_CODES = new Set([
 const MULTIPART_PARSER_MESSAGES = new Set([
   'Multipart: Boundary not found',
   'Unexpected end of multipart data',
+  'Part terminated early due to unexpected end of multipart data',
   'Boundary required',
   'Premature close',
 ]);
