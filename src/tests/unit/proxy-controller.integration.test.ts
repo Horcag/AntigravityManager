@@ -810,6 +810,70 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('rejects empty Anthropic message text before upstream calls and preserves valid text bytes', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const content of ['', ' \t\n '] as const) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content }] },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          type: 'error',
+          error: { type: 'invalid_request_error' },
+        });
+      }
+      for (const content of [
+        [{ type: 'text', text: '' }],
+        [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } },
+          { type: 'text', text: ' \t\n ' },
+        ],
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content }] },
+        });
+
+        expect(response.statusCode).toBe(400);
+      }
+      expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+
+      const validText = '  keep leading\n\ninternal blank lines\t  ';
+      const validResponse = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers,
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: [{ type: 'text', text: validText }] }],
+        },
+      });
+
+      expect(validResponse.statusCode).toBe(200);
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: [{ role: 'user', content: [{ type: 'text', text: validText }] }],
+        }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('validates Anthropic tool block identifiers and preserves valid tool results before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {

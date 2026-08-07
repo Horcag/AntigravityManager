@@ -1300,6 +1300,9 @@ export class ProxyController {
 
   private validateAnthropicContent(content: unknown): void {
     if (isString(content)) {
+      if (isEmpty(content.trim())) {
+        throw this.invalidRequest('messages contains unsupported content', 'messages');
+      }
       return;
     }
     if (!Array.isArray(content) || content.length === 0) {
@@ -1309,7 +1312,7 @@ export class ProxyController {
       if (!isPlainObject(block) || !isString(block.type)) {
         throw this.invalidRequest('messages contains unsupported content', 'messages');
       }
-      if (block.type === 'text' && isString(block.text)) {
+      if (block.type === 'text' && isString(block.text) && !isEmpty(block.text.trim())) {
         continue;
       }
       if (block.type === 'thinking' && isString(block.thinking)) {
