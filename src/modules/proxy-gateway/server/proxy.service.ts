@@ -261,6 +261,7 @@ export class ProxyService {
           );
         }
       } catch (error) {
+        let effectiveError: unknown = error;
         if (error instanceof Error && this.isProjectContextError(error.message)) {
           this.logger.warn(
             `Anthropic request hit project context issue, retrying without project: ${error.message}`,
@@ -300,7 +301,7 @@ export class ProxyService {
               );
             }
           } catch (fallbackErr) {
-            lastError = fallbackErr;
+            effectiveError = fallbackErr;
           }
         }
 
@@ -354,15 +355,15 @@ export class ProxyService {
               };
             }
           } catch (downgradeErr) {
-            lastError = downgradeErr;
+            effectiveError = downgradeErr;
           }
         }
 
-        lastError = error;
+        lastError = effectiveError;
         if (await this.prepareGraceRetry(retryState, token, lastError, 'Anthropic')) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, effectiveTargetModel, error);
+        await this.applyUpstreamPenalty(token.id, effectiveTargetModel, lastError);
       }
     }
     throw lastError || new Error('Request failed after retries');
@@ -1722,6 +1723,7 @@ export class ProxyService {
       let hasEmittedChunk = false;
       let hasSentDone = false;
       let terminated = false;
+      let hasEmittedTerminalFinish = false;
       let emittedToolCall = false;
       let lastUsage: OpenAIStreamUsage | null = null;
       const toolCallIndices = new Map<string, number>();
@@ -1825,6 +1827,13 @@ export class ProxyService {
             lastUsage = mappedUsage;
           }
 
+          // Gemini may deliver accounting metadata after its terminal candidate. That
+          // terminal choice is already on the wire, so accept only usage from later
+          // frames until the upstream stream itself ends.
+          if (hasEmittedTerminalFinish) {
+            return;
+          }
+
           for (const part of parts) {
             const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
             if (signature) {
@@ -1924,10 +1933,7 @@ export class ProxyService {
               ? 'tool_calls'
               : mapGeminiFinishReasonToOpenAI(candidate.finishReason);
             pushChoice(this.buildOpenAIFinishChoice(streamOptions.variant, mappedFinishReason));
-            terminated = true;
-            idleTimer.clear();
-            sendDone();
-            subscriber.complete();
+            hasEmittedTerminalFinish = true;
             return;
           }
         }

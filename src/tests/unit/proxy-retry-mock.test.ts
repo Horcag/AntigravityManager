@@ -1645,6 +1645,56 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect((result as any).usageMetadata.thoughtsTokenCount).toBeUndefined();
   });
 
+  it('throws the project-context fallback failure after Anthropic retries are exhausted', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockRejectedValueOnce(new Error('project fallback failed'))
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockRejectedValueOnce(new Error('project fallback failed'))
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockRejectedValueOnce(new Error('project fallback failed'));
+
+    await expect(
+      service.handleAnthropicMessages({
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any),
+    ).rejects.toThrow('project fallback failed');
+  });
+
+  it('throws the quota-downgrade failure after Anthropic retries are exhausted', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal
+      .mockRejectedValueOnce(new Error('429 quota exhausted'))
+      .mockRejectedValueOnce(new Error('quota downgrade failed'))
+      .mockRejectedValueOnce(new Error('429 quota exhausted'))
+      .mockRejectedValueOnce(new Error('quota downgrade failed'))
+      .mockRejectedValueOnce(new Error('429 quota exhausted'))
+      .mockRejectedValueOnce(new Error('quota downgrade failed'));
+
+    await expect(
+      service.handleAnthropicMessages({
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any),
+    ).rejects.toThrow('quota downgrade failed');
+  });
+
   it('retries Gemini generate-content without project when project context is invalid', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));

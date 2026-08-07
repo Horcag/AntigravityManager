@@ -87,6 +87,7 @@ function collectStream(
 
     if (emit && stream) {
       emit(stream);
+      stream.emit('end');
     }
   });
 }
@@ -276,6 +277,62 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     expect(payloads.filter((payload) => (payload.choices as unknown[]).length === 0).length).toBe(
       1,
     );
+  });
+
+  it('keeps the stream open for trailing usage after one terminal finish choice', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const observable = invokePrivate<Observable<string>>(
+      service,
+      'processStreamResponse',
+      stream,
+      'gpt-4o-mini',
+      undefined,
+      { variant: 'chat', includeUsage: true },
+    );
+
+    const outcome = await collectStream(
+      observable,
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [{ text: 'complete' }] }, finishReason: 'STOP' }],
+          }),
+        );
+        source.emit(
+          'data',
+          geminiChunk({
+            usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 3, totalTokenCount: 7 },
+          }),
+        );
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [{ content: { parts: [{ text: 'ignored' }] }, finishReason: 'STOP' }],
+          }),
+        );
+        source.emit('end');
+      },
+      stream,
+    );
+
+    expect(outcome).toMatchObject({ completed: true });
+    const events = parseSseData(outcome.chunks);
+    expect(events.at(-1)).toBe('[DONE]');
+    const payloads = events.filter((event): event is Record<string, unknown> => event !== '[DONE]');
+    const finishChoices = payloads.filter((payload) => {
+      const choice = (payload.choices as Array<Record<string, unknown>>)[0];
+      return choice?.finish_reason === 'stop';
+    });
+
+    expect(finishChoices).toHaveLength(1);
+    expect(outcome.chunks.join('')).toContain('complete');
+    expect(outcome.chunks.join('')).not.toContain('ignored');
+    expect(payloads.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 4, completion_tokens: 3, total_tokens: 7 },
+    });
   });
 
   it('never turns empty or partial upstream usage metadata into a usage frame', async () => {
