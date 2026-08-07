@@ -637,6 +637,47 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(((await fallback) as any).model).toBe('claude-sonnet-4-5');
   });
 
+  it('uses the caller-requested Anthropic alias in a direct stream when modelVersion is absent', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    setServerConfig(
+      createProxyConfig({
+        anthropic_mapping: { 'claude-public-alias': 'gemini-3-flash' },
+      }),
+    );
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+    mockGeminiClient.streamGenerateInternal.mockResolvedValueOnce(stream);
+
+    const response = await service.handleAnthropicMessages({
+      model: 'claude-public-alias',
+      stream: true,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as any);
+    const completed = new Promise<void>((resolve, reject) => {
+      (response as Observable<string>).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}\n\n',
+      ),
+    );
+    stream.emit('end');
+    await completed;
+
+    const messageStart = JSON.parse(
+      chunks.find((chunk) => chunk.includes('event: message_start'))!.split('data: ')[1],
+    );
+    expect(messageStart.message.model).toBe('claude-public-alias');
+    expect(mockGeminiClient.streamGenerateInternal.mock.calls[0][0].model).toBe('gemini-3-flash');
+  });
+
   it('emits an Anthropic response from a valid final SSE frame without a trailing newline', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();

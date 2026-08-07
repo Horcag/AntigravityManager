@@ -243,7 +243,12 @@ export class ProxyService {
             token.token.upstream_proxy_url,
             extraHeaders,
           );
-          return this.processAnthropicInternalStream(stream, geminiBody.model, signatureContext);
+          return this.processAnthropicInternalStream(
+            stream,
+            geminiBody.model,
+            signatureContext,
+            request.model,
+          );
         } else {
           const response = await this.generateInternalWithStreamFallback(
             geminiBody,
@@ -281,6 +286,7 @@ export class ProxyService {
                 stream,
                 fallbackBody.model,
                 signatureContext,
+                request.model,
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -330,6 +336,7 @@ export class ProxyService {
                 stream,
                 downgradedBody.model,
                 downgradedSignatureContext,
+                request.model,
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -365,12 +372,13 @@ export class ProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     signatureContext?: SignatureContext,
+    publicModelFallback: string = model,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      const state = new StreamingState(model);
+      const state = new StreamingState(publicModelFallback);
       const processor = new PartProcessor(state, signatureContext);
 
       let lastFinishReason: string | undefined;

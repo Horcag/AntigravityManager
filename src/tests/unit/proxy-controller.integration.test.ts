@@ -2968,6 +2968,31 @@ describe('ProxyController Integration', () => {
     },
   );
 
+  it('rejects Anthropic tool_choice any without tool declarations before the assembled messages upstream call', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer test-key' },
+        payload: {
+          model: 'claude-sonnet-4-5',
+          messages: [{ role: 'user', content: 'hello' }],
+          tool_choice: { type: 'any' },
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects unsupported chat options through the assembled pipeline without any upstream call', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

@@ -1398,7 +1398,16 @@ export class ProxyController {
         'unsupported_option',
       );
     }
-    if (toolChoice.type === 'auto' || toolChoice.type === 'any' || toolChoice.type === 'none') {
+    if (toolChoice.type === 'any') {
+      if (!tools || tools.length === 0) {
+        throw this.invalidRequest(
+          'tool_choice any requires at least one tool declaration',
+          'tool_choice',
+        );
+      }
+      return;
+    }
+    if (toolChoice.type === 'auto' || toolChoice.type === 'none') {
       return;
     }
     if (
