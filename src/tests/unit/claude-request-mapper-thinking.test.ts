@@ -241,4 +241,19 @@ describe('ClaudeRequestMapper thinking support', () => {
       error: '(no content)',
     });
   });
+
+  it('fails closed when a direct mapper call has no matching tool_use name', () => {
+    expect(() =>
+      transformClaudeRequestIn({
+        model: 'gemini-3-flash',
+        max_tokens: 1024,
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'tool_result', tool_use_id: 'unknown_tool', content: 'result' }],
+          },
+        ],
+      }),
+    ).toThrow('tool_result references unknown tool_use_id: unknown_tool');
+  });
 });

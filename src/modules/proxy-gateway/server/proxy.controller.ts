@@ -31,6 +31,7 @@ import { Observable } from 'rxjs';
 import {
   OpenAIChatRequest,
   AnthropicChatRequest,
+  AnthropicContent,
   OpenAIChatResponse,
   OpenAIContentPart,
   OpenAILegacyCompletionRequest,
@@ -1290,6 +1291,7 @@ export class ProxyController {
       }
       this.validateAnthropicContent(message.content);
     }
+    this.validateAnthropicToolHistory(body.messages);
     this.validateAnthropicTools(body.tools);
     this.validateAnthropicToolChoice(body.tool_choice, body.tools);
     this.validateAnthropicSystem(body.system);
@@ -1347,6 +1349,121 @@ export class ProxyController {
         continue;
       }
       throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+  }
+
+  /**
+   * Anthropic pairs tool calls with results by logical role turn, so adjacent messages with the
+   * same role must be evaluated together before forwarding the request upstream.
+   */
+  private validateAnthropicToolHistory(messages: AnthropicChatRequest['messages']): void {
+    const usedToolUseIds = new Set<string>();
+    let pendingToolUseIds: Set<string> | null = null;
+
+    for (let start = 0; start < messages.length; ) {
+      const role = messages[start].role;
+      const logicalBlocks: Array<AnthropicContent | undefined> = [];
+      let end = start;
+
+      while (end < messages.length && messages[end].role === role) {
+        const content = messages[end].content;
+        if (Array.isArray(content)) {
+          logicalBlocks.push(...content);
+        } else {
+          logicalBlocks.push(undefined);
+        }
+        end += 1;
+      }
+
+      const toolUses = logicalBlocks.filter(
+        (block): block is Extract<AnthropicContent, { type: 'tool_use' }> =>
+          block?.type === 'tool_use',
+      );
+      const toolResults = logicalBlocks.filter(
+        (block): block is Extract<AnthropicContent, { type: 'tool_result' }> =>
+          block?.type === 'tool_result',
+      );
+
+      if (role === 'assistant') {
+        if (toolResults.length > 0) {
+          throw this.invalidRequest(
+            'tool_result blocks are allowed only in user content',
+            'messages',
+          );
+        }
+        if (pendingToolUseIds !== null) {
+          throw this.invalidRequest(
+            'tool_use blocks must be answered in the immediately following user turn',
+            'messages',
+          );
+        }
+        if (toolUses.length > 0) {
+          const nextPendingToolUseIds = new Set<string>();
+          for (const toolUse of toolUses) {
+            if (usedToolUseIds.has(toolUse.id)) {
+              throw this.invalidRequest('tool_use ids must be unique', 'messages');
+            }
+            usedToolUseIds.add(toolUse.id);
+            nextPendingToolUseIds.add(toolUse.id);
+          }
+          pendingToolUseIds = nextPendingToolUseIds;
+        }
+      } else {
+        if (toolUses.length > 0) {
+          throw this.invalidRequest(
+            'tool_use blocks are allowed only in assistant content',
+            'messages',
+          );
+        }
+        if (pendingToolUseIds === null) {
+          if (toolResults.length > 0) {
+            throw this.invalidRequest('tool_result references no pending tool_use', 'messages');
+          }
+        } else {
+          const resolvedToolUseIds = new Set<string>();
+          let reachedNonToolResult = false;
+
+          for (const block of logicalBlocks) {
+            if (block?.type !== 'tool_result') {
+              reachedNonToolResult = true;
+              continue;
+            }
+            if (reachedNonToolResult) {
+              throw this.invalidRequest(
+                'tool_result blocks must come first in the user turn',
+                'messages',
+              );
+            }
+            if (!pendingToolUseIds.has(block.tool_use_id)) {
+              throw this.invalidRequest('tool_result references no pending tool_use', 'messages');
+            }
+            if (resolvedToolUseIds.has(block.tool_use_id)) {
+              throw this.invalidRequest(
+                'each tool_use must have exactly one tool_result',
+                'messages',
+              );
+            }
+            resolvedToolUseIds.add(block.tool_use_id);
+          }
+
+          if (resolvedToolUseIds.size !== pendingToolUseIds.size) {
+            throw this.invalidRequest(
+              'every tool_use must have a tool_result in the immediately following user turn',
+              'messages',
+            );
+          }
+          pendingToolUseIds = null;
+        }
+      }
+
+      start = end;
+    }
+
+    if (pendingToolUseIds !== null) {
+      throw this.invalidRequest(
+        'every tool_use must have a tool_result in the immediately following user turn',
+        'messages',
+      );
     }
   }
 

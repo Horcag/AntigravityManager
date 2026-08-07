@@ -661,7 +661,10 @@ function buildContents(
         }
         parts.push(part);
       } else if (block.type === 'tool_result') {
-        const funcName = toolIdToName.get(block.tool_use_id) || block.tool_use_id;
+        const funcName = toolIdToName.get(block.tool_use_id);
+        if (!funcName) {
+          throw new Error(`tool_result references unknown tool_use_id: ${block.tool_use_id}`);
+        }
         const responseKey = block.is_error ? 'error' : 'result';
         const responseParts: Array<string | { $ref: string }> = [];
         const mediaParts: GeminiPart[] = [];

@@ -933,6 +933,118 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('enforces Anthropic tool history pairing before the assembled messages upstream call', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const toolUse = (id: string) => ({ type: 'tool_use', id, name: 'lookup_weather', input: {} });
+    const toolResult = (toolUseId: string) => ({
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content: `${toolUseId} result`,
+    });
+
+    try {
+      const validHistories = [
+        [
+          { role: 'assistant', content: [toolUse('call_single')] },
+          { role: 'user', content: [toolResult('call_single')] },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_one'), toolUse('call_two')] },
+          {
+            role: 'user',
+            content: [
+              toolResult('call_one'),
+              toolResult('call_two'),
+              { type: 'text', text: 'continue' },
+            ],
+          },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_split')] },
+          { role: 'assistant', content: [{ type: 'text', text: 'I will use this result.' }] },
+          { role: 'user', content: [toolResult('call_split')] },
+          { role: 'user', content: [{ type: 'text', text: 'and then explain it' }] },
+        ],
+      ];
+
+      for (const messages of validHistories) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { model: 'claude-sonnet-4-5', messages },
+        });
+        expect(response.statusCode).toBe(200);
+      }
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledTimes(validHistories.length);
+      proxyService.handleAnthropicMessages.mockClear();
+
+      const invalidHistories = [
+        [{ role: 'user', content: [toolUse('call_user')] }],
+        [{ role: 'assistant', content: [toolResult('call_assistant')] }],
+        [{ role: 'user', content: [toolResult('call_orphan')] }],
+        [
+          { role: 'assistant', content: [toolUse('call_expected')] },
+          { role: 'user', content: [toolResult('call_unexpected')] },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_duplicate'), toolUse('call_duplicate')] },
+          { role: 'user', content: [toolResult('call_duplicate')] },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_first'), toolUse('call_second')] },
+          { role: 'user', content: [toolResult('call_first')] },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_repeated')] },
+          { role: 'user', content: [toolResult('call_repeated'), toolResult('call_repeated')] },
+        ],
+        [{ role: 'assistant', content: [toolUse('call_unresolved')] }],
+        [
+          { role: 'assistant', content: [toolUse('call_delayed')] },
+          { role: 'user', content: [{ type: 'text', text: 'wait' }] },
+          { role: 'assistant', content: [{ type: 'text', text: 'intervening turn' }] },
+          { role: 'user', content: [toolResult('call_delayed')] },
+        ],
+        [
+          { role: 'assistant', content: [toolUse('call_order')] },
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'before result' }, toolResult('call_order')],
+          },
+        ],
+        [
+          { role: 'user', content: [toolResult('call_before')] },
+          { role: 'assistant', content: [toolUse('call_before')] },
+        ],
+      ];
+
+      for (const messages of invalidHistories) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { model: 'claude-sonnet-4-5', messages },
+        });
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toMatchObject({
+          type: 'error',
+          error: { type: 'invalid_request_error' },
+        });
+      }
+      expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
