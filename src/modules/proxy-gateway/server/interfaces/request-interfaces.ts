@@ -1,3 +1,5 @@
+import type { GroundingMetadata } from '../../antigravity/types';
+
 export interface OpenAIChatRequest {
   model: string;
   messages: OpenAIMessage[];
@@ -205,13 +207,32 @@ export interface GeminiGenerationConfig {
 export interface GeminiResponse {
   candidates?: GeminiCandidate[];
   usageMetadata?: GeminiUsageMetadata;
+  modelVersion?: string;
+  responseId?: string;
+  promptFeedback?: GeminiPromptFeedback;
 }
 
 export interface GeminiCandidate {
   content?: GeminiContent;
   finishReason?: string;
   index?: number;
+  finishMessage?: string;
+  safetyRatings?: GeminiSafetyRating[];
+  groundingMetadata?: GeminiGroundingMetadata;
 }
+
+export interface GeminiPromptFeedback {
+  blockReason?: string;
+  safetyRatings?: GeminiSafetyRating[];
+}
+
+export interface GeminiSafetyRating {
+  category?: string;
+  probability?: string;
+  blocked?: boolean;
+}
+
+export type GeminiGroundingMetadata = GroundingMetadata;
 
 export interface GeminiUsageMetadata {
   promptTokenCount?: number;

@@ -40,14 +40,14 @@ describe('GeminiController Integration', () => {
             description: '',
             inputTokenLimit: 128000,
             outputTokenLimit: 8192,
-            supportedGenerationMethods: ['generateContent', 'countTokens'],
+            supportedGenerationMethods: ['generateContent'],
           }),
           expect.objectContaining({
             name: 'models/gemini-3.1-pro-high',
             description: '',
             inputTokenLimit: 128000,
             outputTokenLimit: 8192,
-            supportedGenerationMethods: ['generateContent', 'countTokens'],
+            supportedGenerationMethods: ['generateContent'],
           }),
           expect.objectContaining({
             name: 'models/gemini-3.5-flash-extra-low',
@@ -94,6 +94,8 @@ describe('GeminiController Integration', () => {
             content: { role: 'model', parts: [{ text: 'hello' }] },
             finishReason: 'STOP',
             avgLogprobs: -0.1,
+            safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH', probability: 'NEGLIGIBLE' }],
+            groundingMetadata: { webSearchQueries: ['hello'] },
           },
         ],
         usageMetadata: {
@@ -104,6 +106,7 @@ describe('GeminiController Integration', () => {
         createTime: '2026-02-10T10:00:00.000Z',
         modelVersion: 'gemini-2.5-flash-latest',
         responseId: 'resp_123',
+        promptFeedback: { blockReason: 'BLOCK_REASON_UNSPECIFIED' },
       }),
       handleGeminiStreamGenerateContent: vi.fn(),
     };
@@ -126,6 +129,9 @@ describe('GeminiController Integration', () => {
         {
           content: { role: 'model', parts: [{ text: 'hello' }] },
           finishReason: 'STOP',
+          avgLogprobs: -0.1,
+          safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH', probability: 'NEGLIGIBLE' }],
+          groundingMetadata: { webSearchQueries: ['hello'] },
           index: 0,
         },
       ],
@@ -134,6 +140,10 @@ describe('GeminiController Integration', () => {
         candidatesTokenCount: 1,
         totalTokenCount: 2,
       },
+      createTime: '2026-02-10T10:00:00.000Z',
+      modelVersion: 'gemini-2.5-flash-latest',
+      responseId: 'resp_123',
+      promptFeedback: { blockReason: 'BLOCK_REASON_UNSPECIFIED' },
     });
   });
 
@@ -158,7 +168,7 @@ describe('GeminiController Integration', () => {
     expect(reply.send).toHaveBeenCalledWith(stream);
   });
 
-  it('supports countTokens action', async () => {
+  it('returns an explicit Google error when countTokens is unavailable upstream', async () => {
     const proxyService = {
       handleGeminiGenerateContent: vi.fn(),
       handleGeminiStreamGenerateContent: vi.fn(),
@@ -172,8 +182,14 @@ describe('GeminiController Integration', () => {
       reply as any,
     );
 
-    expect(reply.status).toHaveBeenCalledWith(200);
-    expect(reply.send).toHaveBeenCalledWith({ totalTokens: 0 });
+    expect(reply.status).toHaveBeenCalledWith(501);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        code: 501,
+        message: 'countTokens is not supported by the configured upstream.',
+        status: 'UNIMPLEMENTED',
+      },
+    });
   });
 
   it('returns bad request for invalid combined endpoint action', async () => {

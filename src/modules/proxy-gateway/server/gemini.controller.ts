@@ -20,6 +20,7 @@ import { GeminiRequest, GeminiResponse } from './interfaces/request-interfaces';
 import { getServerConfig } from '../../../server/server-config';
 import { getAllDynamicModels } from '../antigravity/ModelMapping';
 import { AccountLeaseService } from './account-lease.service';
+import { UpstreamRequestError } from './clients/upstream-error';
 
 type GeminiModelMetadata = {
   name: string;
@@ -108,9 +109,11 @@ export class GeminiController {
     res: FastifyReply,
   ): Promise<void> {
     if (action === 'countTokens') {
-      res.status(HttpStatus.OK).send({
-        totalTokens: 0,
-      });
+      this.sendGoogleErrorResponse(
+        res,
+        HttpStatus.NOT_IMPLEMENTED,
+        'countTokens is not supported by the configured upstream.',
+      );
       return;
     }
 
@@ -129,22 +132,21 @@ export class GeminiController {
         return;
       }
 
-      res.status(HttpStatus.BAD_REQUEST).send({
-        error: {
-          code: HttpStatus.BAD_REQUEST,
-          message: `Unsupported model action: ${action}`,
-          status: 'INVALID_ARGUMENT',
-        },
-      });
+      this.sendGoogleErrorResponse(
+        res,
+        HttpStatus.BAD_REQUEST,
+        `Unsupported model action: ${action}`,
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Internal Server Error';
-      res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
-        error: {
-          code: HttpStatus.INTERNAL_SERVER_ERROR,
-          message,
-          status: 'INTERNAL',
-        },
-      });
+      const status = error instanceof UpstreamRequestError ? error.status : undefined;
+      const retryAfter =
+        error instanceof UpstreamRequestError ? error.headers?.retryAfter : undefined;
+      this.sendGoogleErrorResponse(
+        res,
+        status ?? HttpStatus.INTERNAL_SERVER_ERROR,
+        error instanceof Error ? error.message : 'Internal Server Error',
+        retryAfter,
+      );
     }
   }
 
@@ -188,7 +190,7 @@ export class GeminiController {
       description: '',
       inputTokenLimit: 128000,
       outputTokenLimit: 8192,
-      supportedGenerationMethods: ['generateContent', 'countTokens'],
+      supportedGenerationMethods: ['generateContent'],
       temperature: 1,
       topK: 64,
       topP: 0.95,
@@ -198,12 +200,12 @@ export class GeminiController {
 
   private buildNormalizedGeminiGenerateResponse(response: GeminiResponse): GeminiResponse {
     const candidates = (response.candidates ?? []).map((candidate, index) => ({
-      content: candidate.content,
-      finishReason: candidate.finishReason,
+      ...candidate,
       index: isNumber(candidate.index) ? candidate.index : index,
     }));
 
     const normalized: GeminiResponse = {
+      ...response,
       candidates,
     };
 
@@ -215,6 +217,45 @@ export class GeminiController {
     }
 
     return normalized;
+  }
+
+  private sendGoogleErrorResponse(
+    res: FastifyReply,
+    requestedStatus: number,
+    message: string,
+    retryAfter?: string,
+  ): void {
+    const status = this.normalizeGoogleHttpStatus(requestedStatus);
+    if (retryAfter) {
+      res.header('retry-after', retryAfter);
+    }
+    res.status(status).send({
+      error: {
+        code: status,
+        message,
+        status: this.getGoogleStatusName(status),
+      },
+    });
+  }
+
+  private normalizeGoogleHttpStatus(status: number): number {
+    return status >= HttpStatus.BAD_REQUEST && status <= 599
+      ? status
+      : HttpStatus.INTERNAL_SERVER_ERROR;
+  }
+
+  private getGoogleStatusName(status: number): string {
+    const statusNames: Record<number, string> = {
+      [HttpStatus.BAD_REQUEST]: 'INVALID_ARGUMENT',
+      [HttpStatus.UNAUTHORIZED]: 'UNAUTHENTICATED',
+      [HttpStatus.FORBIDDEN]: 'PERMISSION_DENIED',
+      [HttpStatus.NOT_FOUND]: 'NOT_FOUND',
+      [HttpStatus.TOO_MANY_REQUESTS]: 'RESOURCE_EXHAUSTED',
+      [HttpStatus.NOT_IMPLEMENTED]: 'UNIMPLEMENTED',
+      [HttpStatus.INTERNAL_SERVER_ERROR]: 'INTERNAL',
+      [HttpStatus.SERVICE_UNAVAILABLE]: 'UNAVAILABLE',
+    };
+    return statusNames[status] ?? 'INTERNAL';
   }
 
   private normalizeGeminiUsageMetadata(

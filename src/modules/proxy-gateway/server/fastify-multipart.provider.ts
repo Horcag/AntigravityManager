@@ -87,6 +87,18 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
     const pathname = this.getPathname(request.url);
     const response = host.switchToHttp().getResponse();
 
+    if (pathname.startsWith('/v1beta/')) {
+      const status = this.getHttpStatus(error);
+      response.status(status).send({
+        error: {
+          code: status,
+          message: error instanceof Error ? error.message : 'Internal Server Error',
+          status: getGoogleStatusName(status),
+        },
+      });
+      return;
+    }
+
     if (pathname.startsWith('/v1/') && isOpenAIJsonWireError(error, contentType)) {
       if (pathname === '/v1/messages') {
         response.status(this.getHttpStatus(error)).send({
@@ -144,6 +156,20 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
   private getPathname(url: string | undefined): string {
     return url?.split('?', 1)[0] ?? '';
   }
+}
+
+function getGoogleStatusName(status: number): string {
+  const statusNames: Record<number, string> = {
+    [HttpStatus.BAD_REQUEST]: 'INVALID_ARGUMENT',
+    [HttpStatus.UNAUTHORIZED]: 'UNAUTHENTICATED',
+    [HttpStatus.FORBIDDEN]: 'PERMISSION_DENIED',
+    [HttpStatus.NOT_FOUND]: 'NOT_FOUND',
+    [HttpStatus.TOO_MANY_REQUESTS]: 'RESOURCE_EXHAUSTED',
+    [HttpStatus.NOT_IMPLEMENTED]: 'UNIMPLEMENTED',
+    [HttpStatus.INTERNAL_SERVER_ERROR]: 'INTERNAL',
+    [HttpStatus.SERVICE_UNAVAILABLE]: 'UNAVAILABLE',
+  };
+  return statusNames[status] ?? 'INTERNAL';
 }
 
 function isOpenAIJsonWireError(error: unknown, contentType: string): boolean {

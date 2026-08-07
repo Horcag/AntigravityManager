@@ -1742,6 +1742,117 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('uses Google envelopes for assembled v1beta failures and preserves generate metadata', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const upstreamFailures = [
+      new UpstreamRequestError({ message: 'invalid upstream request', status: 400 }),
+      new UpstreamRequestError({ message: 'upstream access denied', status: 403 }),
+      new UpstreamRequestError({
+        message: 'upstream quota exhausted',
+        status: 429,
+        headers: { retryAfter: '45' },
+      }),
+      new UpstreamRequestError({ message: 'upstream unavailable', status: 503 }),
+    ];
+    const proxyService = {
+      handleGeminiGenerateContent: vi
+        .fn()
+        .mockRejectedValueOnce(upstreamFailures[0])
+        .mockRejectedValueOnce(upstreamFailures[1])
+        .mockRejectedValueOnce(upstreamFailures[2])
+        .mockRejectedValueOnce(upstreamFailures[3])
+        .mockResolvedValueOnce({
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'hello' }] },
+              finishReason: 'STOP',
+              safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH', probability: 'NEGLIGIBLE' }],
+              groundingMetadata: { webSearchQueries: ['hello'] },
+            },
+          ],
+          modelVersion: 'gemini-2.5-flash-latest',
+          responseId: 'response-123',
+          promptFeedback: { blockReason: 'BLOCK_REASON_UNSPECIFIED' },
+        }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const [status, googleStatus] of [
+        [400, 'INVALID_ARGUMENT'],
+        [403, 'PERMISSION_DENIED'],
+        [429, 'RESOURCE_EXHAUSTED'],
+        [503, 'UNAVAILABLE'],
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1beta/models/gemini-2.5-flash:generateContent',
+          headers,
+          payload: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
+        });
+        expect(response.statusCode).toBe(status);
+        expect(response.json()).toMatchObject({
+          error: { code: status, status: googleStatus },
+        });
+        if (status === 429) {
+          expect(response.headers['retry-after']).toBe('45');
+        }
+      }
+
+      const generated = await server.inject({
+        method: 'POST',
+        url: '/v1beta/models/gemini-2.5-flash:generateContent',
+        headers,
+        payload: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
+      });
+      expect(generated.statusCode).toBe(200);
+      expect(generated.json()).toMatchObject({
+        modelVersion: 'gemini-2.5-flash-latest',
+        responseId: 'response-123',
+        promptFeedback: { blockReason: 'BLOCK_REASON_UNSPECIFIED' },
+        candidates: [
+          {
+            index: 0,
+            safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH' }],
+            groundingMetadata: { webSearchQueries: ['hello'] },
+          },
+        ],
+      });
+
+      const countTokens = await server.inject({
+        method: 'POST',
+        url: '/v1beta/models/gemini-2.5-flash:countTokens',
+        headers,
+        payload: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
+      });
+      expect(countTokens.statusCode).toBe(501);
+      expect(countTokens.json()).toEqual({
+        error: {
+          code: 501,
+          message: 'countTokens is not supported by the configured upstream.',
+          status: 'UNIMPLEMENTED',
+        },
+      });
+
+      const authFailure = await server.inject({
+        method: 'GET',
+        url: '/v1beta/models',
+      });
+      expect(authFailure.statusCode).toBe(401);
+      expect(authFailure.json()).toEqual({
+        error: {
+          code: 401,
+          message: 'API key validation failed',
+          status: 'UNAUTHENTICATED',
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('maps guard authentication failures into the OpenAI envelope', () => {
     const reply = createReplyMock();
     new ProxyProtocolExceptionFilter().catch(
