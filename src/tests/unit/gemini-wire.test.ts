@@ -123,6 +123,18 @@ describe('gemini-wire pure helpers', () => {
       expect(sanitized).toContain('[REDACTED_EMAIL]');
       expect(sanitized).toContain('[REDACTED_TOKEN]');
     });
+
+    it('redacts opaque bearer tokens and account identifiers without leaking suffixes', () => {
+      const msg =
+        'Authorization: Bearer abc/def+ghi= account acc-123 accounts/tenant_456 project_id=secret-project';
+      const sanitized = sanitizeErrorMessage(msg);
+
+      expect(sanitized).not.toContain('abc/def+ghi=');
+      expect(sanitized).not.toContain('acc-123');
+      expect(sanitized).not.toContain('tenant_456');
+      expect(sanitized).not.toContain('secret-project');
+      expect(sanitized).toContain('[REDACTED]');
+    });
   });
 
   describe('sanitizeRetryAfterHeader', () => {
@@ -167,6 +179,23 @@ describe('gemini-wire pure helpers', () => {
       const sanitized = sanitizeUpstreamError(err);
       expect(sanitized.statusCode).toBe(500);
       expect(sanitized.googleStatus).toBe('INTERNAL');
+    });
+
+    it('rejects an arbitrary upstream Google status value', () => {
+      const err = new UpstreamRequestError({
+        message: 'Unavailable',
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            message: 'Unavailable',
+            status: 'ATTACKER_CONTROLLED_STATUS',
+          },
+        }),
+      });
+
+      const sanitized = sanitizeUpstreamError(err);
+      expect(sanitized.googleStatus).toBe('UNAVAILABLE');
+      expect(sanitized.errorEnvelope.error.status).toBe('UNAVAILABLE');
     });
   });
 

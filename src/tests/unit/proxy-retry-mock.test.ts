@@ -622,7 +622,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(internalPayload.model).toBe('gemini-3.1-pro-high');
   });
 
-  it('strips non-parity Gemini usage metadata fields', async () => {
+  it('preserves provider Gemini usage and response metadata', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
     mockGeminiClient.generateInternal.mockResolvedValue({
@@ -650,8 +650,10 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       promptTokenCount: 1,
       candidatesTokenCount: 2,
       totalTokenCount: 3,
+      thoughtsTokenCount: 4,
     });
-    expect((result as any).usageMetadata.thoughtsTokenCount).toBeUndefined();
+    expect((result as any).responseId).toBe('resp_123');
+    expect((result as any).createTime).toBe('2026-02-10T00:00:00.000Z');
   });
 
   it('retries Gemini generate-content without project when project context is invalid', async () => {

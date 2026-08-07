@@ -16,14 +16,11 @@ import { Observable } from 'rxjs';
 
 import { ProxyGuard } from '../../guards/proxy.guard';
 import { ProxyService } from '../../proxy.service';
-import { GeminiRequest, GeminiResponse } from '../../common/interfaces/request-interfaces';
+import { GeminiRequest } from '../../common/interfaces/request-interfaces';
 import { getServerConfig } from '../../../../../server/server-config';
 import { getAllDynamicModels } from '../../../antigravity/ModelMapping';
 import { AccountLeaseService } from '../account-lease/account-lease.service';
-import {
-  validateGeminiSystemInstruction,
-  sanitizeUpstreamError,
-} from './gemini-wire';
+import { validateGeminiSystemInstruction, sanitizeUpstreamError } from './gemini-wire';
 
 type GeminiModelMetadata = {
   name: string;
@@ -135,7 +132,9 @@ export class GeminiController {
     }
 
     if (action === 'generateContent' || action === 'streamGenerateContent') {
-      const sysVal = validateGeminiSystemInstruction((body as Record<string, unknown>)?.systemInstruction);
+      const sysVal = validateGeminiSystemInstruction(
+        (body as Record<string, unknown>)?.systemInstruction,
+      );
       if (!sysVal.valid) {
         res.status(HttpStatus.BAD_REQUEST).send({
           error: {

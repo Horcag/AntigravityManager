@@ -388,6 +388,9 @@ describe('AccountLeaseModelPolicy', () => {
 
     policy.markModelUnrequestable('gemini-3.6-flash-low');
 
+    expect(policy.getAllCollectedModels()).toEqual(
+      new Set(['gemini-3.6-flash-medium', 'gemini-3.6-flash-tiered', 'gemini-3.5-flash-low']),
+    );
     expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.6-flash-low')).toBe(
       'gemini-3.6-flash-tiered',
     );

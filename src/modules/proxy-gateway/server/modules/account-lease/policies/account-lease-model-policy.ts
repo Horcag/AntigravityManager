@@ -1,7 +1,13 @@
 import { isNumber } from 'lodash-es';
 import { getPublicModelIdForDisplayName } from '../../../../antigravity/ModelMapping';
-import { rebindModelVariant, resolveModelVariant } from '../../../../antigravity/model-variant-registry';
-import { type AccountLeaseTokenData, normalizeModelId } from '../interfaces/account-lease-token-types';
+import {
+  rebindModelVariant,
+  resolveModelVariant,
+} from '../../../../antigravity/model-variant-registry';
+import {
+  type AccountLeaseTokenData,
+  normalizeModelId,
+} from '../interfaces/account-lease-token-types';
 
 interface AccountLeaseModelLogger {
   log(message: string): void;
@@ -123,12 +129,22 @@ export class AccountLeaseModelPolicy {
           continue;
         }
         describedModels.add(normalizedModelId);
-        allModels.add(getPublicModelIdForDisplayName(modelInfo.display_name) ?? normalizedModelId);
+        const publicModelId = getPublicModelIdForDisplayName(modelInfo.display_name);
+        if (
+          !this.unrequestableModels.has(normalizedModelId) &&
+          (!publicModelId || !this.unrequestableModels.has(publicModelId.toLowerCase()))
+        ) {
+          allModels.add(publicModelId ?? normalizedModelId);
+        }
       }
 
       for (const modelId of Object.keys(tokenData.model_quotas)) {
         const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
-        if (normalizedModelId && !describedModels.has(normalizedModelId)) {
+        if (
+          normalizedModelId &&
+          !describedModels.has(normalizedModelId) &&
+          !this.unrequestableModels.has(normalizedModelId)
+        ) {
           allModels.add(normalizedModelId);
         }
       }

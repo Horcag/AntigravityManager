@@ -96,16 +96,6 @@ const CLAUDE_TO_GEMINI: Record<string, string> = {
   'internal-background-task': 'gemini-3-flash',
 };
 
-const DYNAMIC_IMAGE_BASE_MODEL = 'gemini-3-pro-image';
-const DYNAMIC_IMAGE_RESOLUTIONS = ['', '-2k', '-4k'];
-const DYNAMIC_IMAGE_RATIOS = ['', '-1x1', '-4x3', '-3x4', '-16x9', '-9x16', '-21x9'];
-const EXTRA_DYNAMIC_MODELS = [
-  'gemini-3-flash',
-  'gemini-3.1-pro-high',
-  'gemini-3.1-pro-low',
-  'gemini-3.1-flash-image',
-];
-
 const DYNAMIC_MODEL_FORWARDING_RULES = new Map<string, string>();
 
 export const MODEL_LIST_CREATED_AT = 1770652800;
@@ -119,12 +109,26 @@ function collectDynamicModelIds(dynamicModelIds?: Iterable<string>): Set<string>
   }
 
   for (const dynamicModelId of dynamicModelIds) {
-    if (isString(dynamicModelId) && !isEmpty(dynamicModelId.trim())) {
-      modelIds.add(dynamicModelId.trim());
+    const normalizedModelId = normalizeCatalogModelId(dynamicModelId);
+    if (normalizedModelId) {
+      modelIds.add(normalizedModelId);
     }
   }
 
   return modelIds;
+}
+
+function normalizeCatalogModelId(modelId: unknown): string | undefined {
+  if (!isString(modelId)) {
+    return undefined;
+  }
+
+  const normalized = modelId.trim().replace(/^models\//i, '');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(normalized)) {
+    return undefined;
+  }
+
+  return normalized;
 }
 
 const GEMINI_MODEL_ALIASES: Record<string, string> = {
@@ -173,25 +177,14 @@ export function getAllDynamicModels(
   dynamicModelIds?: Iterable<string>,
 ): string[] {
   const modelIds = collectDynamicModelIds(dynamicModelIds);
-  const shouldUseStaticFallback = modelIds.size === 0;
 
-  for (const modelId of getSupportedModels()) {
-    modelIds.add(modelId);
-  }
-
-  for (const customModelId of Object.keys(customMapping)) {
-    modelIds.add(customModelId);
-  }
-
-  if (shouldUseStaticFallback) {
-    for (const resolution of DYNAMIC_IMAGE_RESOLUTIONS) {
-      for (const ratio of DYNAMIC_IMAGE_RATIOS) {
-        modelIds.add(`${DYNAMIC_IMAGE_BASE_MODEL}${resolution}${ratio}`);
-      }
+  for (const [customModelId, targetModelId] of Object.entries(customMapping)) {
+    if (!isString(targetModelId) || isEmpty(targetModelId.trim())) {
+      continue;
     }
-
-    for (const modelId of EXTRA_DYNAMIC_MODELS) {
-      modelIds.add(modelId);
+    const normalizedModelId = normalizeCatalogModelId(customModelId);
+    if (normalizedModelId) {
+      modelIds.add(normalizedModelId);
     }
   }
 

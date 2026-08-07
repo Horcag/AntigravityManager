@@ -3,6 +3,7 @@ import { Readable } from 'node:stream';
 import { lastValueFrom, toArray } from 'rxjs';
 
 import { decodeInternalSseData } from '@/modules/proxy-gateway/antigravity/internal-sse';
+import { UpstreamRequestError } from '@/modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { createGeminiSseObservable } from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
 import { sanitizeGeminiResponse } from '@/modules/proxy-gateway/server/modules/gemini/gemini-wire';
 
@@ -159,7 +160,8 @@ describe('createGeminiSseObservable', () => {
   });
 
   it('handles final unterminated event on stream end', async () => {
-    const chunk = 'data: {"response":{"candidates":[{"content":{"parts":[{"text":"final event without blank line"}]}}]}}';
+    const chunk =
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"final event without blank line"}]}}]}}';
 
     const upstreamStream = Readable.from([Buffer.from(chunk)]);
     const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
@@ -224,7 +226,7 @@ describe('createGeminiSseObservable', () => {
     expect((caughtError as Error).message).toContain('Stream parse error');
   });
 
-  it('destroys upstream stream on unsubscribe and idle timeout', async () => {
+  it('destroys the exact upstream stream on unsubscribe', () => {
     const upstreamStream = new Readable({
       read() {
         // Keeps stream open
@@ -235,8 +237,35 @@ describe('createGeminiSseObservable', () => {
 
     const subscription = createGeminiSseObservable(upstreamStream, 50).subscribe();
 
-    // Unsubscribe explicitly
     subscription.unsubscribe();
     expect(destroySpy).toHaveBeenCalled();
+  });
+
+  it('fails and destroys the upstream stream on idle timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const upstreamStream = new Readable({
+        read() {
+          // Keeps stream open without producing bytes.
+        },
+      });
+      const destroySpy = vi.spyOn(upstreamStream, 'destroy');
+      let caughtError: unknown;
+
+      createGeminiSseObservable(upstreamStream, 50).subscribe({
+        error: (error) => {
+          caughtError = error;
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(51);
+
+      expect(destroySpy).toHaveBeenCalled();
+      expect(caughtError).toBeInstanceOf(Error);
+      expect((caughtError as Error).message).toContain('idle timeout');
+      expect((caughtError as UpstreamRequestError).status).toBe(504);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,6 +1,6 @@
 import { isObjectLike, isNumber, isString, isNil } from 'lodash-es';
 import { HttpStatus } from '@nestjs/common';
-import type { GeminiResponse, GeminiRequest } from '../../common/interfaces/request-interfaces';
+import type { GeminiResponse } from '../../common/interfaces/request-interfaces';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 
 /**
@@ -14,10 +14,10 @@ export function sanitizeGeminiResponse(response: GeminiResponse): GeminiResponse
     return response;
   }
 
-  const { traceId, metadata, __cloudCodeMeta, ...cleanResponse } = response as Record<
-    string,
-    unknown
-  >;
+  const cleanResponse = { ...(response as Record<string, unknown>) };
+  delete cleanResponse.traceId;
+  delete cleanResponse.metadata;
+  delete cleanResponse.__cloudCodeMeta;
 
   if (Array.isArray(cleanResponse.candidates)) {
     cleanResponse.candidates = cleanResponse.candidates.map((candidate, index) => {
@@ -108,18 +108,32 @@ export function sanitizeErrorMessage(rawMessage: string): string {
 
   let sanitized = rawMessage;
 
-  // Redact OAuth / Bearer tokens and ya29 tokens
-  sanitized = sanitized.replace(/(?:bearer\s+|ya29\.|token[:=]\s*)[a-zA-Z0-9_\-\.]+/gi, '[REDACTED_TOKEN]');
-
-  // Redact Authorization headers / query params
-  sanitized = sanitized.replace(/((?:auth|authorization|token|access_token|refresh_token|secret|key|account_id|accountid)=)[^\s&]+/gi, '$1[REDACTED]');
-
   // Redact Email addresses
-  sanitized = sanitized.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]');
+  sanitized = sanitized.replace(
+    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    '[REDACTED_EMAIL]',
+  );
+
+  // Redact OAuth / Bearer tokens, including base64 and URL-safe punctuation.
+  sanitized = sanitized.replace(/\bbearer\s+[^\s,;]+/gi, 'Bearer [REDACTED_TOKEN]');
+  sanitized = sanitized.replace(/\bya29\.[^\s,;]+/gi, '[REDACTED_TOKEN]');
+
+  // Redact credential headers, JSON fields, and query parameters.
+  sanitized = sanitized.replace(
+    /((?:[?&]|\b)["']?(?:auth|authorization|token|access_token|refresh_token|secret|api[_-]?key|key|account_id|accountid|project_id)["']?\s*[:=]\s*["']?)[^"'\s,;&}]+/gi,
+    '$1[REDACTED]',
+  );
+
+  // Redact account resource names and common human-readable account identifiers.
+  sanitized = sanitized.replace(/\baccounts?\/[a-zA-Z0-9_.-]+/gi, 'accounts/[REDACTED]');
+  sanitized = sanitized.replace(
+    /\b(account(?:[_ -]?id)?)\s*(?:[:=]\s*|\s+)[a-zA-Z0-9_.-]{3,}/gi,
+    '$1 [REDACTED]',
+  );
 
   // Redact Project IDs and Project numbers
-  sanitized = sanitized.replace(/projects?\/[a-zA-Z0-9_\-]+/gi, 'projects/[REDACTED]');
-  sanitized = sanitized.replace(/projects?\s+[a-zA-Z0-9_\-]+/gi, 'project [REDACTED]');
+  sanitized = sanitized.replace(/projects?\/[a-zA-Z0-9_-]+/gi, 'projects/[REDACTED]');
+  sanitized = sanitized.replace(/projects?\s+[a-zA-Z0-9_-]+/gi, 'project [REDACTED]');
 
   // Truncate overly long error messages
   if (sanitized.length > 500) {
@@ -127,6 +141,34 @@ export function sanitizeErrorMessage(rawMessage: string): string {
   }
 
   return sanitized;
+}
+
+const GOOGLE_RPC_STATUSES = new Set([
+  'OK',
+  'CANCELLED',
+  'UNKNOWN',
+  'INVALID_ARGUMENT',
+  'DEADLINE_EXCEEDED',
+  'NOT_FOUND',
+  'ALREADY_EXISTS',
+  'PERMISSION_DENIED',
+  'RESOURCE_EXHAUSTED',
+  'FAILED_PRECONDITION',
+  'ABORTED',
+  'OUT_OF_RANGE',
+  'UNIMPLEMENTED',
+  'INTERNAL',
+  'UNAVAILABLE',
+  'DATA_LOSS',
+  'UNAUTHENTICATED',
+]);
+
+function normalizeGoogleRpcStatus(value: unknown): string | undefined {
+  if (!isString(value)) {
+    return undefined;
+  }
+  const normalized = value.trim().toUpperCase();
+  return GOOGLE_RPC_STATUSES.has(normalized) ? normalized : undefined;
 }
 
 /**
@@ -228,9 +270,7 @@ export function sanitizeUpstreamError(error: unknown): SanitizedGoogleErrorResul
           if (isString(errObj.message) && errObj.message.trim().length > 0) {
             rawMessage = errObj.message;
           }
-          if (isString(errObj.status) && errObj.status.trim().length > 0) {
-            googleStatus = errObj.status;
-          }
+          googleStatus = normalizeGoogleRpcStatus(errObj.status);
         }
       } catch {
         // Fall back to error.message

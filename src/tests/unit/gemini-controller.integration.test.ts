@@ -2,12 +2,11 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 
 import { GeminiController } from '../../modules/proxy-gateway/server/modules/gemini/gemini.controller';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
-import { ProxyGuard } from '../../modules/proxy-gateway/server/guards/proxy.guard';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 
 describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
@@ -34,11 +33,9 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     })
     class TestGeminiModule {}
 
-    app = await NestFactory.create<NestFastifyApplication>(
-      TestGeminiModule,
-      new FastifyAdapter(),
-      { logger: false },
-    );
+    app = await NestFactory.create<NestFastifyApplication>(TestGeminiModule, new FastifyAdapter(), {
+      logger: false,
+    });
 
     // Bypass ProxyGuard authentication for routing/serialization tests
     app.useGlobalGuards({
@@ -73,6 +70,10 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
           name: 'models/gemini-3.1-pro-high',
         }),
       ]),
+    );
+    expect(body.models).toHaveLength(3);
+    expect(body.models).not.toContainEqual(
+      expect.objectContaining({ name: 'models/claude-opus-4-6-thinking' }),
     );
   });
 
@@ -301,6 +302,42 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/event-stream');
-    expect(res.payload).toContain('data: {"candidates":[{"content":{"parts":[{"text":"chunk"}]}}]}');
+    expect(res.payload).toContain(
+      'data: {"candidates":[{"content":{"parts":[{"text":"chunk"}]}}]}',
+    );
+  });
+
+  it('keeps the Gemini error envelope after SSE headers and redacts secrets', async () => {
+    mockProxyService.handleGeminiStreamGenerateContent.mockResolvedValueOnce(
+      throwError(
+        () =>
+          new UpstreamRequestError({
+            message: 'Bearer abc/def+ghi= for account acc-123 failed',
+            status: 503,
+            body: JSON.stringify({
+              error: {
+                message: 'Bearer abc/def+ghi= for account acc-123 failed',
+                status: 'UNAVAILABLE',
+              },
+            }),
+          }),
+      ),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:streamGenerateContent?alt=sse',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.payload).toContain('"status":"UNAVAILABLE"');
+    expect(res.payload).toContain('[REDACTED_TOKEN]');
+    expect(res.payload).toContain('account [REDACTED]');
+    expect(res.payload).not.toContain('abc/def+ghi=');
+    expect(res.payload).not.toContain('acc-123');
   });
 });

@@ -199,7 +199,7 @@ describe('ProxyController Integration', () => {
     ]);
   });
 
-  it('lists Antigravity public presets alongside discovered chat models', () => {
+  it('lists only discovered chat models instead of synthetic compatibility aliases', () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
       handleAnthropicMessages: vi.fn(),
@@ -223,20 +223,10 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
     const payload = reply.send.mock.calls[0][0];
     const ids = payload.data.map((model: { id: string }) => model.id);
-    expect(ids).toEqual(
-      expect.arrayContaining([
-        'gemini-3.5-flash-medium',
-        'gemini-3.5-flash-high',
-        'gemini-3.5-flash-low',
-        'gemini-3.1-pro-low',
-        'gemini-3.1-pro-high',
-        'claude-sonnet-4-6-thinking',
-        'claude-opus-4-6-thinking',
-        'gpt-oss-120b-medium',
-      ]),
-    );
+    expect(ids).toEqual(['gemini-3-flash', 'gemini-3.5-flash-low', 'gemini-imagecraft-chat']);
     expect(ids).not.toContain('gemini-3-pro-image');
-    expect(ids).toContain('gemini-imagecraft-chat');
+    expect(ids).not.toContain('gpt-4o');
+    expect(ids).not.toContain('claude-opus-4-6-thinking');
   });
 
   it('routes Claude OpenAI requests to protocol parity path', async () => {

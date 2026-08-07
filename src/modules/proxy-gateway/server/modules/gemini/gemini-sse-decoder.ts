@@ -20,19 +20,24 @@ import { UpstreamRequestError } from '../../common/exceptions/upstream-request-e
  */
 export function createGeminiSseObservable(
   upstreamStream: NodeJS.ReadableStream,
-  idleTimeoutMs = 120000,
+  idleTimeoutMs = 300000,
 ): Observable<string> {
   return new Observable<string>((subscriber) => {
     const decoder = new TextDecoder('utf-8', { fatal: false });
     let buffer = '';
     let hasEmittedData = false;
+    let streamEnded = false;
     let idleTimer: NodeJS.Timeout | null = null;
 
-    const destroyUpstream = () => {
+    const clearIdleTimer = () => {
       if (idleTimer) {
         clearTimeout(idleTimer);
         idleTimer = null;
       }
+    };
+
+    const destroyUpstream = () => {
+      clearIdleTimer();
       if (typeof (upstreamStream as any).destroy === 'function') {
         (upstreamStream as any).destroy();
       }
@@ -45,7 +50,9 @@ export function createGeminiSseObservable(
       idleTimer = setTimeout(() => {
         destroyUpstream();
         if (!subscriber.closed) {
-          subscriber.error(new UpstreamRequestError({ message: 'Gemini SSE stream idle timeout', status: 504 }));
+          subscriber.error(
+            new UpstreamRequestError({ message: 'Gemini SSE stream idle timeout', status: 504 }),
+          );
         }
       }, idleTimeoutMs);
     };
@@ -127,10 +134,8 @@ export function createGeminiSseObservable(
     };
 
     const onEnd = () => {
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-        idleTimer = null;
-      }
+      streamEnded = true;
+      clearIdleTimer();
 
       // Flush decoder
       buffer += decoder.decode();
@@ -160,14 +165,28 @@ export function createGeminiSseObservable(
       }
     };
 
+    const onClose = () => {
+      clearIdleTimer();
+      if (!streamEnded && !subscriber.closed) {
+        subscriber.error(
+          new UpstreamRequestError({
+            message: 'Gemini SSE stream closed before completion',
+            status: 502,
+          }),
+        );
+      }
+    };
+
     upstreamStream.on('data', onData);
     upstreamStream.on('error', onError);
     upstreamStream.on('end', onEnd);
+    upstreamStream.on('close', onClose);
 
     return () => {
       upstreamStream.removeListener('data', onData);
       upstreamStream.removeListener('error', onError);
       upstreamStream.removeListener('end', onEnd);
+      upstreamStream.removeListener('close', onClose);
       destroyUpstream();
     };
   });

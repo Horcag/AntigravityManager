@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_APP_CONFIG, type ProxyConfig } from '@/modules/config/types';
 import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { setServerConfig } from '../../server/server-config';
-import { updateDynamicForwardingRules } from '@/modules/proxy-gateway/antigravity/ModelMapping';
+import {
+  getAllDynamicModels,
+  updateDynamicForwardingRules,
+} from '@/modules/proxy-gateway/antigravity/ModelMapping';
 
 function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
   return {
@@ -16,6 +19,24 @@ function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
 }
 
 describe('ModelRoutingService', () => {
+  it('advertises only discovered models and concrete configured aliases', () => {
+    expect(
+      getAllDynamicModels(
+        {
+          'custom-fast': 'gemini-3.1-flash-lite',
+          'custom-*': 'gemini-3-flash',
+          dangling: ' ',
+          'bad alias': 'gemini-3-flash',
+        },
+        ['models/gemini-3.1-flash-lite', ' gemini-3.1-flash-lite '],
+      ),
+    ).toEqual(['custom-fast', 'gemini-3.1-flash-lite']);
+  });
+
+  it('does not synthesize a model catalog when discovery is empty', () => {
+    expect(getAllDynamicModels()).toEqual([]);
+  });
+
   it('normalizes Gemini model path prefixes and known Gemini aliases', () => {
     const policy = new ModelRoutingService();
 
