@@ -112,7 +112,12 @@ export function transformClaudeRequestIn(
     : undefined;
 
   // Resolve grounding config
-  const requestConfig = resolveRequestConfig(claudeReq.model, mappedModel, normalizedTools);
+  const requestConfig = resolveRequestConfig(
+    claudeReq.model,
+    mappedModel,
+    normalizedTools,
+    claudeReq.metadata,
+  );
   const signatureLookup = createSignatureLookup(signatureState, requestConfig.finalModel);
 
   const allowDummyThought = requestConfig.finalModel.startsWith('gemini-');
@@ -341,10 +346,11 @@ function resolveRequestConfig(
   originalModel: string,
   mappedModel: string,
   tools?: Tool[],
+  metadata?: ClaudeRequest['metadata'],
 ): ResolvedRequestConfig {
   // 1. Image Generation Check
   if (isGeminiImageModel(mappedModel)) {
-    const { imageConfig, parsedBaseModel } = parseImageConfig(originalModel);
+    const { imageConfig, parsedBaseModel } = parseImageConfig(originalModel, metadata);
     return {
       requestType: 'image_gen',
       injectGoogleSearch: false,
@@ -400,7 +406,10 @@ function supportsWebSearchModel(modelName: string): boolean {
  * Parses image generation configuration
  * Extracts aspect ratio and resolution settings from model name
  */
-function parseImageConfig(modelName: string): {
+function parseImageConfig(
+  modelName: string,
+  metadata?: ClaudeRequest['metadata'],
+): {
   imageConfig: ImageConfig;
   parsedBaseModel: string;
 } {
@@ -408,15 +417,31 @@ function parseImageConfig(modelName: string): {
   let aspectRatio = '1:1';
   if (modelName.includes('-16x9')) aspectRatio = '16:9';
   else if (modelName.includes('-9x16')) aspectRatio = '9:16';
+  else if (modelName.includes('-21x9')) aspectRatio = '21:9';
+  else if (modelName.includes('-3x2')) aspectRatio = '3:2';
+  else if (modelName.includes('-2x3')) aspectRatio = '2:3';
   else if (modelName.includes('-4x3')) aspectRatio = '4:3';
   else if (modelName.includes('-3x4')) aspectRatio = '3:4';
   else if (modelName.includes('-1x1')) aspectRatio = '1:1';
 
-  const isHd = modelName.includes('-4k') || modelName.includes('-hd');
+  const metadataAspectRatio = metadata?.image_aspect_ratio;
+  if (
+    typeof metadataAspectRatio === 'string' &&
+    ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(metadataAspectRatio)
+  ) {
+    aspectRatio = metadataAspectRatio;
+  }
+
+  const metadataImageSize = metadata?.image_size;
+  const imageSize = ['1K', '2K', '4K'].includes(String(metadataImageSize))
+    ? String(metadataImageSize)
+    : modelName.includes('-4k') || modelName.includes('-hd')
+      ? '4K'
+      : undefined;
 
   const config: ImageConfig = { aspectRatio };
-  if (isHd) {
-    config.imageSize = '4K';
+  if (imageSize) {
+    config.imageSize = imageSize;
   }
 
   const parsedBaseModel =

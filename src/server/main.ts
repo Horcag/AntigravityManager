@@ -17,6 +17,8 @@ import {
   type RequestHeaders,
 } from '../modules/proxy-gateway/server/guards/api-key-auth.util';
 import { isObservable } from 'rxjs';
+import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '../modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
+import { applyProxyRouteBodyLimit } from './proxy-body-limit';
 
 import { ProxyConfig } from '@/modules/config/types';
 import { getServerConfig, setServerConfig } from './server-config';
@@ -77,17 +79,13 @@ export async function bootstrapNestServer(config: ProxyConfig): Promise<NestServ
   setServerConfig(config);
 
   try {
-    app = await NestFactory.create<NestFastifyApplication>(AppModule, new FastifyAdapter(), {
+    const fastifyAdapter = new FastifyAdapter();
+    fastifyAdapter.getInstance().addHook('onRoute', applyProxyRouteBodyLimit);
+    app = await NestFactory.create<NestFastifyApplication>(AppModule, fastifyAdapter, {
       logger: ['error', 'warn', 'log'],
     });
 
-    await app.register(fastifyMultipart, {
-      limits: {
-        files: 16,
-        fileSize: 100 * 1024 * 1024,
-        fields: 32,
-      },
-    });
+    await app.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
 
     // Enable CORS
     app.enableCors();

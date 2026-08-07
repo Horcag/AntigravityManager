@@ -5,6 +5,11 @@ import { ProxyController } from '../../modules/proxy-gateway/server/proxy.contro
 import { OpenAIResponsesSessionStore } from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 
+const generatedPng = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  Buffer.alloc(16),
+]).toString('base64');
+
 function createReplyMock() {
   const reply: Record<string, any> = {};
   reply.status = vi.fn(() => reply);
@@ -970,7 +975,7 @@ describe('ProxyController Integration', () => {
         choices: [
           {
             message: {
-              content: '![img](data:image/png;base64,AAAABBBB)',
+              content: `![img](data:image/png;base64,${generatedPng})`,
             },
           },
         ],
@@ -997,12 +1002,47 @@ describe('ProxyController Integration', () => {
       expect.objectContaining({
         data: [
           expect.objectContaining({
-            b64_json: 'AAAABBBB',
+            b64_json: generatedPng,
           }),
         ],
       }),
     );
     expect(imageQuotaRefresh).toHaveBeenCalledOnce();
+  });
+
+  it('returns the last buffered image when Gemini emits intermediate image frames', async () => {
+    const intermediate = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([1]),
+    ]).toString('base64');
+    const final = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([2]),
+    ]).toString('base64');
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [
+          {
+            message: {
+              content: [
+                `![intermediate](data:image/png;base64,${intermediate})`,
+                `![final](data:image/png;base64,${final})`,
+              ].join('\n'),
+            },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ b64_json: final })],
+      }),
+    );
   });
 
   it('maps image generation upstream quota errors to 429', async () => {
@@ -1045,6 +1085,20 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(503);
   });
 
+  it('returns 502 when an image upstream emits malformed inline bytes', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        choices: [{ message: { content: '![img](data:image/png;base64,QUJDRA==)' } }],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a dog' }, reply as any);
+
+    expect(reply.status).toHaveBeenCalledWith(502);
+  });
+
   it('falls back to Gemini image generation when chat path hits project context error', async () => {
     const proxyService = {
       handleChatCompletions: vi
@@ -1062,7 +1116,7 @@ describe('ProxyController Integration', () => {
                 {
                   inlineData: {
                     mimeType: 'image/png',
-                    data: 'FALLBACKIMG',
+                    data: generatedPng,
                   },
                 },
               ],
@@ -1079,23 +1133,77 @@ describe('ProxyController Integration', () => {
       {
         model: 'gemini-3-pro-image',
         prompt: 'draw a fox',
+        quality: 'medium',
+        size: '1536x1024',
       },
       reply as any,
     );
 
     expect(proxyService.handleChatCompletions).toHaveBeenCalledOnce();
-    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledOnce();
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
+      'gemini-3-pro-image',
+      expect.objectContaining({
+        generationConfig: {
+          imageConfig: {
+            aspectRatio: '3:2',
+            imageSize: '2K',
+          },
+        },
+      }),
+    );
     expect(reply.status).toHaveBeenCalledWith(200);
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
         data: [
           expect.objectContaining({
-            b64_json: 'FALLBACKIMG',
+            b64_json: generatedPng,
           }),
         ],
       }),
     );
     expect(imageQuotaRefresh).toHaveBeenCalledOnce();
+  });
+
+  it('uses the last non-thought image from the direct Gemini fallback', async () => {
+    const intermediate = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([3]),
+    ]).toString('base64');
+    const final = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from([4]),
+    ]).toString('base64');
+    const proxyService = {
+      handleChatCompletions: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+          ),
+        ),
+      handleGeminiGenerateContent: vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: intermediate }, thought: true },
+                { inlineData: { mimeType: 'image/png', data: final } },
+              ],
+            },
+          },
+        ],
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.imageGenerations({ prompt: 'draw a fox' }, reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ b64_json: final })],
+      }),
+    );
   });
 
   it('returns 502 when the direct Gemini image fallback has no inline image', async () => {
@@ -1130,7 +1238,7 @@ describe('ProxyController Integration', () => {
         choices: [
           {
             message: {
-              content: '![img](data:image/png;base64,CCCCDDDD)',
+              content: `![img](data:image/png;base64,${generatedPng})`,
             },
           },
         ],
@@ -1138,6 +1246,17 @@ describe('ProxyController Integration', () => {
     };
     const controller = new ProxyController(proxyService as any);
     const reply = createReplyMock();
+    const mainImage = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(16),
+    ]);
+    const maskImage = Buffer.concat([
+      Buffer.from('RIFF'),
+      Buffer.alloc(4),
+      Buffer.from('WEBP'),
+      Buffer.alloc(8),
+    ]);
+    const referenceImage = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01]);
 
     await controller.imageEdits(
       createMultipartRequest([
@@ -1147,21 +1266,21 @@ describe('ProxyController Integration', () => {
           fieldname: 'image',
           filename: 'main.png',
           mimetype: 'image/png',
-          data: Buffer.from('main-image'),
+          data: mainImage,
         },
         {
           type: 'file',
           fieldname: 'mask',
           filename: 'mask.webp',
           mimetype: 'image/webp',
-          data: Buffer.from('mask-image'),
+          data: maskImage,
         },
         {
           type: 'file',
           fieldname: 'image1',
           filename: 'reference.jpg',
           mimetype: 'image/jpeg',
-          data: Buffer.from('reference-image'),
+          data: referenceImage,
         },
       ]) as any,
       reply as any,
@@ -1180,19 +1299,23 @@ describe('ProxyController Integration', () => {
             {
               type: 'image_url',
               image_url: {
-                url: `data:image/png;base64,${Buffer.from('main-image').toString('base64')}`,
+                url: `data:image/png;base64,${mainImage.toString('base64')}`,
               },
             },
             {
               type: 'image_url',
               image_url: {
-                url: `data:image/webp;base64,${Buffer.from('mask-image').toString('base64')}`,
+                url: `data:image/jpeg;base64,${referenceImage.toString('base64')}`,
               },
+            },
+            {
+              type: 'text',
+              text: 'Use the following image as the edit mask.',
             },
             {
               type: 'image_url',
               image_url: {
-                url: `data:image/jpeg;base64,${Buffer.from('reference-image').toString('base64')}`,
+                url: `data:image/webp;base64,${maskImage.toString('base64')}`,
               },
             },
           ],
@@ -1220,7 +1343,12 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
     expect(reply.status).toHaveBeenCalledWith(400);
-    expect(reply.send).toHaveBeenCalledWith('Invalid `boundary` for `multipart/form-data` request');
+    expect(reply.send).toHaveBeenCalledWith({
+      error: expect.objectContaining({
+        code: 'invalid_value',
+        type: 'invalid_request_error',
+      }),
+    });
   });
 
   it('supports audio transcriptions endpoint', async () => {
@@ -1237,17 +1365,24 @@ describe('ProxyController Integration', () => {
     };
     const controller = new ProxyController(proxyService as any);
     const reply = createReplyMock();
+    const wav = Buffer.concat([
+      Buffer.from('RIFF'),
+      Buffer.alloc(4),
+      Buffer.from('WAVE'),
+      Buffer.alloc(8),
+    ]);
 
     await controller.audioTranscriptions(
-      {
-        model: 'gemini-2.5-flash',
-        file: 'data:audio/mpeg;base64,QUJDRA==',
-      },
-      {
-        headers: {
-          'content-type': 'multipart/form-data; boundary=----parity',
+      createMultipartRequest([
+        { type: 'field', fieldname: 'model', value: 'gemini-2.5-flash' },
+        {
+          type: 'file',
+          fieldname: 'file',
+          filename: 'speech.wav',
+          mimetype: 'audio/wav',
+          data: wav,
         },
-      } as any,
+      ]) as any,
       reply as any,
     );
 
@@ -1265,10 +1400,6 @@ describe('ProxyController Integration', () => {
 
     await controller.audioTranscriptions(
       {
-        model: 'gemini-2.5-flash',
-        file: 'data:audio/mpeg;base64,QUJDRA==',
-      },
-      {
         headers: {
           'content-type': 'application/json',
         },
@@ -1278,7 +1409,12 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
     expect(reply.status).toHaveBeenCalledWith(400);
-    expect(reply.send).toHaveBeenCalledWith('Invalid `boundary` for `multipart/form-data` request');
+    expect(reply.send).toHaveBeenCalledWith({
+      error: expect.objectContaining({
+        code: 'invalid_value',
+        type: 'invalid_request_error',
+      }),
+    });
   });
 
   it('supports Anthropic messages endpoint', async () => {

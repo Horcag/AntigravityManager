@@ -14,7 +14,7 @@ import {
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
 import { ProxyService } from './proxy.service';
-import { map, Observable } from 'rxjs';
+import { map, Observable, of, tap } from 'rxjs';
 import {
   OpenAIChatRequest,
   OpenAICompletionRequest,
@@ -63,6 +63,23 @@ import {
   summarizeImageResponse,
 } from './modules/openai/media/image-monitoring-summary';
 import { parseImageMultipartRequest } from './modules/openai/media/image-multipart-request';
+import {
+  getGeminiImageRequestMetadata,
+  normalizeImageEditJsonRequest,
+  normalizeImageGenerationRequest,
+} from './modules/openai/media/image-request-contract';
+import { parseAudioMultipartRequest } from './modules/openai/media/audio-multipart-request';
+import {
+  OPENAI_IMAGE_RESPONSE_BYTES_LIMIT,
+  OpenAIMediaRequestError,
+  isOpenAIImageOutputMimeType,
+  normalizeMultipartMediaError,
+  parseInlineMediaInput,
+} from './modules/openai/media/openai-media-request-contract';
+import {
+  mapGeminiAudioTranscriptionStream,
+  mapOpenAIImageStream,
+} from './modules/openai/media/openai-media-streaming';
 import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
 
 export const IMAGE_QUOTA_REFRESH = Symbol('IMAGE_QUOTA_REFRESH');
@@ -179,50 +196,67 @@ export class ProxyController {
   @Post('images/generations')
   async imageGenerations(
     @Body()
-    body: ImageMonitoringRequest,
+    rawBody: ImageMonitoringRequest,
     @Res() res: FastifyReply,
   ) {
     const path = '/v1/images/generations';
-    this.logImageMonitoringSummary('request', summarizeImageRequest(path, body));
-    const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3.1-flash-image',
-      messages: [
-        {
-          role: 'user',
-          content: body.prompt ?? '',
-        },
-      ],
-      stream: false,
-      size: body.size,
-      quality: body.quality,
-    };
+    try {
+      const body = normalizeImageGenerationRequest(rawBody);
+      this.logImageMonitoringSummary('request', summarizeImageRequest(path, body));
+      const request: OpenAIChatRequest = {
+        model: body.model ?? 'gemini-3.1-flash-image',
+        messages: [
+          {
+            role: 'user',
+            content: body.prompt ?? '',
+          },
+        ],
+        stream: body.stream,
+        size: body.size,
+        quality: body.quality,
+        extra: getGeminiImageRequestMetadata(body),
+      };
 
-    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, res);
+      await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, body, res);
+    } catch (error) {
+      this.sendOpenAIErrorResponse(res, path, error);
+    }
   }
 
   @Post('images/edits')
   async imageEdits(@Req() req: FastifyRequest, @Res() res: FastifyReply) {
     const path = '/v1/images/edits';
-    if (!this.hasMultipartBoundary(req)) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .send('Invalid `boundary` for `multipart/form-data` request');
-      return;
-    }
     let body: ImageMonitoringRequest;
     try {
-      body = await parseImageMultipartRequest(req);
+      body = this.hasMultipartBoundary(req)
+        ? await parseImageMultipartRequest(req)
+        : normalizeImageEditJsonRequest(req.body);
     } catch (error) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .send(error instanceof Error ? error.message : 'Invalid multipart request');
+      this.sendOpenAIErrorResponse(res, path, normalizeMultipartMediaError(error));
       return;
     }
     this.logImageMonitoringSummary('request', summarizeImageRequest(path, body));
 
     const imageParts = [
-      ...this.collectImageContentParts([body.image, body.mask], 'image/png'),
+      ...this.collectImageContentParts([body.image], 'image/png'),
       ...this.collectImageContentParts(body.reference_images ?? [], 'image/jpeg'),
+    ];
+    const maskParts = this.collectImageContentParts([body.mask], 'image/png');
+    const content: OpenAIContentPart[] = [
+      {
+        type: 'text',
+        text: body.prompt ?? 'Please edit the provided image.',
+      },
+      ...imageParts,
+      ...(maskParts.length > 0
+        ? [
+            {
+              type: 'text' as const,
+              text: 'Use the following image as the edit mask.',
+            },
+            ...maskParts,
+          ]
+        : []),
     ];
 
     const request: OpenAIChatRequest = {
@@ -230,87 +264,91 @@ export class ProxyController {
       messages: [
         {
           role: 'user',
-          content:
-            imageParts.length > 0
-              ? [
-                  {
-                    type: 'text',
-                    text:
-                      body.prompt ?? 'Please edit this image based on the provided instruction.',
-                  },
-                  ...imageParts,
-                ]
-              : (body.prompt ?? 'Please edit this image based on the provided instruction.'),
+          content,
         },
       ],
-      stream: false,
+      stream: body.stream,
       size: body.size,
       quality: body.quality,
+      extra: getGeminiImageRequestMetadata(body),
     };
 
-    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, res);
+    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, body, res);
   }
 
   @Post('audio/transcriptions')
-  async audioTranscriptions(
-    @Body()
-    body: {
-      model?: string;
-      prompt?: string;
-      file?: string | { data?: string; mimeType?: string };
-      audio?: string | { data?: string; mimeType?: string };
-    },
-    @Req() req: FastifyRequest,
-    @Res() res: FastifyReply,
-  ) {
+  async audioTranscriptions(@Req() req: FastifyRequest, @Res() res: FastifyReply) {
+    const path = '/v1/audio/transcriptions';
     if (!this.hasMultipartBoundary(req)) {
-      res
-        .status(HttpStatus.BAD_REQUEST)
-        .send('Invalid `boundary` for `multipart/form-data` request');
+      this.sendOpenAIErrorResponse(
+        res,
+        path,
+        new OpenAIMediaRequestError(
+          'Expected a multipart/form-data request with a valid boundary',
+          'content-type',
+        ),
+      );
       return;
     }
 
-    const inlineAudio = this.resolveInlineData(body.file ?? body.audio, 'audio/mpeg');
-    if (!inlineAudio) {
-      res.status(HttpStatus.BAD_REQUEST).send({
-        error: {
-          message: "Missing 'file' or 'audio' input. Provide base64 content or a data URL.",
-          type: 'invalid_request_error',
-        },
-      });
-      return;
-    }
-
+    let body;
     try {
-      const result = await this.proxyService.handleGeminiGenerateContent(
-        body.model ?? 'gemini-3-flash',
+      body = await parseAudioMultipartRequest(req);
+    } catch (error) {
+      this.sendOpenAIErrorResponse(res, path, normalizeMultipartMediaError(error));
+      return;
+    }
+
+    const instruction = [
+      body.prompt ?? 'Transcribe the provided speech audio accurately.',
+      body.language ? `The expected language is ${body.language}.` : undefined,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join('\n');
+    const request: GeminiRequest = {
+      contents: [
         {
-          contents: [
+          role: 'user',
+          parts: [
+            { text: instruction },
             {
-              role: 'user',
-              parts: [
-                {
-                  text: body.prompt ?? 'Please transcribe the provided speech audio accurately.',
-                },
-                {
-                  inlineData: inlineAudio,
-                },
-              ],
+              inlineData: {
+                data: body.file.data,
+                mimeType: body.file.mimeType,
+              },
             },
           ],
         },
-      );
+      ],
+      generationConfig:
+        body.temperature === undefined ? undefined : { temperature: body.temperature },
+    };
 
-      const text = result.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text ?? '')
-        .join('')
-        .trim();
+    try {
+      if (body.stream) {
+        const upstreamStream = await this.proxyService.handleGeminiStreamGenerateContent(
+          body.model,
+          request,
+        );
+        this.writeSseResponse(res, mapGeminiAudioTranscriptionStream(upstreamStream));
+        return;
+      }
 
-      res.status(HttpStatus.OK).send({
-        text: text ?? '',
-      });
+      const result = await this.proxyService.handleGeminiGenerateContent(body.model, request);
+      const transcript =
+        result.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text ?? '')
+          .join('')
+          .trim() ?? '';
+
+      if (body.response_format === 'text') {
+        res.header('Content-Type', 'text/plain; charset=utf-8');
+        res.status(HttpStatus.OK).send(transcript);
+      } else {
+        res.status(HttpStatus.OK).send({ text: transcript });
+      }
     } catch (error) {
-      this.sendOpenAIErrorResponse(res, '/v1/audio/transcriptions', error);
+      this.sendOpenAIErrorResponse(res, path, error);
     }
   }
 
@@ -1043,19 +1081,34 @@ export class ProxyController {
     request: OpenAIChatRequest,
     prompt: string,
     path: '/v1/images/generations' | '/v1/images/edits',
+    body: ImageMonitoringRequest,
     res: FastifyReply,
   ): Promise<void> {
     try {
       const result = await this.proxyService.handleChatCompletions(request);
-      if (result instanceof Observable) {
+      if (this.isObservableLike(result)) {
+        if (body.stream) {
+          const stream = mapOpenAIImageStream(result, {
+            partialImages: body.partial_images ?? 0,
+            path,
+            quality: body.quality,
+            size: body.size,
+          }).pipe(
+            tap({
+              complete: () => this.scheduleImageQuotaRefresh(),
+            }),
+          );
+          this.writeSseResponse(res, stream);
+          return;
+        }
         this.logProxyEndpointError(
           path,
           HttpStatus.INTERNAL_SERVER_ERROR,
-          'Streaming image generation is not supported by this endpoint',
+          'Upstream unexpectedly returned a stream for a buffered image request',
         );
         res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
           error: {
-            message: 'Streaming image generation is not supported by this endpoint',
+            message: 'Upstream unexpectedly returned a stream for a buffered image request',
             type: 'invalid_request_error',
           },
         });
@@ -1081,15 +1134,14 @@ export class ProxyController {
 
       const response: OpenAIImageResponse = {
         created: Math.floor(Date.now() / 1000),
+        output_format: this.resolveImageOutputFormat(image.mimeType),
         data: [
           {
             b64_json: image.data,
           },
         ],
       };
-      this.logImageMonitoringSummary('response', summarizeImageResponse(response));
-      this.scheduleImageQuotaRefresh();
-      res.status(HttpStatus.OK).send(response);
+      this.sendOpenAIImageSuccess(response, path, body, res);
     } catch (error) {
       let message = error instanceof Error ? error.message : 'Internal Server Error';
       let resolvedError = error;
@@ -1105,15 +1157,14 @@ export class ProxyController {
           if (fallbackImage) {
             const response: OpenAIImageResponse = {
               created: Math.floor(Date.now() / 1000),
+              output_format: this.resolveImageOutputFormat(fallbackImage.mimeType),
               data: [
                 {
                   b64_json: fallbackImage.data,
                 },
               ],
             };
-            this.logImageMonitoringSummary('response', summarizeImageResponse(response));
-            this.scheduleImageQuotaRefresh();
-            res.status(HttpStatus.OK).send(response);
+            this.sendOpenAIImageSuccess(response, path, body, res);
             return;
           }
           message = 'Upstream did not return inline image data';
@@ -1129,6 +1180,46 @@ export class ProxyController {
 
       this.sendOpenAIErrorResponse(res, path, resolvedError, message);
     }
+  }
+
+  private sendOpenAIImageSuccess(
+    response: OpenAIImageResponse,
+    path: '/v1/images/generations' | '/v1/images/edits',
+    body: ImageMonitoringRequest,
+    res: FastifyReply,
+  ): void {
+    this.logImageMonitoringSummary('response', summarizeImageResponse(response));
+    this.scheduleImageQuotaRefresh();
+    if (!body.stream) {
+      res.status(HttpStatus.OK).send(response);
+      return;
+    }
+
+    this.logger.warn(
+      `${path} upstream stream setup fell back to a buffered result; emitting only the completed image event`,
+    );
+
+    const type = path.endsWith('/edits') ? 'image_edit.completed' : 'image_generation.completed';
+    const event = {
+      type,
+      b64_json: response.data[0]?.b64_json ?? '',
+      background: 'auto',
+      created_at: response.created,
+      output_format: response.output_format ?? 'png',
+      quality: body.quality ?? 'auto',
+      size: body.size ?? 'auto',
+    };
+    this.writeSseResponse(res, of(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`));
+  }
+
+  private resolveImageOutputFormat(mimeType: string): string {
+    if (mimeType === 'image/jpeg') {
+      return 'jpeg';
+    }
+    if (mimeType === 'image/webp') {
+      return 'webp';
+    }
+    return 'png';
   }
 
   private logImageMonitoringSummary(direction: 'request' | 'response', summary: unknown): void {
@@ -1153,16 +1244,17 @@ export class ProxyController {
     mimeType: string;
     data: string;
   } | null {
-    const pattern = /data:(?<mime>[\w/+.-]+);base64,(?<data>[A-Za-z0-9+/=]+)/;
-    const matched = content.match(pattern);
-    if (!matched || !matched.groups) {
-      return null;
+    const pattern = /data:(?<mime>[\w/+.-]+);base64,(?<data>[^)\s"'\\]*)/gu;
+    let finalImage: { mimeType: string; data: string } | null = null;
+    for (const matched of content.matchAll(pattern)) {
+      if (!matched.groups) {
+        continue;
+      }
+      finalImage = this.validateUpstreamInlineImage(
+        `data:${matched.groups.mime};base64,${matched.groups.data}`,
+      );
     }
-
-    return {
-      mimeType: matched.groups.mime,
-      data: matched.groups.data,
-    };
+    return finalImage;
   }
 
   private extractInlineBase64ImageFromGeminiResponse(response: GeminiResponse): {
@@ -1170,21 +1262,40 @@ export class ProxyController {
     data: string;
   } | null {
     const parts = response.candidates?.[0]?.content?.parts ?? [];
+    let finalImage: { mimeType: string; data: string } | null = null;
     for (const part of parts) {
       if (part.inlineData?.data) {
-        return {
-          mimeType: part.inlineData.mimeType ?? 'image/jpeg',
+        finalImage = this.validateUpstreamInlineImage({
           data: part.inlineData.data,
-        };
+          mimeType: part.inlineData.mimeType ?? 'image/jpeg',
+        });
       }
       if (part.text) {
         const parsed = this.extractInlineBase64Image(part.text);
-        if (parsed) {
-          return parsed;
+        if (parsed || part.text.includes('data:')) {
+          finalImage = parsed;
         }
       }
     }
-    return null;
+    return finalImage;
+  }
+
+  private validateUpstreamInlineImage(input: unknown): {
+    mimeType: string;
+    data: string;
+  } | null {
+    try {
+      const parsed = parseInlineMediaInput(input, {
+        kind: 'image',
+        maxBytes: OPENAI_IMAGE_RESPONSE_BYTES_LIMIT,
+        param: 'upstream_image',
+      });
+      return isOpenAIImageOutputMimeType(parsed.mimeType)
+        ? { mimeType: parsed.mimeType, data: parsed.data }
+        : null;
+    } catch {
+      return null;
+    }
   }
 
   private buildGeminiImageRequest(
@@ -1233,6 +1344,20 @@ export class ProxyController {
       parts.push({ text: fallbackPrompt || 'Please generate an image based on this request.' });
     }
 
+    const metadata = this.toRecord(request.extra);
+    const metadataAspectRatio = this.asString(metadata?.image_aspect_ratio);
+    const metadataImageSize = this.asString(metadata?.image_size);
+    const imageConfig: Record<string, string> = {};
+    if (
+      metadataAspectRatio &&
+      ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(metadataAspectRatio)
+    ) {
+      imageConfig.aspectRatio = metadataAspectRatio;
+    }
+    if (metadataImageSize && ['1K', '2K', '4K'].includes(metadataImageSize)) {
+      imageConfig.imageSize = metadataImageSize;
+    }
+
     return {
       contents: [
         {
@@ -1240,6 +1365,7 @@ export class ProxyController {
           parts,
         },
       ],
+      ...(Object.keys(imageConfig).length > 0 ? { generationConfig: { imageConfig } } : {}),
     };
   }
 
@@ -1274,6 +1400,18 @@ export class ProxyController {
     overrideMessage?: string,
   ): void {
     const message = overrideMessage ?? this.resolveErrorMessageText(error);
+    if (error instanceof OpenAIMediaRequestError) {
+      this.logProxyEndpointError(endpoint, error.statusCode, message, error);
+      res.status(error.statusCode).send({
+        error: {
+          message,
+          type: error.type,
+          param: error.param,
+          code: error.code,
+        },
+      });
+      return;
+    }
     if (error instanceof OpenAIRequestValidationError) {
       this.logProxyEndpointError(endpoint, HttpStatus.BAD_REQUEST, message, error);
       res.status(HttpStatus.BAD_REQUEST).send({

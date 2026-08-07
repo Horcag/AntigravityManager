@@ -53,4 +53,21 @@ describe('ClaudeRequestMapper Markdown image compatibility', () => {
       });
     },
   );
+
+  it('uses validated OpenAI image metadata without changing the routable model id', () => {
+    const body = transformClaudeRequestIn({
+      model: 'gemini-3.1-flash-image',
+      messages: [{ role: 'user', content: 'Generate a landscape.' }],
+      metadata: {
+        image_aspect_ratio: '3:2',
+        image_size: '2K',
+      },
+    });
+
+    expect(body.model).toBe('gemini-3.1-flash-image');
+    expect(body.request.generationConfig?.imageConfig).toEqual({
+      aspectRatio: '3:2',
+      imageSize: '2K',
+    });
+  });
 });

@@ -2,15 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_CONFIG } from '@/modules/config/types';
 import { bootstrapNestServer, getNestServerStatus, stopNestServer } from '@/server/main';
 
-const { mockAttachResponsesWebSocketServer, mockCreate, mockLogger } = vi.hoisted(() => ({
-  mockAttachResponsesWebSocketServer: vi.fn(() => vi.fn()),
-  mockCreate: vi.fn(),
-  mockLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  },
-}));
+const { mockAddHook, mockAttachResponsesWebSocketServer, mockCreate, mockLogger } = vi.hoisted(
+  () => ({
+    mockAddHook: vi.fn(),
+    mockAttachResponsesWebSocketServer: vi.fn(() => vi.fn()),
+    mockCreate: vi.fn(),
+    mockLogger: {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    },
+  }),
+);
 
 vi.mock('@nestjs/core', () => ({
   NestFactory: {
@@ -19,7 +22,11 @@ vi.mock('@nestjs/core', () => ({
 }));
 
 vi.mock('@nestjs/platform-fastify', () => ({
-  FastifyAdapter: vi.fn(),
+  FastifyAdapter: vi.fn(function MockFastifyAdapter() {
+    return {
+      getInstance: () => ({ addHook: mockAddHook }),
+    };
+  }),
 }));
 
 vi.mock('@/shared/logging/logger', () => ({
@@ -105,6 +112,7 @@ describe('gateway server startup', () => {
       base_url: 'http://localhost:8123',
     });
     expect(listen).toHaveBeenCalledWith(8123, '0.0.0.0');
+    expect(mockAddHook).toHaveBeenCalledWith('onRoute', expect.any(Function));
     expect(mockAttachResponsesWebSocketServer).toHaveBeenCalledOnce();
 
     await expect(getNestServerStatus()).resolves.toMatchObject({

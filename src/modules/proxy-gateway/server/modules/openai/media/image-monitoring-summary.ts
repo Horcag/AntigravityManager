@@ -11,6 +11,11 @@ export interface ImageMonitoringRequest {
   prompt?: string;
   size?: string;
   quality?: string;
+  n?: number;
+  partial_images?: number;
+  response_format?: string;
+  stream?: boolean;
+  user?: string;
   image?: string | ImageMonitoringInput;
   mask?: string | ImageMonitoringInput;
   reference_images?: Array<string | ImageMonitoringInput>;
@@ -50,6 +55,7 @@ interface ImageResponseItem {
 export interface OpenAIImageResponse {
   created: number;
   data: ImageResponseItem[];
+  output_format?: string;
 }
 
 interface ImageResponseMonitoringItem {
@@ -67,6 +73,7 @@ interface ImageResponseMonitoringItem {
 export interface ImageResponseMonitoringSummary {
   created: number;
   data: ImageResponseMonitoringItem[];
+  output_format?: string;
 }
 
 function truncateForLog(value: string): string {
@@ -227,6 +234,7 @@ export function summarizeImageResponse(
 ): ImageResponseMonitoringSummary {
   return {
     created: response.created,
+    output_format: response.output_format,
     data: response.data.map((item) => {
       if (item.b64_json) {
         const inspected = inspectImage(item.b64_json);
