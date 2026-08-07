@@ -187,6 +187,95 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     ]);
   });
 
+  it.each([
+    ['object', { text: 'not an array' }],
+    ['number', 42],
+    ['null entry', [null]],
+  ])(
+    'ignores malformed %s parts in chat and legacy streams before one terminal path',
+    async (_description, malformedParts) => {
+      for (const streamOptions of [
+        { variant: 'chat' as const, includeUsage: false },
+        { variant: 'text' as const, includeUsage: false },
+      ]) {
+        const service = createService();
+        const stream = new EventEmitter();
+        const observable = invokePrivate<Observable<string>>(
+          service,
+          'processStreamResponse',
+          stream,
+          'gpt-4o-mini',
+          undefined,
+          streamOptions,
+        );
+
+        const outcome = await collectStream(
+          observable,
+          (source) => {
+            source.emit(
+              'data',
+              geminiChunk({ candidates: [{ content: { parts: malformedParts } }] }),
+            );
+            source.emit(
+              'data',
+              geminiChunk({ candidates: [{ content: { parts: [] }, finishReason: 'STOP' }] }),
+            );
+          },
+          stream,
+        );
+
+        expect(outcome.completed).toBe(true);
+        expect(outcome.error).toBeUndefined();
+        expect(parseSseData(outcome.chunks).filter((event) => event === '[DONE]')).toHaveLength(1);
+      }
+    },
+  );
+
+  it('emits chat grounding as assistant text before the terminal finish', async () => {
+    const service = createService();
+    const stream = new EventEmitter();
+    const outcome = await collectStream(
+      invokePrivate<Observable<string>>(service, 'processStreamResponse', stream, 'gpt-4o-mini'),
+      (source) => {
+        source.emit(
+          'data',
+          geminiChunk({
+            candidates: [
+              {
+                content: { parts: [] },
+                finishReason: 'STOP',
+                groundingMetadata: {
+                  webSearchQueries: ['Gemini streaming grounding'],
+                  groundingChunks: [
+                    { web: { title: 'Gemini API', uri: 'https://example.com/gemini-api' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        );
+      },
+      stream,
+    );
+
+    expect(outcome.completed).toBe(true);
+    const payloads = parseSseData(outcome.chunks).filter(
+      (event): event is Record<string, unknown> => event !== '[DONE]',
+    );
+    const groundingIndex = payloads.findIndex((payload) =>
+      JSON.stringify(payload).includes('Searched for you'),
+    );
+    const finishIndex = payloads.findIndex((payload) => {
+      const choice = (payload.choices as Array<Record<string, unknown>>)[0];
+      return choice?.finish_reason === 'stop';
+    });
+
+    expect(JSON.stringify(payloads)).toContain('Gemini streaming grounding');
+    expect(JSON.stringify(payloads)).toContain('https://example.com/gemini-api');
+    expect(groundingIndex).toBeGreaterThanOrEqual(0);
+    expect(groundingIndex).toBeLessThan(finishIndex);
+  });
+
   it('starts real chat streams with one assistant-role delta before content', async () => {
     const service = createService();
     const stream = new EventEmitter();

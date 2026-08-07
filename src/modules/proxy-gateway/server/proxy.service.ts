@@ -1685,6 +1685,31 @@ export class ProxyService {
     };
   }
 
+  private formatGroundingAsAssistantText(grounding: GroundingMetadata | undefined): string {
+    if (!grounding) {
+      return '';
+    }
+
+    let groundingText = '';
+    if (grounding.webSearchQueries?.length) {
+      groundingText += `\n\n---\n**🔍 Searched for you:** ${grounding.webSearchQueries.join(', ')}`;
+    }
+
+    const links = (grounding.groundingChunks ?? []).flatMap((chunk, index) => {
+      if (!chunk.web) {
+        return [];
+      }
+      const title = chunk.web.title || 'Web source';
+      const uri = chunk.web.uri || '#';
+      return [`[${index + 1}] [${title}](${uri})`];
+    });
+    if (links.length) {
+      groundingText += `\n\n**🌐 Citations:**\n${links.join('\n')}`;
+    }
+
+    return groundingText;
+  }
+
   private toResponsesUsageMetadata(value: unknown): GeminiResponsesUsageMetadata | undefined {
     const usage = this.toUnknownRecord(value);
     if (!usage) {
@@ -1770,6 +1795,7 @@ export class ProxyService {
       let lastUsage: OpenAIStreamUsage | null = null;
       const toolCallIndices = new Map<string, number>();
       const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
+      let groundingMetadata: GroundingMetadata | undefined;
       /** Signature seen earlier in THIS stream, used only for tool calls of this same stream. */
       let streamSignature: string | null = null;
 
@@ -1860,7 +1886,16 @@ export class ProxyService {
 
         {
           const candidate = json?.candidates?.[0];
-          const parts = candidate?.content?.parts || [];
+          const parts = Array.isArray(candidate?.content?.parts)
+            ? candidate.content.parts.flatMap((part: unknown) => {
+                const normalizedPart = this.normalizeGeminiPart(part);
+                return normalizedPart ? [normalizedPart] : [];
+              })
+            : [];
+          groundingMetadata = this.mergeGroundingMetadata(
+            groundingMetadata,
+            candidate?.groundingMetadata,
+          );
 
           // Partial metadata leaves the previously reported usage untouched rather than
           // downgrading it to zeros.
@@ -1984,6 +2019,10 @@ export class ProxyService {
           }
 
           if (candidate?.finishReason) {
+            const groundingText = this.formatGroundingAsAssistantText(groundingMetadata);
+            if (groundingText) {
+              pushChoice(this.buildOpenAIContentChoice(streamOptions.variant, groundingText));
+            }
             const mappedFinishReason = emittedToolCall
               ? 'tool_calls'
               : mapGeminiFinishReasonToOpenAI(candidate.finishReason);
