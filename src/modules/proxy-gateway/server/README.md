@@ -103,7 +103,25 @@ server/
 
 ---
 
-## 4. Architectural Rules & Guidelines for Developers & Agents
+## 4. Authoritative State Ownership Table
+
+The following table defines the single, authoritative Nest DI service or store owner for each runtime state domain across the Proxy Gateway module:
+
+| State Domain / Capability | Authoritative Owner Class / Service | Lifetime & Scope | Responsibilities & Ownership Notes |
+| :--- | :--- | :--- | :--- |
+| **Account Leasing & Sticky Sessions** | `AccountLeaseService` | Nest DI Singleton (`ProxyModule`) | Manages token cache, account rotation, selection policies, and sticky session bindings. |
+| **Model Routing Policy** | `ModelRoutingService` | Nest DI Singleton (`ProxyModule`) | Manages model identifier normalization, custom model mappings, wildcard rules, and protocol headers. |
+| **Model Availability & Cooldowns** | `ModelAvailabilityService` | Nest DI Singleton (`ProxyModule`) | Manages account-model capability bans, status 404/403/429 cooldowns, and persistent unavailability snapshots. |
+| **Rate-Limit & Lockout Tracking** | `RateLimitTrackerService` | Nest DI Singleton (`ProxyModule`) | Centralizes status 429 and quota exhaustion lockout windows; consumed by `AccountLeaseService` and `AccountLeaseLimitPolicy`. |
+| **Retry Coordination** | `ProxyRetryService` | Nest DI Singleton (`ProxyModule`) | Coordinates token re-selection, grace retries, exponential backoff, and upstream penalty application. |
+| **Generation Constraints & Budgets** | `GenerationConstraintsService` | Nest DI Singleton (`ProxyModule`) | Calculates maximum output token limits and thinking budget caps per account and target model. |
+| **Response Sessions (OpenAI Responses)** | `OpenAIResponsesSessionStore` | Module Singleton Store (`modules/openai/responses`) | Manages `previous_response_id` links, stream states, and WebSocket session lifecycles for OpenAI responses. |
+| **Thought Signatures** | `SignatureStore` | Module Store (`antigravity/SignatureStore`) | Caches, decodes, and verifies thought signatures across multi-turn Anthropic/Gemini messages. |
+| **Explicit Context Cache** | `ExplicitContextCacheStore` | Module Singleton (`modules/gemini/explicit-context-cache`) | Manages cached prompt contexts, TTLs, and explicit context cache resource handles (`explicitContextCacheManager`). |
+
+---
+
+## 5. Architectural Rules & Guidelines for Developers & Agents
 
 When reading, updating, or refactoring code within this directory, strictly follow these rules:
 
@@ -124,7 +142,7 @@ When reading, updating, or refactoring code within this directory, strictly foll
 
 ---
 
-## 5. Verification & Development Checklist
+## 6. Verification & Development Checklist
 
 After modifying files in `server/`, execute the following verification steps in order:
 

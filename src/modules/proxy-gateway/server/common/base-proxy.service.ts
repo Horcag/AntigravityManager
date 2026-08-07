@@ -37,14 +37,21 @@ export abstract class BaseProxyService {
     private readonly streamIdleTimeoutMs = 300_000;
     protected readonly generationConstraints: GenerationConstraintsService;
     protected readonly retryPolicy: ProxyRetryService;
-    protected readonly modelRoutingPolicy = new ModelRoutingService();
+    protected readonly modelRoutingPolicy: ModelRoutingService;
 
     constructor(
         protected readonly accountLeaseService: AccountLeaseService,
         protected readonly geminiClient: GeminiClient,
+        generationConstraints?: GenerationConstraintsService,
+        retryPolicy?: ProxyRetryService,
+        modelRoutingPolicy?: ModelRoutingService,
     ) {
-        this.generationConstraints = new GenerationConstraintsService(this.accountLeaseService);
-        this.retryPolicy = new ProxyRetryService(this.accountLeaseService, this.logger);
+        this.generationConstraints =
+            generationConstraints ?? new GenerationConstraintsService(this.accountLeaseService);
+        this.retryPolicy =
+            retryPolicy ?? new ProxyRetryService(this.accountLeaseService, this.logger);
+        this.modelRoutingPolicy =
+            modelRoutingPolicy ?? new ModelRoutingService();
     }
 
     protected createOfficialRequestId(): string {

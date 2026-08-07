@@ -1,3 +1,4 @@
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { isString } from 'lodash-es';
 import { CloudAccount } from '@/modules/cloud-account/types';
 import { calculateRetryDelay, sleep } from '../../../../antigravity/retry-utils';
@@ -8,7 +9,8 @@ import {
   shouldGraceRetry,
 } from './rate-limit-tracker.service';
 import { UpstreamRequestError } from '../../../common/exceptions/upstream-request-exception';
-import { proxyModelAvailabilityStore } from './model-availability.service';
+import { ModelAvailabilityService, proxyModelAvailabilityStore } from './model-availability.service';
+import { AccountLeaseService } from '../../account-lease/account-lease.service';
 
 export interface ProxyTokenRetryState {
   attemptedAccountIds: Set<string>;
@@ -46,11 +48,25 @@ export interface ProxyUpstreamFailureClassification {
   markAsRateLimited: boolean;
 }
 
+@Injectable()
 export class ProxyRetryService {
+  private readonly logger: ProxyRetryLogger;
+  private readonly modelAvailabilityStore: ModelAvailabilityService;
+
   constructor(
-    private readonly accountLeaseService: ProxyRetryAccountLeaseService,
-    private readonly logger: ProxyRetryLogger,
-  ) {}
+    @Inject(AccountLeaseService) private readonly accountLeaseService: ProxyRetryAccountLeaseService,
+    @Optional() @Inject(ModelAvailabilityService) modelAvailabilityOrLogger?: ModelAvailabilityService | ProxyRetryLogger,
+    @Optional() loggerOrModelAvailability?: ProxyRetryLogger | ModelAvailabilityService,
+  ) {
+    if (modelAvailabilityOrLogger && 'mark' in modelAvailabilityOrLogger) {
+      this.modelAvailabilityStore = modelAvailabilityOrLogger as ModelAvailabilityService;
+      this.logger = (loggerOrModelAvailability as ProxyRetryLogger) ?? new Logger(ProxyRetryService.name);
+    } else {
+      this.logger = (modelAvailabilityOrLogger as ProxyRetryLogger) ?? new Logger(ProxyRetryService.name);
+      this.modelAvailabilityStore =
+        (loggerOrModelAvailability as ModelAvailabilityService) ?? proxyModelAvailabilityStore;
+    }
+  }
 
   createTokenRetryState(): ProxyTokenRetryState {
     return {
@@ -127,14 +143,14 @@ export class ProxyRetryService {
       const status = error.status;
       const isImageModel = model.toLowerCase().includes('-image');
       if (isImageModel && status === 404) {
-        proxyModelAvailabilityStore.mark(accountId, model, 'model_not_supported', undefined, {
+        this.modelAvailabilityStore.mark(accountId, model, 'model_not_supported', undefined, {
           status,
           message: error.body ?? error.message,
         });
         return;
       }
       if (isImageModel && status === 403) {
-        proxyModelAvailabilityStore.mark(accountId, model, 'model_forbidden', undefined, {
+        this.modelAvailabilityStore.mark(accountId, model, 'model_forbidden', undefined, {
           status,
           message: error.body ?? error.message,
         });
@@ -194,7 +210,7 @@ export class ProxyRetryService {
 
   markUpstreamSuccess(accountId: string, model: string): void {
     this.accountLeaseService.markModelSuccess(accountId, model);
-    proxyModelAvailabilityStore.clearModel(accountId, model);
+    this.modelAvailabilityStore.clearModel(accountId, model);
   }
 
   private persistModelRateLimit(
@@ -207,7 +223,7 @@ export class ProxyRetryService {
     if (waitSeconds <= 0) {
       return;
     }
-    proxyModelAvailabilityStore.mark(
+    this.modelAvailabilityStore.mark(
       accountId,
       model,
       hasExplicitQuotaExhaustedSignal(message) ? 'quota_exhausted' : 'rate_limited',

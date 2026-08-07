@@ -11,7 +11,11 @@ import {
   getContextCacheStatus,
   generateApiKey,
 } from './handlers';
-import { proxyModelAvailabilityStore } from '../server/modules/shared/services/model-availability.service';
+import {
+  ModelAvailabilityService,
+  getPersistedModelAvailabilitySnapshot,
+} from '../server/modules/shared/services/model-availability.service';
+import { getNestService, isNestServerRunning } from '@/server/main';
 import { openCodeCredentialService } from '../opencode-sync/opencode-credentials';
 import { openCodeSyncService } from '../opencode-sync/opencode-sync';
 
@@ -116,6 +120,12 @@ export const gatewayRouter = os.prefix('/gateway').router({
       ),
     )
     .handler(async () => {
-      return proxyModelAvailabilityStore.getSnapshot();
+      if (isNestServerRunning()) {
+        const service = getNestService<ModelAvailabilityService>(ModelAvailabilityService);
+        if (service) {
+          return service.getSnapshot();
+        }
+      }
+      return getPersistedModelAvailabilitySnapshot();
     }),
 });

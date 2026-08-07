@@ -15,7 +15,11 @@ import { shell } from 'electron';
 import fs from 'fs';
 import { isEmpty, isString } from 'lodash-es';
 import { updateTrayMenu } from '@/modules/app-shell/ipc/tray/handler';
-import { proxyModelAvailabilityStore } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import {
+  ModelAvailabilityService,
+  clearPersistedCapabilityFailures,
+} from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { getNestService, isNestServerRunning } from '@/server/main';
 import {
   ensureGlobalOriginalFromCurrentStorage,
   generateDeviceProfile,
@@ -37,6 +41,14 @@ import {
 } from '@/modules/cloud-account/utils/account-status';
 import { withTimingTrace } from '@/shared/observability/timingTrace';
 import { AppError } from '@/shared/errors/appError';
+
+function clearModelAvailabilityCapabilityFailures(accountId: string): void {
+  if (isNestServerRunning()) {
+    getNestService<ModelAvailabilityService>(ModelAvailabilityService)?.clearCapabilityFailures(accountId);
+  } else {
+    clearPersistedCapabilityFailures(accountId);
+  }
+}
 
 // Helper to update tray
 function notifyTrayUpdate(account: CloudAccount) {
@@ -492,7 +504,7 @@ export async function refreshAccountQuota(accountId: string): Promise<CloudAccou
     await CloudAccountRepo.updateLastUsed(account.id);
     account.last_used = Math.floor(Date.now() / 1000);
     await clearAccountStatus(account);
-    proxyModelAvailabilityStore.clearCapabilityFailures(account.id);
+    clearModelAvailabilityCapabilityFailures(account.id);
     notifyTrayUpdate(account);
     return account;
   } catch (error: any) {
@@ -540,7 +552,7 @@ export async function refreshAccountQuota(accountId: string): Promise<CloudAccou
         await CloudAccountRepo.updateLastUsed(account.id);
         account.last_used = Math.floor(Date.now() / 1000);
         await clearAccountStatus(account);
-        proxyModelAvailabilityStore.clearCapabilityFailures(account.id);
+        clearModelAvailabilityCapabilityFailures(account.id);
         return account;
       } catch (refreshError) {
         logger.error(

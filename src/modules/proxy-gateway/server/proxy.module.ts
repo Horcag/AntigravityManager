@@ -7,13 +7,29 @@ import { GeminiController } from './modules/gemini/gemini.controller';
 import { ProxyGuard } from './guards/proxy.guard';
 import { CloudMonitorService } from '@/modules/cloud-account/services/CloudMonitorService';
 import { IMAGE_QUOTA_REFRESH } from './proxy.controller';
+import { RateLimitTrackerService } from './modules/shared/services/rate-limit-tracker.service';
+import { ModelRoutingService } from './modules/shared/services/model-routing.service';
+import {
+  ModelAvailabilityService,
+  proxyModelAvailabilityStore,
+} from './modules/shared/services/model-availability.service';
+import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
+import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
 
 @Module({
   imports: [],
   controllers: [ProxyController, GeminiController],
   providers: [
-    ProxyService,
+    RateLimitTrackerService,
+    ModelRoutingService,
+    {
+      provide: ModelAvailabilityService,
+      useValue: proxyModelAvailabilityStore,
+    },
     AccountLeaseService,
+    ProxyRetryService,
+    GenerationConstraintsService,
+    ProxyService,
     GeminiClient,
     ProxyGuard,
     {
@@ -21,6 +37,14 @@ import { IMAGE_QUOTA_REFRESH } from './proxy.controller';
       useValue: () => CloudMonitorService.poll(),
     },
   ],
-  exports: [AccountLeaseService],
+  exports: [
+    AccountLeaseService,
+    RateLimitTrackerService,
+    ModelRoutingService,
+    ModelAvailabilityService,
+    ProxyRetryService,
+    GenerationConstraintsService,
+    ProxyService,
+  ],
 })
 export class ProxyModule {}

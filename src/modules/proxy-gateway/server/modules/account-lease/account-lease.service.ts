@@ -48,14 +48,34 @@ export class AccountLeaseService implements OnModuleInit {
   private readonly modelPolicy: AccountLeaseModelPolicy;
   private readonly limitPolicy: AccountLeaseLimitPolicy;
 
+  private readonly rateLimitTracker: RateLimitTrackerService;
+  private readonly accountStore: AccountLeaseAccountStore;
+  private readonly upstream: AccountLeaseUpstream;
+
   constructor(
     @Optional()
+    @Inject(RateLimitTrackerService)
+    rateLimitTrackerOrAccountStore?: RateLimitTrackerService | AccountLeaseAccountStore,
+    @Optional()
     @Inject(ACCOUNT_LEASE_ACCOUNT_STORE)
-    private readonly accountStore: AccountLeaseAccountStore = cloudAccountStoreAdapter,
+    accountStoreOrUpstream?: AccountLeaseAccountStore | AccountLeaseUpstream,
     @Optional()
     @Inject(ACCOUNT_LEASE_UPSTREAM)
-    private readonly upstream: AccountLeaseUpstream = googleAccountLeaseUpstreamAdapter,
+    upstreamArg?: AccountLeaseUpstream,
   ) {
+    if (rateLimitTrackerOrAccountStore && 'isRateLimited' in rateLimitTrackerOrAccountStore) {
+      this.rateLimitTracker = rateLimitTrackerOrAccountStore as RateLimitTrackerService;
+      this.accountStore =
+        (accountStoreOrUpstream as AccountLeaseAccountStore) ?? cloudAccountStoreAdapter;
+      this.upstream = upstreamArg ?? googleAccountLeaseUpstreamAdapter;
+    } else {
+      this.rateLimitTracker = new RateLimitTrackerService();
+      this.accountStore =
+        (rateLimitTrackerOrAccountStore as AccountLeaseAccountStore) ?? cloudAccountStoreAdapter;
+      this.upstream =
+        (accountStoreOrUpstream as AccountLeaseUpstream) ?? googleAccountLeaseUpstreamAdapter;
+    }
+
     this.quotaRefreshPolicy = new AccountLeaseQuotaRefreshPolicy({
       accountStore: this.accountStore,
       upstream: this.upstream,
@@ -93,6 +113,7 @@ export class AccountLeaseService implements OnModuleInit {
       logger: this.logger,
     });
     this.limitPolicy = new AccountLeaseLimitPolicy({
+      rateLimitTracker: this.rateLimitTracker,
       rateLimitCooldownMs: this.rateLimitCooldownMs,
       forbiddenCooldownMs: this.forbiddenCooldownMs,
       resolveAccountId: (accountIdOrEmail) => this.resolveAccountId(accountIdOrEmail),
@@ -109,8 +130,8 @@ export class AccountLeaseService implements OnModuleInit {
     return this.limitPolicy.getAccountCooldowns();
   }
 
-  private get rateLimitTracker(): RateLimitTrackerService {
-    return this.limitPolicy.getRateLimitTracker();
+  public getRateLimitTracker(): RateLimitTrackerService {
+    return this.rateLimitTracker;
   }
 
   private get shadowComparisonCount(): number {

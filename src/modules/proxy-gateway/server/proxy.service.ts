@@ -1,7 +1,10 @@
-import {Inject, Injectable} from '@nestjs/common';
+import {Inject, Injectable, Optional} from '@nestjs/common';
 import {isEmpty, isNil, isNumber, isPlainObject, isString} from 'lodash-es';
 import {AccountLeaseService} from './modules/account-lease/account-lease.service';
 import {GeminiClient} from './modules/gemini/gemini-client.service';
+import {GenerationConstraintsService} from './modules/shared/services/generation-constraints.service';
+import {ProxyRetryService} from './modules/shared/services/proxy-retry.service';
+import {ModelRoutingService} from './modules/shared/services/model-routing.service';
 import {v4 as uuidv4} from 'uuid';
 import {Observable} from 'rxjs';
 import {transformClaudeRequestIn} from '../antigravity/ClaudeRequestMapper';
@@ -55,10 +58,19 @@ type OpenAIOutputProtocol = 'chat-completions' | 'responses';
 export class ProxyService extends BaseProxyService {
 
   constructor(
-    @Inject(AccountLeaseService)  readonly accountLeaseService: AccountLeaseService,
-    @Inject(GeminiClient)  readonly geminiClient: GeminiClient,
+    @Inject(AccountLeaseService) readonly accountLeaseService: AccountLeaseService,
+    @Inject(GeminiClient) readonly geminiClient: GeminiClient,
+    @Optional() @Inject(GenerationConstraintsService) readonly generationConstraintsService?: GenerationConstraintsService,
+    @Optional() @Inject(ProxyRetryService) readonly proxyRetryService?: ProxyRetryService,
+    @Optional() @Inject(ModelRoutingService) readonly customModelRoutingService?: ModelRoutingService,
   ) {
-    super(accountLeaseService, geminiClient)
+    super(
+      accountLeaseService,
+      geminiClient,
+      generationConstraintsService,
+      proxyRetryService,
+      customModelRoutingService,
+    );
   }
 
   // --- Anthropic Handlers ---

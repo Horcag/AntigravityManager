@@ -173,6 +173,17 @@ export function isNestServerRunning(): boolean {
   return app !== null;
 }
 
+export function getNestService<T>(serviceToken: any): T | null {
+  if (!app) {
+    return null;
+  }
+  try {
+    return app.get<T>(serviceToken);
+  } catch {
+    return null;
+  }
+}
+
 export async function reloadNestServerAccountLeaseCache(): Promise<boolean> {
   if (!app) {
     return false;

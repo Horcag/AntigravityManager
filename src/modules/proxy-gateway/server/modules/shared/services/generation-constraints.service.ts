@@ -1,6 +1,8 @@
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { isNumber, isString } from 'lodash-es';
 import { getMaxOutputTokens, getThinkingBudget } from '../../../../antigravity/ModelSpecs';
 import type { GeminiInternalRequest } from '../../../../antigravity/types';
+import { AccountLeaseService } from '../../account-lease/account-lease.service';
 
 export interface ProxyModelCapabilityReader {
   getModelOutputLimitForAccount(accountId: string, modelName: string): number | undefined;
@@ -13,8 +15,13 @@ export interface RegisteredGenerationConstraints {
   includeThoughts: boolean;
 }
 
+@Injectable()
 export class GenerationConstraintsService {
-  constructor(private readonly modelCapabilities: ProxyModelCapabilityReader) {}
+  constructor(
+    @Optional()
+    @Inject(AccountLeaseService)
+    private readonly modelCapabilities: ProxyModelCapabilityReader,
+  ) {}
 
   applyInternalGenerationConstraints(
     body: GeminiInternalRequest,

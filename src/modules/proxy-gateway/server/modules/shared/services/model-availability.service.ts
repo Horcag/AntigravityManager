@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { CloudAccountSettingsStore } from '@/modules/cloud-account/persistence/cloud-account-settings-store';
 import { logger } from '@/shared/logging/logger';
@@ -56,6 +57,7 @@ function shouldRetainEntry(entry: ProxyModelAvailability, now: number): boolean 
   return entry.unavailableUntil > now || entry.detectedAt + RECENT_FAILURE_DISPLAY_MS > now;
 }
 
+@Injectable()
 export class ModelAvailabilityService {
   private readonly entries = new Map<string, ProxyModelAvailability>();
   private isHydrated = false;
@@ -209,3 +211,45 @@ const persistentAvailabilityAdapter: ProxyModelAvailabilityPersistence | undefin
 export const proxyModelAvailabilityStore = new ModelAvailabilityService(
   persistentAvailabilityAdapter,
 );
+
+export function getPersistedModelAvailabilitySnapshot(): ProxyModelAvailability[] {
+  if (!persistentAvailabilityAdapter) {
+    return [];
+  }
+  try {
+    const parsed = ProxyModelAvailabilityListSchema.safeParse(
+      persistentAvailabilityAdapter.load(),
+    );
+    if (!parsed.success) {
+      return [];
+    }
+    const now = Date.now();
+    return parsed.data.filter((entry) => shouldRetainEntry(entry, now));
+  } catch {
+    return [];
+  }
+}
+
+export function clearPersistedCapabilityFailures(accountId: string): void {
+  if (!persistentAvailabilityAdapter) {
+    return;
+  }
+  try {
+    const parsed = ProxyModelAvailabilityListSchema.safeParse(
+      persistentAvailabilityAdapter.load(),
+    );
+    if (!parsed.success) {
+      return;
+    }
+    const filtered = parsed.data.filter(
+      (entry) =>
+        !(
+          entry.accountId === accountId &&
+          (entry.reason === 'model_not_supported' || entry.reason === 'model_forbidden')
+        ),
+    );
+    persistentAvailabilityAdapter.save(filtered);
+  } catch {
+    // silence error
+  }
+}
