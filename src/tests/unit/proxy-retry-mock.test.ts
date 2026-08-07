@@ -1594,7 +1594,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
 
     const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
     expect(output).toBe(
-      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"quota exhausted"}}\n\n',
+      'event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"quota exhausted"}}\n\n',
     );
     expect(output).not.toContain('message_start');
     expect(output).not.toContain('message_delta');
