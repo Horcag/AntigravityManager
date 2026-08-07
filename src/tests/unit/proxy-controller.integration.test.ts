@@ -1473,8 +1473,10 @@ describe('ProxyController Integration', () => {
   it.each([
     [400, 'invalid_request_error'],
     [401, 'authentication_error'],
+    [402, 'billing_error'],
     [403, 'permission_error'],
     [404, 'not_found_error'],
+    [409, 'conflict_error'],
     [413, 'request_too_large'],
     [429, 'rate_limit_error'],
     [500, 'api_error'],
@@ -1501,6 +1503,12 @@ describe('ProxyController Integration', () => {
         )
         .mockRejectedValueOnce(
           new UpstreamRequestError({ message: 'upstream timeout', status: 504 }),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamRequestError({ message: 'upstream billing issue', status: 402 }),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamRequestError({ message: 'upstream resource conflict', status: 409 }),
         ),
     };
     const app = await createHttpApp(proxyService);
@@ -1526,6 +1534,20 @@ describe('ProxyController Integration', () => {
       expect(timedOut.json()).toEqual({
         type: 'error',
         error: { type: 'timeout_error', message: 'upstream timeout' },
+      });
+
+      const billingFailure = await server.inject(request);
+      expect(billingFailure.statusCode).toBe(402);
+      expect(billingFailure.json()).toEqual({
+        type: 'error',
+        error: { type: 'billing_error', message: 'upstream billing issue' },
+      });
+
+      const conflictFailure = await server.inject(request);
+      expect(conflictFailure.statusCode).toBe(409);
+      expect(conflictFailure.json()).toEqual({
+        type: 'error',
+        error: { type: 'conflict_error', message: 'upstream resource conflict' },
       });
     } finally {
       await app.close();

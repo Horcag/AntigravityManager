@@ -21,6 +21,8 @@ type OpenAIErrorType =
 type AnthropicErrorType =
   | 'api_error'
   | 'authentication_error'
+  | 'billing_error'
+  | 'conflict_error'
   | 'invalid_request_error'
   | 'not_found_error'
   | 'overloaded_error'
@@ -138,11 +140,17 @@ function mapAnthropicErrorType(status: number): AnthropicErrorType {
   if (status === HttpStatus.UNAUTHORIZED) {
     return 'authentication_error';
   }
+  if (status === HttpStatus.PAYMENT_REQUIRED) {
+    return 'billing_error';
+  }
   if (status === HttpStatus.FORBIDDEN) {
     return 'permission_error';
   }
   if (status === HttpStatus.NOT_FOUND) {
     return 'not_found_error';
+  }
+  if (status === HttpStatus.CONFLICT) {
+    return 'conflict_error';
   }
   if (status === HttpStatus.PAYLOAD_TOO_LARGE) {
     return 'request_too_large';
