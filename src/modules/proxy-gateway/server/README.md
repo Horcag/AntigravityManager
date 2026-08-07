@@ -159,3 +159,25 @@ npm run lint
 # 4. Process Boot Verification
 # Ensure NestJS dependency injection resolves correctly during Electron main process launch and route handlers register without errors
 ```
+
+---
+
+## 7. Native Gemini API Support & Honest Limitations
+
+AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antigravity's internal Google CloudCode transport (`v1internal`).
+
+### Supported Native Capabilities
+- `POST /v1beta/models/{model}:generateContent`: Non-streaming generation preserving candidates, safety ratings, citations, grounding metadata, logprobs, finish reasons, model versions, response IDs, and prompt feedback allow-by-default.
+- `POST /v1beta/models/{model}:streamGenerateContent`: Standard SSE streaming emitting bare `GenerateContentResponse` objects (`data: <json>\n\n`) unwrapped from private transport envelopes.
+- `GET /v1beta/models` & `GET /v1beta/models/{model}`: Dynamic model discovery advertising truthful supported generation methods (`generateContent`, `streamGenerateContent`).
+- Transport of `contents` (including inline `image/png` and `audio/wav`), `generationConfig`, `tools` declarations, `toolConfig`, `safetySettings`, and text `systemInstruction`.
+- Tool declarations (`tools`), tool configuration (`toolConfig`), and function call/response parts (`functionCall`, `functionResponse`) are transported through the adapter; cross-protocol tool IDs, signature ownership, and full tool lifecycle management remain #18.
+
+### Explicit Provider Limitations
+- **Media & File Support**: No native Gemini File API routes (`files/*`) or remote file URI resolution exist. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
+- **CountTokens**: Returns HTTP 501 `UNIMPLEMENTED` with a Google-shaped error envelope. Local token estimation is not performed.
+- **Embeddings & Batches**: `embedContent`, `batchEmbedContents`, and `batchGenerateContent` return HTTP 501 `UNIMPLEMENTED`.
+- **Public Context Cache CRUD**: Client `cachedContent` references are rejected with HTTP 501 `UNIMPLEMENTED`. Automatic explicit context caching runs internally on Vertex AI without exposing public cache resource APIs (`cachedContents/*`).
+- **Live / Bidi & Interactions**: Gemini Live WebSocket (Bidi) and Interactions APIs are unavailable under this adapter.
+- **Client Tier & Store Parameters**: Top-level `serviceTier` and `store` fields are explicitly rejected with HTTP 501 `UNIMPLEMENTED`.
+- **Unsupported Resource Families**: All unsupported Gemini resource families (`files`, `tunedModels`, `corpora`, `cachedContents`, `batchJobs`, `operations`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`.
