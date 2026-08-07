@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { isEmpty, isPlainObject, isString } from 'lodash-es';
+import { isPlainObject, isString } from 'lodash-es';
 import { mapClaudeModelToGemini, normalizeGeminiModelAlias } from './ModelMapping';
 import { getMaxOutputTokens, getThinkingBudget } from './ModelSpecs';
 import { cleanJsonSchema, normalizeObjectJsonSchema } from './JsonSchemaUtils';
