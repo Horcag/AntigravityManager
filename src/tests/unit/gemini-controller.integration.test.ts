@@ -22,9 +22,11 @@ describe('GeminiController Integration', () => {
     const controller = new GeminiController(proxyService as any, accountLeaseService as any);
     const replyList = createReplyMock();
     const replyGet = createReplyMock();
+    const replyUnknown = createReplyMock();
 
     controller.listModels(replyList as any);
-    controller.getModel('gemini-2.5-flash', replyGet as any);
+    controller.getModel('gemini-3-flash', replyGet as any);
+    controller.getModel('unknown-model', replyUnknown as any);
 
     expect(replyList.status).toHaveBeenCalledWith(200);
     expect(replyList.send).toHaveBeenCalledWith(
@@ -58,8 +60,17 @@ describe('GeminiController Integration', () => {
     expect(replyGet.status).toHaveBeenCalledWith(200);
     expect(replyGet.send).toHaveBeenCalledWith(
       expect.objectContaining({
-        name: 'models/gemini-2.5-flash',
-        displayName: 'gemini-2.5-flash',
+        name: 'models/gemini-3-flash',
+        displayName: 'gemini-3-flash',
+      }),
+    );
+    expect(replyUnknown.status).toHaveBeenCalledWith(404);
+    expect(replyUnknown.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({
+          status: 'NOT_FOUND',
+          message: 'Model not found: models/unknown-model',
+        }),
       }),
     );
   });
