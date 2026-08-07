@@ -2892,6 +2892,82 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
   });
 
+  it.each([
+    [{ type: 'auto' }, { mode: 'auto' }],
+    [{ type: 'any' }, { mode: 'any' }],
+    [{ type: 'none' }, { mode: 'none' }],
+    [
+      { type: 'tool', name: 'lookup' },
+      { mode: 'tool', name: 'lookup' },
+    ],
+  ])(
+    'passes the valid Anthropic tool choice %o through the assembled messages route',
+    async (toolChoice, _expected) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = {
+        handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+      };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { authorization: 'Bearer test-key' },
+          payload: {
+            model: 'claude-sonnet-4-5',
+            messages: [{ role: 'user', content: 'hello' }],
+            tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+            tool_choice: toolChoice,
+          },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(proxyService.handleAnthropicMessages).toHaveBeenCalledWith(
+          expect.objectContaining({ tool_choice: expect.objectContaining(toolChoice) }),
+        );
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each([
+    { type: 'tool', name: 'missing' },
+    { type: 'tool' },
+    { type: 'required' },
+    { type: 'auto', disable_parallel_tool_use: true },
+    { type: 'auto', disable_parallel_tool_use: 'yes' },
+  ])(
+    'rejects invalid Anthropic tool choice %o before the assembled messages upstream call',
+    async (toolChoice) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = { handleAnthropicMessages: vi.fn() };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { authorization: 'Bearer test-key' },
+          payload: {
+            model: 'claude-sonnet-4-5',
+            messages: [{ role: 'user', content: 'hello' }],
+            tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+            tool_choice: toolChoice,
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it('rejects unsupported chat options through the assembled pipeline without any upstream call', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

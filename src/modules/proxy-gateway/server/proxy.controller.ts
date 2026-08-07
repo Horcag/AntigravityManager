@@ -1291,6 +1291,7 @@ export class ProxyController {
       this.validateAnthropicContent(message.content);
     }
     this.validateAnthropicTools(body.tools);
+    this.validateAnthropicToolChoice(body.tool_choice, body.tools);
     this.validateAnthropicSystem(body.system);
     this.validateAnthropicStopSequences(body.stop_sequences);
   }
@@ -1365,6 +1366,56 @@ export class ProxyController {
       )
     ) {
       throw this.invalidRequest('tools must contain named tool declarations', 'tools');
+    }
+  }
+
+  private validateAnthropicToolChoice(
+    toolChoice: AnthropicChatRequest['tool_choice'],
+    tools: AnthropicChatRequest['tools'],
+  ): void {
+    if (toolChoice === undefined) {
+      return;
+    }
+    if (!isPlainObject(toolChoice) || !isString(toolChoice.type)) {
+      throw this.invalidRequest(
+        'tool_choice must be an Anthropic tool choice object',
+        'tool_choice',
+      );
+    }
+    if (
+      toolChoice.disable_parallel_tool_use !== undefined &&
+      typeof toolChoice.disable_parallel_tool_use !== 'boolean'
+    ) {
+      throw this.invalidRequest(
+        'tool_choice.disable_parallel_tool_use must be a boolean',
+        'tool_choice.disable_parallel_tool_use',
+      );
+    }
+    if (toolChoice.disable_parallel_tool_use === true) {
+      throw this.invalidRequest(
+        'tool_choice.disable_parallel_tool_use is not supported by this proxy.',
+        'tool_choice.disable_parallel_tool_use',
+        'unsupported_option',
+      );
+    }
+    if (toolChoice.type === 'auto' || toolChoice.type === 'any' || toolChoice.type === 'none') {
+      return;
+    }
+    if (
+      toolChoice.type !== 'tool' ||
+      !isString(toolChoice.name) ||
+      isEmpty(toolChoice.name.trim())
+    ) {
+      throw this.invalidRequest(
+        'tool_choice must select auto, any, none, or a named tool',
+        'tool_choice',
+      );
+    }
+    if (!tools?.some((tool) => tool.name === toolChoice.name.trim())) {
+      throw this.invalidRequest(
+        `tool_choice tool "${toolChoice.name}" is not among the provided tools`,
+        'tool_choice',
+      );
     }
   }
 

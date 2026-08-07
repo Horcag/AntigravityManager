@@ -547,6 +547,96 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
+  it('uses the requested model and zero usage in Anthropic message_start when the first chunk omits them', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream, 'claude-sonnet-4-5').subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}\n\n'),
+    );
+    stream.emit('end');
+    await completed;
+
+    const messageStart = JSON.parse(
+      chunks.find((chunk) => chunk.includes('event: message_start'))!.split('data: ')[1],
+    );
+    expect(messageStart.message).toMatchObject({
+      model: 'claude-sonnet-4-5',
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+  });
+
+  it.each([
+    [{ type: 'auto' }, { mode: 'AUTO' }],
+    [{ type: 'any' }, { mode: 'ANY' }],
+    [{ type: 'none' }, { mode: 'NONE' }],
+    [
+      { type: 'tool', name: 'lookup' },
+      { mode: 'ANY', allowedFunctionNames: ['lookup'] },
+    ],
+  ])(
+    'maps Anthropic tool choice %o into the upstream function configuration',
+    async (toolChoice, expected) => {
+      const service = new TestableProxyService();
+      mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+      mockGeminiClient.generateInternal.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      });
+
+      await service.handleAnthropicMessages({
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+        tool_choice: toolChoice,
+      } as any);
+
+      expect(mockGeminiClient.generateInternal.mock.calls[0][0].request.toolConfig).toEqual({
+        functionCallingConfig: expected,
+      });
+    },
+  );
+
+  it('uses the caller-requested model when direct and stream-aggregated Anthropic responses omit modelVersion', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+    mockGeminiClient.generateInternal.mockResolvedValueOnce({
+      candidates: [{ content: { parts: [{ text: 'direct' }] }, finishReason: 'STOP' }],
+    });
+
+    const direct = await service.handleAnthropicMessages({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'hello' }],
+    } as any);
+    expect((direct as any).model).toBe('claude-sonnet-4-5');
+
+    const stream = new EventEmitter();
+    mockGeminiClient.generateInternal.mockResolvedValueOnce({ candidates: [] });
+    mockGeminiClient.streamGenerateInternal.mockResolvedValueOnce(stream);
+    const fallback = service.handleAnthropicMessages({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'hello' }],
+    } as any);
+    await vi.waitFor(() => expect(mockGeminiClient.streamGenerateInternal).toHaveBeenCalledOnce());
+    stream.emit(
+      'data',
+      Buffer.from(
+        'data: {"candidates":[{"content":{"parts":[{"text":"fallback"}]},"finishReason":"STOP"}]}\n\n',
+      ),
+    );
+    stream.emit('end');
+
+    expect(((await fallback) as any).model).toBe('claude-sonnet-4-5');
+  });
+
   it('emits an Anthropic response from a valid final SSE frame without a trailing newline', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();

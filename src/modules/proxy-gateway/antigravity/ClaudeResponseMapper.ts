@@ -25,7 +25,10 @@ class NonStreamingProcessor {
   /** Signature seen earlier in THIS response, used only for tool calls of this same response. */
   private responseSignature: string | null = null;
 
-  constructor(private readonly signatureContext?: SignatureContext) {}
+  constructor(
+    private readonly signatureContext?: SignatureContext,
+    private readonly fallbackModel?: string,
+  ) {}
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
     const candidate = geminiResponse.candidates?.[0];
@@ -248,7 +251,7 @@ class NonStreamingProcessor {
       id: geminiResponse.responseId || `msg_${uuidv4()}`,
       type: 'message',
       role: 'assistant',
-      model: geminiResponse.modelVersion || '',
+      model: geminiResponse.modelVersion || this.fallbackModel || '',
       content: this.contentBlocks,
       stop_reason: stopReason,
       // Gemini does not identify a matched stop sequence, so Anthropic responses must not guess.
@@ -289,7 +292,8 @@ class NonStreamingProcessor {
 export function transformResponse(
   geminiResponse: GeminiResponse,
   signatureContext?: SignatureContext,
+  fallbackModel?: string,
 ): ClaudeResponse {
-  const processor = new NonStreamingProcessor(signatureContext);
+  const processor = new NonStreamingProcessor(signatureContext, fallbackModel);
   return processor.process(geminiResponse);
 }

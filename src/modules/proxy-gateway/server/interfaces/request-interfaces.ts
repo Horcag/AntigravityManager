@@ -111,6 +111,7 @@ export interface AnthropicChatRequest {
   system?: string | AnthropicSystemBlock[];
   max_tokens?: number;
   tools?: AnthropicTool[];
+  tool_choice?: AnthropicToolChoice;
   thinking?: AnthropicThinkingConfig;
   metadata?: Record<string, unknown>;
   stop_sequences?: string[];
@@ -119,6 +120,10 @@ export interface AnthropicChatRequest {
   top_p?: number;
   top_k?: number;
 }
+
+export type AnthropicToolChoice =
+  | { type: 'auto' | 'any' | 'none'; disable_parallel_tool_use?: boolean }
+  | { type: 'tool'; name: string; disable_parallel_tool_use?: boolean };
 
 export interface AnthropicTool {
   name: string;

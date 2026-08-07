@@ -53,7 +53,7 @@ export class StreamingState {
 
   private parseErrorCount: number = 0;
 
-  constructor() {}
+  constructor(private readonly fallbackModel: string = '') {}
 
   public emit(eventType: string, data: any): string {
     return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -63,21 +63,19 @@ export class StreamingState {
     if (this.messageStartSent) return '';
 
     const usageMeta = rawJson.usageMetadata;
-    const usage: Usage | undefined = usageMeta
-      ? {
-          input_tokens: usageMeta.promptTokenCount || 0,
-          output_tokens:
-            tokenCountOrZero(usageMeta.candidatesTokenCount) +
-            tokenCountOrZero(usageMeta.thoughtsTokenCount),
-        }
-      : undefined;
+    const usage: Usage = {
+      input_tokens: tokenCountOrZero(usageMeta?.promptTokenCount),
+      output_tokens:
+        tokenCountOrZero(usageMeta?.candidatesTokenCount) +
+        tokenCountOrZero(usageMeta?.thoughtsTokenCount),
+    };
 
     const message = {
       id: rawJson.responseId || 'msg_unknown',
       type: 'message',
       role: 'assistant',
       content: [],
-      model: rawJson.modelVersion || '',
+      model: rawJson.modelVersion || this.fallbackModel,
       stop_reason: null,
       stop_sequence: null,
       usage: usage,

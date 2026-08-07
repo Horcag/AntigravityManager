@@ -251,7 +251,9 @@ export class ProxyService {
             token.token.upstream_proxy_url,
             extraHeaders,
           );
-          return this.toAnthropicChatResponse(transformResponse(response, signatureContext));
+          return this.toAnthropicChatResponse(
+            transformResponse(response, signatureContext, request.model),
+          );
         }
       } catch (error) {
         if (error instanceof Error && this.isProjectContextError(error.message)) {
@@ -287,7 +289,9 @@ export class ProxyService {
                 token.token.upstream_proxy_url,
                 extraHeaders,
               );
-              return this.toAnthropicChatResponse(transformResponse(response, signatureContext));
+              return this.toAnthropicChatResponse(
+                transformResponse(response, signatureContext, request.model),
+              );
             }
           } catch (fallbackErr) {
             lastError = fallbackErr;
@@ -335,7 +339,7 @@ export class ProxyService {
                 extraHeaders,
               );
               const transformed = this.toAnthropicChatResponse(
-                transformResponse(response, downgradedSignatureContext),
+                transformResponse(response, downgradedSignatureContext, request.model),
               );
               return {
                 ...transformed,
@@ -359,14 +363,14 @@ export class ProxyService {
 
   private processAnthropicInternalStream(
     upstreamStream: NodeJS.ReadableStream,
-    _model: string,
+    model: string,
     signatureContext?: SignatureContext,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      const state = new StreamingState();
+      const state = new StreamingState(model);
       const processor = new PartProcessor(state, signatureContext);
 
       let lastFinishReason: string | undefined;
@@ -2160,6 +2164,7 @@ export class ProxyService {
         input_schema: tool.input_schema,
         type: tool.type,
       })),
+      tool_choice: this.convertAnthropicToolChoice(request.tool_choice),
       stream: request.stream,
       max_tokens: request.max_tokens,
       stop_sequences: request.stop_sequences,
@@ -2169,6 +2174,24 @@ export class ProxyService {
       thinking: request.thinking,
       metadata: request.metadata,
     };
+  }
+
+  private convertAnthropicToolChoice(
+    toolChoice: AnthropicChatRequest['tool_choice'],
+  ): ClaudeRequest['tool_choice'] {
+    if (!toolChoice || toolChoice.type === 'auto') {
+      return toolChoice ? 'auto' : undefined;
+    }
+    if (toolChoice.type === 'any') {
+      return 'required';
+    }
+    if (toolChoice.type === 'none') {
+      return 'none';
+    }
+    if (toolChoice.type === 'tool') {
+      return { type: 'tool', name: toolChoice.name };
+    }
+    return undefined;
   }
 
   private toAnthropicChatResponse(response: ClaudeResponse): AnthropicChatResponse {
