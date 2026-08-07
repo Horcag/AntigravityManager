@@ -36,6 +36,7 @@ export interface GeminiResponsesGroundingMetadata {
 
 interface ResponsesMessageOutputItem {
   content: Array<{
+    annotations: unknown[];
     text: string;
     type: 'output_text';
   }>;
@@ -44,6 +45,20 @@ interface ResponsesMessageOutputItem {
   role: 'assistant';
   status: 'completed';
   type: 'message';
+}
+
+interface ResponsesReasoningOutputItem {
+  content: Array<{
+    text: string;
+    type: 'reasoning_text';
+  }>;
+  id: string;
+  status: 'completed';
+  summary: Array<{
+    text: string;
+    type: 'summary_text';
+  }>;
+  type: 'reasoning';
 }
 
 interface ResponsesFunctionCallOutputItem {
@@ -68,11 +83,19 @@ interface ResponsesCustomToolCallOutputItem {
 
 type ResponsesOutputItem =
   | ResponsesMessageOutputItem
+  | ResponsesReasoningOutputItem
   | ResponsesFunctionCallOutputItem
   | ResponsesCustomToolCallOutputItem;
 
 interface ActiveMessageOutput {
   item: ResponsesMessageOutputItem;
+  itemId: string;
+  outputIndex: number;
+  text: string;
+}
+
+interface ActiveReasoningOutput {
+  item: ResponsesReasoningOutputItem;
   itemId: string;
   outputIndex: number;
   text: string;
@@ -93,8 +116,9 @@ export class OpenAIResponsesStreamingMapper {
   private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private readonly outputItems: ResponsesOutputItem[] = [];
   private activeMessage: ActiveMessageOutput | null = null;
-  private activeThought: ActiveMessageOutput | null = null;
+  private activeThought: ActiveReasoningOutput | null = null;
   private completed = false;
+  private readonly createdAt = Math.floor(Date.now() / 1000);
   private hasSeenRegularText = false;
   private hasToolCall = false;
   private messageCounter = 0;
@@ -108,7 +132,11 @@ export class OpenAIResponsesStreamingMapper {
   public createResponseCreatedEvent(): string {
     return this.serialize({
       response: {
+        background: false,
+        created_at: this.createdAt,
+        error: null,
         id: this.options.responseId,
+        incomplete_details: null,
         model: this.options.model,
         object: 'response',
         output: [],
@@ -121,7 +149,11 @@ export class OpenAIResponsesStreamingMapper {
   public createResponseInProgressEvent(): string {
     return this.serialize({
       response: {
+        background: false,
+        created_at: this.createdAt,
+        error: null,
         id: this.options.responseId,
+        incomplete_details: null,
         model: this.options.model,
         object: 'response',
         output: [],
@@ -190,12 +222,14 @@ export class OpenAIResponsesStreamingMapper {
     this.usage = usage;
   }
 
-  public complete(): string[] {
+  public complete(finishReason?: string | null): string[] {
     if (this.completed) {
       return [];
     }
 
     this.completed = true;
+    const incompleteReason = toIncompleteReason(finishReason);
+    const status = incompleteReason ? 'incomplete' : 'completed';
     const events = [
       ...this.closeThought(),
       ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer'),
@@ -204,34 +238,69 @@ export class OpenAIResponsesStreamingMapper {
     events.push(
       this.serialize({
         response: {
+          background: false,
+          created_at: this.createdAt,
+          error: null,
           id: this.options.responseId,
+          incomplete_details: incompleteReason ? { reason: incompleteReason } : null,
           model: this.options.model,
           object: 'response',
           output: this.outputItems,
-          status: 'completed',
+          status,
           usage: this.usage,
         },
-        type: 'response.completed',
+        type: incompleteReason ? 'response.incomplete' : 'response.completed',
       }),
     );
     return events;
   }
 
-  private startMessage(kind: 'message' | 'thought'): string[] {
-    const existing = kind === 'thought' ? this.activeThought : this.activeMessage;
-    if (existing) {
+  public fail(error: unknown): string[] {
+    if (this.completed) {
+      return [];
+    }
+
+    this.completed = true;
+    const message = error instanceof Error ? error.message : String(error);
+    const events = [
+      ...this.closeThought(),
+      ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer'),
+    ];
+    events.push(
+      this.serialize({
+        response: {
+          background: false,
+          created_at: this.createdAt,
+          error: {
+            code: 'server_error',
+            message,
+            type: 'server_error',
+          },
+          id: this.options.responseId,
+          incomplete_details: null,
+          model: this.options.model,
+          object: 'response',
+          output: this.outputItems,
+          status: 'failed',
+          usage: this.usage,
+        },
+        type: 'response.failed',
+      }),
+    );
+    return events;
+  }
+
+  private startMessage(): string[] {
+    if (this.activeMessage) {
       return [];
     }
 
     const outputIndex = this.nextOutputIndex;
     this.nextOutputIndex += 1;
-    const itemId =
-      kind === 'thought'
-        ? `msg_thought_${this.options.responseId}_${this.messageCounter}`
-        : `msg_${this.options.responseId}_${this.messageCounter}`;
+    const itemId = `msg_${this.options.responseId}_${this.messageCounter}`;
     this.messageCounter += 1;
     const item: ResponsesMessageOutputItem = {
-      content: [{ text: '', type: 'output_text' }],
+      content: [{ annotations: [], text: '', type: 'output_text' }],
       id: itemId,
       phase: 'commentary',
       role: 'assistant',
@@ -244,11 +313,7 @@ export class OpenAIResponsesStreamingMapper {
       outputIndex,
       text: '',
     };
-    if (kind === 'thought') {
-      this.activeThought = activeOutput;
-    } else {
-      this.activeMessage = activeOutput;
-    }
+    this.activeMessage = activeOutput;
     this.outputItems.push(item);
 
     return [
@@ -269,10 +334,45 @@ export class OpenAIResponsesStreamingMapper {
         item_id: itemId,
         output_index: outputIndex,
         part: {
+          annotations: [],
           text: '',
           type: 'output_text',
         },
         type: 'response.content_part.added',
+      }),
+    ];
+  }
+
+  private startReasoning(): string[] {
+    if (this.activeThought) {
+      return [];
+    }
+
+    const outputIndex = this.nextOutputIndex;
+    this.nextOutputIndex += 1;
+    const itemId = `rs_${this.options.responseId}_${this.messageCounter}`;
+    this.messageCounter += 1;
+    const item: ResponsesReasoningOutputItem = {
+      content: [{ text: '', type: 'reasoning_text' }],
+      id: itemId,
+      status: 'completed',
+      summary: [{ text: '', type: 'summary_text' }],
+      type: 'reasoning',
+    };
+    this.activeThought = { item, itemId, outputIndex, text: '' };
+    this.outputItems.push(item);
+
+    return [
+      this.serialize({
+        item: {
+          content: [],
+          id: itemId,
+          status: 'in_progress',
+          summary: [],
+          type: 'reasoning',
+        },
+        output_index: outputIndex,
+        type: 'response.output_item.added',
       }),
     ];
   }
@@ -283,7 +383,22 @@ export class OpenAIResponsesStreamingMapper {
       return [];
     }
     this.activeThought = null;
-    return this.finishMessage(thought, 'commentary');
+    thought.item.content = [{ text: thought.text, type: 'reasoning_text' }];
+    thought.item.summary = [{ text: thought.text, type: 'summary_text' }];
+    return [
+      this.serialize({
+        content_index: 0,
+        item_id: thought.itemId,
+        output_index: thought.outputIndex,
+        text: thought.text,
+        type: 'response.reasoning_text.done',
+      }),
+      this.serialize({
+        item: thought.item,
+        output_index: thought.outputIndex,
+        type: 'response.output_item.done',
+      }),
+    ];
   }
 
   private closeMessage(phase: 'commentary' | 'final_answer'): string[] {
@@ -299,7 +414,7 @@ export class OpenAIResponsesStreamingMapper {
     message: ActiveMessageOutput,
     phase: 'commentary' | 'final_answer',
   ): string[] {
-    message.item.content = [{ text: message.text, type: 'output_text' }];
+    message.item.content = [{ annotations: [], text: message.text, type: 'output_text' }];
     message.item.phase = phase;
     return [
       this.serialize({
@@ -314,6 +429,7 @@ export class OpenAIResponsesStreamingMapper {
         item_id: message.itemId,
         output_index: message.outputIndex,
         part: {
+          annotations: [],
           text: message.text,
           type: 'output_text',
         },
@@ -478,7 +594,7 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private processText(text: string): string[] {
-    const events = [...this.closeThought(), ...this.startMessage('message')];
+    const events = [...this.closeThought(), ...this.startMessage()];
     const message = this.activeMessage;
     if (!message) {
       throw new Error('Responses text item failed to start');
@@ -510,7 +626,7 @@ export class OpenAIResponsesStreamingMapper {
       return [];
     }
 
-    const events = this.startMessage('thought');
+    const events = this.startReasoning();
     const thought = this.activeThought;
     if (!thought) {
       throw new Error('Responses thought item failed to start');
@@ -522,7 +638,7 @@ export class OpenAIResponsesStreamingMapper {
         delta: cleanText,
         item_id: thought.itemId,
         output_index: thought.outputIndex,
-        type: 'response.output_text.delta',
+        type: 'response.reasoning_text.delta',
       }),
     );
     return events;
@@ -557,4 +673,22 @@ export class OpenAIResponsesStreamingMapper {
     this.sequenceNumber += 1;
     return `event: ${type}\ndata: ${JSON.stringify(sequencedEvent)}\n\n`;
   }
+}
+
+function toIncompleteReason(finishReason: string | null | undefined): string | null {
+  const normalized = finishReason?.toUpperCase();
+  if (normalized === 'MAX_TOKENS' || normalized === 'LENGTH') {
+    return 'max_output_tokens';
+  }
+  if (
+    normalized === 'CONTENT_FILTER' ||
+    normalized === 'SAFETY' ||
+    normalized === 'RECITATION' ||
+    normalized === 'BLOCKLIST' ||
+    normalized === 'PROHIBITED_CONTENT' ||
+    normalized === 'SPII'
+  ) {
+    return 'content_filter';
+  }
+  return null;
 }

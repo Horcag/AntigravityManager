@@ -26,6 +26,7 @@ import {
   type GeminiResponsesStreamPart,
   OpenAIResponsesStreamingMapper,
 } from '../antigravity/OpenAIResponsesStreamingMapper';
+import { toOpenAIResponsesId } from '../antigravity/OpenAIResponsesResponseMapper';
 import {
   ClaudeRequest,
   ClaudeResponse,
@@ -908,7 +909,7 @@ export class ProxyService extends BaseProxyService {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
-      let completed = false;
+      let settled = false;
       const mapper = new OpenAIResponsesStreamingMapper({
         clientToolNames,
         model,
@@ -916,6 +917,7 @@ export class ProxyService extends BaseProxyService {
         signatureState,
       });
       let heartbeatTimer: NodeJS.Timeout | undefined;
+      let idleTimer: { clear(): void; dispose(): void; reset(): void };
 
       const clearHeartbeat = (): void => {
         if (heartbeatTimer) {
@@ -924,122 +926,140 @@ export class ProxyService extends BaseProxyService {
         }
       };
 
-      const complete = (): void => {
-        if (completed) {
+      const complete = (finishReason?: string): void => {
+        if (settled) {
           return;
         }
-        completed = true;
+        settled = true;
+        idleTimer.clear();
         clearHeartbeat();
-        for (const event of mapper.complete()) {
+        for (const event of mapper.complete(finishReason)) {
           subscriber.next(event);
         }
         subscriber.complete();
       };
 
+      const fail = (error: unknown): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        idleTimer.clear();
+        clearHeartbeat();
+        for (const event of mapper.fail(error)) {
+          subscriber.next(event);
+        }
+        subscriber.complete();
+      };
+
+      const processLine = (line: string): void => {
+        if (settled) {
+          return;
+        }
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) {
+          return;
+        }
+
+        const dataString = trimmed.slice(6);
+        try {
+          const decoded = decodeInternalSseData(dataString);
+          if (decoded.kind !== 'response') {
+            return;
+          }
+
+          const responsePayload = decoded.response;
+          const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
+          if (usageMetadata) {
+            mapper.setUsage(
+              toOpenAIResponsesUsage(toOpenAIUsageFromGeminiUsageMetadata(usageMetadata)),
+            );
+          }
+          const candidates = responsePayload.candidates;
+          if (!Array.isArray(candidates)) {
+            return;
+          }
+
+          const candidate = this.toUnknownRecord(candidates[0]);
+          const content = this.toUnknownRecord(candidate?.content);
+          const parts = content?.parts;
+          if (Array.isArray(parts)) {
+            for (const part of parts) {
+              const normalizedPart = this.toResponsesStreamPart(part);
+              if (!normalizedPart) {
+                continue;
+              }
+              for (const event of mapper.processPart(normalizedPart)) {
+                subscriber.next(event);
+              }
+            }
+          }
+
+          const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
+          if (grounding) {
+            for (const event of mapper.processGrounding(grounding)) {
+              subscriber.next(event);
+            }
+          }
+
+          if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
+            complete(candidate.finishReason);
+          }
+        } catch (error) {
+          if (
+            error instanceof ToolCallIdConflictError ||
+            error instanceof InvalidFunctionCallArgumentsError
+          ) {
+            (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+            fail(error);
+          }
+          // Ignore malformed upstream keepalive/data lines that are not contract failures.
+        }
+      };
+
       subscriber.next(mapper.createResponseCreatedEvent());
       subscriber.next(mapper.createResponseInProgressEvent());
       heartbeatTimer = setInterval(() => {
-        if (!completed) {
+        if (!settled) {
           subscriber.next(': ping\n\n');
         }
       }, 15_000);
-      const idleTimer = this.createStreamIdleTimer(
-        upstreamStream,
-        'OpenAI-Responses-SSE',
-        complete,
+      idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-Responses-SSE', () =>
+        fail(new Error('OpenAI Responses upstream stream idle timeout')),
       );
       idleTimer.reset();
 
       upstreamStream.on('data', (chunk: Buffer) => {
-        if (completed) {
+        if (settled) {
           return;
         }
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) {
-            continue;
-          }
-
-          const dataString = trimmed.slice(6);
-
-          try {
-            const decoded = decodeInternalSseData(dataString);
-            if (decoded.kind !== 'response') {
-              continue;
-            }
-
-            const responsePayload = decoded.response;
-            const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
-            if (usageMetadata) {
-              mapper.setUsage(
-                toOpenAIResponsesUsage(toOpenAIUsageFromGeminiUsageMetadata(usageMetadata)),
-              );
-            }
-            const candidates = responsePayload.candidates;
-            if (!Array.isArray(candidates)) {
-              continue;
-            }
-
-            const candidate = this.toUnknownRecord(candidates[0]);
-            const content = this.toUnknownRecord(candidate?.content);
-            const parts = content?.parts;
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                const normalizedPart = this.toResponsesStreamPart(part);
-                if (!normalizedPart) {
-                  continue;
-                }
-                for (const event of mapper.processPart(normalizedPart)) {
-                  subscriber.next(event);
-                }
-              }
-            }
-
-            const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
-            if (grounding) {
-              for (const event of mapper.processGrounding(grounding)) {
-                subscriber.next(event);
-              }
-            }
-
-            if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
-              complete();
-              return;
-            }
-          } catch (error) {
-            if (
-              error instanceof ToolCallIdConflictError ||
-              error instanceof InvalidFunctionCallArgumentsError
-            ) {
-              completed = true;
-              idleTimer.clear();
-              clearHeartbeat();
-              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-              subscriber.error(error);
-              return;
-            }
-            // Preserve compatibility: ignore per-chunk mapping failures.
-          }
+          processLine(line);
         }
       });
 
       upstreamStream.on('end', () => {
-        idleTimer.clear();
-        complete();
+        if (settled) {
+          return;
+        }
+        buffer += decoder.decode();
+        if (buffer.trim().length > 0) {
+          processLine(buffer);
+        }
+        if (!settled) {
+          fail(new Error('upstream stream ended without a finish reason'));
+        }
       });
 
       upstreamStream.on('error', (error: unknown) => {
-        idleTimer.clear();
-        clearHeartbeat();
         const cleanError =
           error instanceof Error ? new Error(error.message) : new Error(String(error));
         this.logger.error(`OpenAI Responses stream error: ${cleanError.message}`);
-        subscriber.error(cleanError);
+        fail(cleanError);
       });
 
       return () => {
@@ -1715,15 +1735,26 @@ export class ProxyService extends BaseProxyService {
       const mapper = new OpenAIResponsesStreamingMapper({
         clientToolNames,
         model: response.model,
-        responseId: `resp_${uuidv4()}`,
+        responseId: toOpenAIResponsesId(response.id),
       });
       const choice = response.choices?.[0];
       const content =
         choice?.message && isString(choice.message.content) ? choice.message.content : undefined;
+      const reasoningContent =
+        choice?.message && isString(choice.message.reasoning_content)
+          ? choice.message.reasoning_content
+          : undefined;
 
       subscriber.next(mapper.createResponseCreatedEvent());
       subscriber.next(mapper.createResponseInProgressEvent());
-      mapper.setUsage(toOpenAIResponsesUsage(response.usage));
+      if (response.usage) {
+        mapper.setUsage(toOpenAIResponsesUsage(response.usage));
+      }
+      if (reasoningContent) {
+        for (const event of mapper.processPart({ text: reasoningContent, thought: true })) {
+          subscriber.next(event);
+        }
+      }
       if (content) {
         for (const event of mapper.processPart({ text: content })) {
           subscriber.next(event);
@@ -1750,7 +1781,7 @@ export class ProxyService extends BaseProxyService {
         }
       }
 
-      for (const event of mapper.complete()) {
+      for (const event of mapper.complete(choice?.finish_reason)) {
         subscriber.next(event);
       }
       subscriber.complete();

@@ -27,9 +27,13 @@ import {
 } from './common/interfaces/request-interfaces';
 import { toCustomToolArguments } from '../antigravity/CustomToolCall';
 import { ApplyPatchFailureCompactor } from '../antigravity/ApplyPatchFailureCompaction';
-import { toOpenAIResponsesResponse } from '../antigravity/OpenAIResponsesResponseMapper';
+import {
+  toOpenAIResponsesResponse,
+  type OpenAIResponsesResponseContext,
+} from '../antigravity/OpenAIResponsesResponseMapper';
 import {
   mergeOpenAIResponsesInputItems,
+  normalizeOpenAIResponsesInputItems,
   OpenAIResponsesSessionStore,
   type OpenAIResponsesSession,
 } from './modules/openai/responses/openai-responses-session.store';
@@ -38,6 +42,11 @@ import {
   normalizeOpenAICompletionRequest,
   OpenAIRequestValidationError,
 } from './modules/openai/chat/openai-request-contract';
+import {
+  mapResponsesReasoningEffort,
+  normalizeOpenAIResponsesRequest,
+  type ResponsesRequestBody,
+} from './modules/openai/responses/openai-responses-request-contract';
 import { ProxyGuard } from './guards/proxy.guard';
 import {
   getOpenAICompatibleModels,
@@ -59,26 +68,11 @@ import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
 export const IMAGE_QUOTA_REFRESH = Symbol('IMAGE_QUOTA_REFRESH');
 export type ImageQuotaRefresh = () => Promise<void>;
 
-export interface ResponsesRequestBody {
-  model?: string;
-  instructions?: string;
-  input?: unknown;
-  metadata?: Record<string, unknown>;
-  previous_response_id?: string;
-  tools?: OpenAIChatRequest['tools'];
-  max_output_tokens?: number;
-  temperature?: number;
-  top_p?: number;
-  presence_penalty?: number;
-  frequency_penalty?: number;
-  seed?: number;
-  tool_choice?: OpenAIChatRequest['tool_choice'];
-  stream?: boolean;
-  user?: string;
-}
+export type { ResponsesRequestBody } from './modules/openai/responses/openai-responses-request-contract';
 
 export interface PreparedResponsesRequest {
   request: OpenAIChatRequest;
+  responseContext: OpenAIResponsesResponseContext;
   session: OpenAIResponsesSession;
 }
 
@@ -154,18 +148,19 @@ export class ProxyController {
 
   @Post('responses')
   async responses(@Body() body: ResponsesRequestBody, @Res() res: FastifyReply) {
-    const prepared = this.prepareResponsesRequest(body);
-    if (!prepared) {
-      res.status(HttpStatus.BAD_REQUEST).send({
-        error: {
-          message: `Unknown or expired previous_response_id: ${body.previous_response_id}`,
-          type: 'invalid_request_error',
-        },
-      });
-      return;
-    }
-
     try {
+      const prepared = this.prepareResponsesRequest(body);
+      if (!prepared) {
+        res.status(HttpStatus.BAD_REQUEST).send({
+          error: {
+            code: 'previous_response_not_found',
+            message: `Unknown or expired previous_response_id: ${body.previous_response_id}`,
+            param: 'previous_response_id',
+            type: 'invalid_request_error',
+          },
+        });
+        return;
+      }
       const result = await this.proxyService.handleChatCompletions(prepared.request, 'responses');
       if (body.stream && this.isObservableLike(result)) {
         this.writeSseResponse(res, this.cacheResponsesStream(result, prepared.session));
@@ -173,7 +168,7 @@ export class ProxyController {
       }
 
       const response = result as OpenAIChatResponse;
-      const responsesResponse = toOpenAIResponsesResponse(response);
+      const responsesResponse = toOpenAIResponsesResponse(response, prepared.responseContext);
       this.saveResponsesSession(responsesResponse, prepared.session);
       res.status(HttpStatus.OK).send(responsesResponse);
     } catch (error) {
@@ -427,11 +422,12 @@ export class ProxyController {
   }
 
   public prepareResponsesRequest(body: ResponsesRequestBody): PreparedResponsesRequest | null {
-    const currentInputItems = this.normalizeResponsesInputItems(body.input);
-    const previousSession = body.previous_response_id
-      ? OpenAIResponsesSessionStore.get(body.previous_response_id)
+    const normalizedBody = normalizeOpenAIResponsesRequest(body);
+    const currentInputItems = this.normalizeResponsesInputItems(normalizedBody.input);
+    const previousSession = normalizedBody.previous_response_id
+      ? OpenAIResponsesSessionStore.get(normalizedBody.previous_response_id)
       : null;
-    if (body.previous_response_id && !previousSession) {
+    if (normalizedBody.previous_response_id && !previousSession) {
       return null;
     }
 
@@ -440,11 +436,11 @@ export class ProxyController {
       currentInputItems,
       previousSession?.toolCallItems,
     );
-    const model = body.model ?? previousSession?.model ?? 'gemini-3-flash';
-    const instructions = body.instructions ?? previousSession?.instructions;
-    const tools = body.tools ?? previousSession?.tools;
+    const model = normalizedBody.model ?? previousSession?.model ?? 'gemini-3-flash';
+    const instructions = normalizedBody.instructions;
+    const tools = normalizedBody.tools ?? previousSession?.tools;
     const request = this.buildResponsesChatRequest({
-      ...body,
+      ...normalizedBody,
       input: inputItems,
       instructions,
       model,
@@ -453,31 +449,38 @@ export class ProxyController {
 
     return {
       request,
+      responseContext: {
+        instructions,
+        maxOutputTokens: normalizedBody.max_output_tokens,
+        metadata: normalizedBody.metadata,
+        parallelToolCalls: normalizedBody.parallel_tool_calls,
+        previousResponseId: normalizedBody.previous_response_id,
+        reasoning: normalizedBody.reasoning,
+        store: normalizedBody.store,
+        temperature: normalizedBody.temperature,
+        text: normalizedBody.text,
+        toolChoice: normalizedBody.tool_choice,
+        tools: normalizedBody.tools,
+        topP: normalizedBody.top_p,
+        truncation: normalizedBody.truncation,
+      },
       session: {
         inputItems,
         instructions,
         model,
+        requestDefaults: {
+          ...(normalizedBody.tool_choice !== undefined
+            ? { tool_choice: normalizedBody.tool_choice }
+            : {}),
+        },
+        store: normalizedBody.store !== false,
         tools,
       },
     };
   }
 
   private normalizeResponsesInputItems(input: unknown): unknown[] {
-    if (Array.isArray(input)) {
-      return input;
-    }
-    if (isNil(input)) {
-      return [];
-    }
-
-    const content = isString(input) ? input : this.normalizeResponsesInput(input);
-    return [
-      {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: content }],
-      },
-    ];
+    return normalizeOpenAIResponsesInputItems(input);
   }
 
   private cacheResponsesStream(
@@ -510,13 +513,18 @@ export class ProxyController {
 
     try {
       const parsed = this.toRecord(JSON.parse(dataLine.slice('data:'.length).trimStart()));
-      return parsed?.type === 'response.completed' ? (parsed.response ?? null) : null;
+      return parsed?.type === 'response.completed' || parsed?.type === 'response.incomplete'
+        ? (parsed.response ?? null)
+        : null;
     } catch {
       return null;
     }
   }
 
   private saveResponsesSession(response: unknown, session: OpenAIResponsesSession): void {
+    if (session.store === false) {
+      return;
+    }
     const responseRecord = this.toRecord(response);
     const responseId = this.asString(responseRecord?.id);
     const output = responseRecord?.output;
@@ -559,6 +567,7 @@ export class ProxyController {
   }
 
   private buildResponsesChatRequest(body: ResponsesRequestBody): OpenAIChatRequest {
+    const reasoningEffort = mapResponsesReasoningEffort(body.reasoning?.effort);
     const messages: OpenAIChatRequest['messages'] = [];
     if (isString(body.instructions) && !isEmpty(body.instructions.trim())) {
       messages.push({
@@ -720,11 +729,49 @@ export class ProxyController {
       frequency_penalty: body.frequency_penalty,
       seed: body.seed,
       tool_choice: body.tool_choice,
+      parallel_tool_calls: body.parallel_tool_calls,
+      reasoning_effort: reasoningEffort,
+      thinking: body.reasoning
+        ? {
+            type: body.reasoning.effort === 'none' ? 'disabled' : 'enabled',
+            effort: reasoningEffort,
+          }
+        : undefined,
+      response_format: this.toResponsesChatResponseFormat(body.text),
+      store: body.store,
+      metadata: body.metadata as Record<string, string> | undefined,
+      service_tier: body.service_tier,
+      user: body.user,
       stream: body.stream,
       extra: {
         ...(body.metadata ?? {}),
+        include: body.include,
         previous_response_id: body.previous_response_id,
+        text_verbosity: this.asString(body.text?.verbosity) ?? undefined,
+        truncation: body.truncation,
         user_id: body.user,
+      },
+    };
+  }
+
+  private toResponsesChatResponseFormat(
+    text: Record<string, unknown> | undefined,
+  ): OpenAIChatRequest['response_format'] {
+    const format = this.toRecord(text?.format);
+    if (!format) {
+      return undefined;
+    }
+    const type = this.asString(format.type);
+    if (type !== 'json_schema') {
+      return type ? { type } : undefined;
+    }
+    return {
+      type,
+      json_schema: {
+        name: this.asString(format.name) ?? undefined,
+        description: this.asString(format.description) ?? undefined,
+        schema: this.toRecord(format.schema) ?? undefined,
+        strict: typeof format.strict === 'boolean' ? format.strict : undefined,
       },
     };
   }

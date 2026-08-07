@@ -158,6 +158,19 @@ describe('applyOpenAIModelVariant', () => {
     });
   });
 
+  it('preserves an explicit OpenAI disabled-thinking request across tier routing', () => {
+    const applied = applyOpenAIModelVariant({
+      model: 'gemini-3.5-flash',
+      messages: [{ role: 'user', content: 'Answer directly' }],
+      thinking: { type: 'disabled' },
+    });
+
+    expect(applied.request.thinking).toEqual({ type: 'disabled' });
+    expect(rebindOpenAIModelVariant(applied, 'gemini-3-flash-agent').request.thinking).toEqual({
+      type: 'disabled',
+    });
+  });
+
   it('updates the complete OpenAI request when an account requires another registered tier', () => {
     const applied = applyOpenAIModelVariant({
       model: 'gemini-3.5-flash',

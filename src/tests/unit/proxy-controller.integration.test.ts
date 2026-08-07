@@ -748,6 +748,108 @@ describe('ProxyController Integration', () => {
     ]);
   });
 
+  it('does not inherit instructions across previous_response_id', async () => {
+    const proxyService = {
+      handleChatCompletions: vi
+        .fn()
+        .mockResolvedValueOnce({
+          id: 'resp_instruction_1',
+          object: 'chat.completion',
+          created: 1,
+          model: 'gpt-4o',
+          choices: [{ index: 0, finish_reason: 'stop', message: { content: 'First answer' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        })
+        .mockResolvedValueOnce({
+          id: 'resp_instruction_2',
+          object: 'chat.completion',
+          created: 2,
+          model: 'gpt-4o',
+          choices: [{ index: 0, finish_reason: 'stop', message: { content: 'Second answer' } }],
+          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+        }),
+    };
+    const controller = new ProxyController(proxyService as any);
+
+    await controller.responses(
+      { input: 'First question', instructions: 'First-turn only', model: 'gpt-4o' },
+      createReplyMock() as any,
+    );
+    await controller.responses(
+      { input: 'Second question', previous_response_id: 'resp_instruction_1' },
+      createReplyMock() as any,
+    );
+
+    expect(proxyService.handleChatCompletions.mock.calls[1][0].messages).not.toContainEqual(
+      expect.objectContaining({ role: 'system' }),
+    );
+  });
+
+  it('keeps store=false Responses out of the persistent continuation store', async () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn().mockResolvedValue({
+        id: 'resp_ephemeral',
+        object: 'chat.completion',
+        created: 1,
+        model: 'gpt-4o',
+        choices: [{ index: 0, finish_reason: 'stop', message: { content: 'Done' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    };
+    const controller = new ProxyController(proxyService as any);
+
+    await controller.responses(
+      { input: 'Ephemeral', model: 'gpt-4o', store: false },
+      createReplyMock() as any,
+    );
+
+    expect(OpenAIResponsesSessionStore.get('resp_ephemeral')).toBeNull();
+  });
+
+  it('rejects unsupported background Responses with an OpenAI error contract', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.responses(
+      { background: true, input: 'Run later', model: 'gpt-4o' },
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        code: 'unsupported_parameter',
+        message: 'background Responses are not implemented by this proxy',
+        param: 'background',
+        type: 'invalid_request_error',
+      },
+    });
+  });
+
+  it('maps extended Responses reasoning efforts onto Gemini-supported tiers', () => {
+    const controller = new ProxyController({ handleChatCompletions: vi.fn() } as any);
+
+    expect(
+      controller.prepareResponsesRequest({
+        input: 'Think hard',
+        model: 'gemini-3-pro',
+        reasoning: { effort: 'xhigh', summary: 'auto' },
+      })?.request,
+    ).toMatchObject({
+      reasoning_effort: 'high',
+      thinking: { type: 'enabled', effort: 'high' },
+    });
+    expect(
+      controller.prepareResponsesRequest({
+        input: 'Do not reason',
+        model: 'gemini-3-pro',
+        reasoning: { effort: 'none' },
+      })?.request,
+    ).toMatchObject({ thinking: { type: 'disabled' } });
+  });
+
   it('repairs an apply_patch call when a compacted continuation only sends its output', async () => {
     const patch = '*** Begin Patch\n*** Add File: src/new.ts\n+export {};\n*** End Patch';
     const proxyService = {
@@ -854,7 +956,9 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       error: {
+        code: 'previous_response_not_found',
         message: 'Unknown or expired previous_response_id: resp_missing',
+        param: 'previous_response_id',
         type: 'invalid_request_error',
       },
     });

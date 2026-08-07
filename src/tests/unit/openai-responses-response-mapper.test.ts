@@ -35,9 +35,9 @@ describe('OpenAI Responses non-stream mapper', () => {
             type: 'refusal',
           },
         ],
-        id: 'msg_resp_refused',
+        id: 'msg_refused',
         role: 'assistant',
-        status: 'completed',
+        status: 'incomplete',
         type: 'message',
       },
     ]);
@@ -145,5 +145,88 @@ describe('OpenAI Responses non-stream mapper', () => {
         type: 'message',
       }),
     ]);
+  });
+
+  it('emits Gemini reasoning as a native Responses reasoning item', () => {
+    const response = toOpenAIResponsesResponse({
+      id: 'chatcmpl-reasoning',
+      object: 'chat.completion',
+      created: 1,
+      model: 'gemini-3-pro',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: 'Final answer',
+            reasoning_content: 'Checked the relevant constraints.',
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+      },
+    });
+
+    expect(response).toMatchObject({
+      id: 'resp_reasoning',
+      output: [
+        {
+          type: 'reasoning',
+          content: [{ type: 'reasoning_text', text: 'Checked the relevant constraints.' }],
+          summary: [{ type: 'summary_text', text: 'Checked the relevant constraints.' }],
+        },
+        {
+          type: 'message',
+          content: [{ type: 'output_text', text: 'Final answer', annotations: [] }],
+        },
+      ],
+      status: 'completed',
+    });
+  });
+
+  it('reports token and safety stops as incomplete Responses', () => {
+    const response = toOpenAIResponsesResponse({
+      id: 'chatcmpl-limited',
+      object: 'chat.completion',
+      created: 1,
+      model: 'gemini-3-flash',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'length',
+          message: { role: 'assistant', content: 'Partial' },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+
+    expect(response).toMatchObject({
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [expect.objectContaining({ status: 'incomplete' })],
+    });
+  });
+
+  it('does not throw when upstream usage metadata is absent', () => {
+    const response = toOpenAIResponsesResponse({
+      id: 'chatcmpl-no-usage',
+      object: 'chat.completion',
+      created: 1,
+      model: 'gemini-3-flash',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'Done' },
+        },
+      ],
+    } as never);
+
+    expect(response).toMatchObject({ id: 'resp_no-usage', status: 'completed' });
+    expect(response.usage).toBeUndefined();
   });
 });

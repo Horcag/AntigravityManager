@@ -4,8 +4,18 @@ export interface OpenAIResponsesSession {
   inputItems: unknown[];
   instructions?: string;
   model: string;
+  prewarm?: boolean;
+  requestDefaults?: Record<string, unknown>;
+  store?: boolean;
   tools?: OpenAIChatRequest['tools'];
   toolCallItems?: unknown[];
+}
+
+export interface OpenAIResponsesSessionStoreLike {
+  clear(): void;
+  delete(responseId: string): void;
+  get(responseId: string): OpenAIResponsesSession | null;
+  save(responseId: string, session: OpenAIResponsesSession): void;
 }
 
 interface StoredOpenAIResponsesSession extends OpenAIResponsesSession {
@@ -13,13 +23,13 @@ interface StoredOpenAIResponsesSession extends OpenAIResponsesSession {
 }
 
 /**
- * Holds the HTTP-only state needed to support Responses API continuation.
+ * Holds the state needed to support Responses API continuation.
  *
  * Gemini requires complete tool and assistant history, while Responses clients may
  * only send the next input with previous_response_id. Entries are intentionally
  * short-lived and bounded because this is compatibility state, not durable memory.
  */
-class OpenAIResponsesSessionStoreImpl {
+export class OpenAIResponsesSessionStoreImpl implements OpenAIResponsesSessionStoreLike {
   private static readonly MAX_SESSIONS = 500;
   private static readonly SESSION_TTL_MS = 60 * 60 * 1000;
 
@@ -40,6 +50,9 @@ class OpenAIResponsesSessionStoreImpl {
       inputItems: [...session.inputItems],
       instructions: session.instructions,
       model: session.model,
+      prewarm: session.prewarm,
+      requestDefaults: session.requestDefaults ? { ...session.requestDefaults } : undefined,
+      store: session.store,
       tools: session.tools,
       toolCallItems: [...(session.toolCallItems ?? [])],
     };
@@ -54,6 +67,7 @@ class OpenAIResponsesSessionStoreImpl {
     this.sessions.set(responseId, {
       ...session,
       inputItems: [...session.inputItems],
+      requestDefaults: session.requestDefaults ? { ...session.requestDefaults } : undefined,
       toolCallItems,
       updatedAt: Date.now(),
     });
@@ -62,6 +76,10 @@ class OpenAIResponsesSessionStoreImpl {
 
   public clear(): void {
     this.sessions.clear();
+  }
+
+  public delete(responseId: string): void {
+    this.sessions.delete(responseId);
   }
 
   private evictExpired(): void {
@@ -85,6 +103,33 @@ class OpenAIResponsesSessionStoreImpl {
 }
 
 export const OpenAIResponsesSessionStore = new OpenAIResponsesSessionStoreImpl();
+
+export function normalizeOpenAIResponsesInputItems(input: unknown): unknown[] {
+  if (Array.isArray(input)) {
+    return [...input];
+  }
+  if (input === undefined || input === null) {
+    return [];
+  }
+
+  const text =
+    typeof input === 'string'
+      ? input
+      : (() => {
+          try {
+            return JSON.stringify(input);
+          } catch {
+            return String(input);
+          }
+        })();
+  return [
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    },
+  ];
+}
 
 /**
  * Rebuilds a Responses transcript using the same continuation rules used by

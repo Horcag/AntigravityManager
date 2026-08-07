@@ -777,15 +777,29 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       'responses',
     );
     expect(result).toBeInstanceOf(Observable);
-    const error = await new Promise<unknown>((resolve, reject) => {
+    const events = await new Promise<string[]>((resolve, reject) => {
+      const received: string[] = [];
       (result as Observable<string>).subscribe({
-        error: resolve,
-        complete: () => reject(new Error('Expected stream failure')),
+        next: (event) => received.push(event),
+        error: reject,
+        complete: () => resolve(received),
       });
     });
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).name).toBe('InvalidFunctionCallArgumentsError');
+    const dataLine = events
+      .at(-1)
+      ?.split(/\r?\n/)
+      .find((line) => line.startsWith('data: '));
+    expect(dataLine).toBeDefined();
+    expect(JSON.parse(dataLine?.slice('data: '.length) ?? '{}')).toMatchObject({
+      type: 'response.failed',
+      response: {
+        status: 'failed',
+        error: {
+          code: 'server_error',
+          message: expect.stringContaining('functionCall.args'),
+        },
+      },
+    });
   });
 
   it('keeps the web-search fallback selected by the request mapper', async () => {

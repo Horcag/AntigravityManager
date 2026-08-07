@@ -81,6 +81,7 @@ export interface AppliedOpenAIModelVariant {
 }
 
 export function applyOpenAIModelVariant(request: OpenAIChatRequest): AppliedOpenAIModelVariant {
+  const thinkingDisabled = request.thinking?.type === 'disabled';
   const variant = resolveModelVariant({
     model: request.model,
     budgetTokens: request.thinking?.budget_tokens,
@@ -98,8 +99,9 @@ export function applyOpenAIModelVariant(request: OpenAIChatRequest): AppliedOpen
       ...request,
       model: variant.model,
       ...applyOpenAIOutputLimit(request, variant.maxOutputTokens),
-      thinking:
-        variant.thinkingBudget === 0
+      thinking: thinkingDisabled
+        ? { type: 'disabled' }
+        : variant.thinkingBudget === 0
           ? undefined
           : {
               type: 'enabled',
@@ -128,12 +130,14 @@ export function rebindOpenAIModelVariant(
       model: variant.model,
       ...applyOpenAIOutputLimit(applied.request, variant.maxOutputTokens),
       thinking:
-        variant.thinkingBudget === 0
-          ? undefined
-          : {
-              type: 'enabled',
-              budget_tokens: variant.thinkingBudget,
-            },
+        applied.request.thinking?.type === 'disabled'
+          ? { type: 'disabled' }
+          : variant.thinkingBudget === 0
+            ? undefined
+            : {
+                type: 'enabled',
+                budget_tokens: variant.thinkingBudget,
+              },
       tools: variant.supportsTools ? applied.request.tools : undefined,
       tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
       ...(applied.request.reasoning_effort !== undefined ? { reasoning_effort: variant.tier } : {}),

@@ -269,7 +269,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
     });
   });
 
-  it('emits reasoning as a separate commentary message before the final answer', () => {
+  it('emits reasoning as a native reasoning item before the final answer', () => {
     const mapper = createMapper();
     const events = [
       ...mapper.processPart({ text: '<think>inspect\nfiles</think>', thought: true }),
@@ -281,10 +281,10 @@ describe('OpenAIResponsesStreamingMapper', () => {
       response: {
         output: [
           {
-            content: [{ text: 'inspect\nfiles', type: 'output_text' }],
-            id: expect.stringMatching(/^msg_thought_/),
-            phase: 'commentary',
-            type: 'message',
+            content: [{ text: 'inspect\nfiles', type: 'reasoning_text' }],
+            id: expect.stringMatching(/^rs_/),
+            summary: [{ text: 'inspect\nfiles', type: 'summary_text' }],
+            type: 'reasoning',
           },
           {
             content: [{ text: 'Done.', type: 'output_text' }],
@@ -315,7 +315,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
         event.type === 'response.output_item.done' &&
         typeof event.item === 'object' &&
         event.item !== null &&
-        Reflect.get(event.item, 'phase') === 'commentary',
+        Reflect.get(event.item, 'type') === 'reasoning',
     );
     const toolAddedIndex = events.findIndex(
       (event) =>
@@ -505,6 +505,39 @@ describe('OpenAIResponsesStreamingMapper', () => {
         },
       },
       type: 'response.completed',
+    });
+  });
+
+  it('emits response.incomplete for a max-token finish', () => {
+    const mapper = createMapper();
+    mapper.processPart({ text: 'Partial output' });
+
+    const terminal = parseEvent(mapper.complete('MAX_TOKENS').at(-1) ?? '');
+
+    expect(terminal).toMatchObject({
+      type: 'response.incomplete',
+      response: {
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+      },
+    });
+  });
+
+  it('emits response.failed with a structured error', () => {
+    const mapper = createMapper();
+
+    const terminal = parseEvent(mapper.fail(new Error('upstream disconnected')).at(-1) ?? '');
+
+    expect(terminal).toMatchObject({
+      type: 'response.failed',
+      response: {
+        status: 'failed',
+        error: {
+          code: 'server_error',
+          message: 'upstream disconnected',
+          type: 'server_error',
+        },
+      },
     });
   });
 });

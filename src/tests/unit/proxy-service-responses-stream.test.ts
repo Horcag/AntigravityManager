@@ -108,4 +108,59 @@ describe('ProxyService Responses streaming', () => {
       },
     });
   });
+
+  it('reports an upstream end without a finish reason as response.failed', async () => {
+    const service = createProxyService();
+    const upstreamStream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Partial"}]}}]}}\n\n',
+      ),
+    ]);
+
+    const serializedEvents = await lastValueFrom(
+      createResponsesStream(service, upstreamStream).pipe(toArray()),
+    );
+    const terminal = parseEvent(String(serializedEvents.at(-1)));
+
+    expect(terminal).toMatchObject({
+      type: 'response.failed',
+      response: {
+        status: 'failed',
+        error: { code: 'server_error' },
+      },
+    });
+  });
+
+  it('maps Gemini max-token finishes to response.incomplete', async () => {
+    const service = createProxyService();
+    const upstreamStream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Partial"}]},"finishReason":"MAX_TOKENS"}]}}\n\n',
+      ),
+    ]);
+
+    const serializedEvents = await lastValueFrom(
+      createResponsesStream(service, upstreamStream).pipe(toArray()),
+    );
+    const terminal = parseEvent(String(serializedEvents.at(-1)));
+
+    expect(terminal).toMatchObject({
+      type: 'response.incomplete',
+      response: {
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+      },
+    });
+  });
+
+  it('destroys the upstream stream when the client unsubscribes', () => {
+    const service = createProxyService();
+    const upstreamStream = new PassThrough();
+    const destroy = vi.spyOn(upstreamStream, 'destroy');
+
+    const subscription = createResponsesStream(service, upstreamStream).subscribe();
+    subscription.unsubscribe();
+
+    expect(destroy).toHaveBeenCalledOnce();
+  });
 });
