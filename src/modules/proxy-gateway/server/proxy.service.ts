@@ -1363,6 +1363,7 @@ export class ProxyService {
       let buffer = '';
       let completed = false;
       let receivedUsableOutput = false;
+      let lastFinishReason: string | undefined;
       const mapper = new OpenAIResponsesStreamingMapper({
         model,
         responseId: `resp_${uuidv4()}`,
@@ -1464,6 +1465,9 @@ export class ProxyService {
             return;
           }
           mapper.setUsageMetadata(usageMetadata);
+          if (isString(candidate.finishReason) && candidate.finishReason.length > 0) {
+            lastFinishReason = candidate.finishReason;
+          }
           const content = this.toUnknownRecord(candidate?.content);
           if (Array.isArray(content?.parts)) {
             for (const part of content.parts) {
@@ -1526,10 +1530,15 @@ export class ProxyService {
           processLine(buffer);
         }
         if (!receivedUsableOutput) {
+          const mappedFinishReason = mapGeminiFinishReasonToOpenAI(lastFinishReason);
+          if (mappedFinishReason === 'length' || mappedFinishReason === 'content_filter') {
+            complete(lastFinishReason);
+            return;
+          }
           fail('Upstream Responses stream was empty', 'empty_stream');
           return;
         }
-        complete();
+        complete(lastFinishReason);
       });
 
       upstreamStream.on('error', (error: unknown) => {

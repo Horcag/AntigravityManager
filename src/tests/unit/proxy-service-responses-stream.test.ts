@@ -232,6 +232,121 @@ describe('ProxyService Responses streaming', () => {
   });
 
   it.each([
+    ['MAX_TOKENS', 'max_output_tokens'],
+    ['SAFETY', 'content_filter'],
+  ])(
+    'ends a hidden-thought-only %s stream as incomplete without leaking its reasoning',
+    async (finishReason, incompleteReason) => {
+      const upstream = Readable.from([
+        Buffer.from(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text: 'private reasoning',
+                        thought: true,
+                        thoughtSignature: 'private-signature',
+                      },
+                    ],
+                  },
+                  finishReason,
+                },
+              ],
+              usageMetadata: {
+                candidatesTokenCount: 3,
+                promptTokenCount: 2,
+                thoughtsTokenCount: 1,
+                totalTokenCount: 6,
+              },
+            },
+          })}\n\n`,
+        ),
+      ]);
+
+      const events = (
+        await lastValueFrom(
+          createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(
+            toArray(),
+          ),
+        )
+      ).map((event) => parseEvent(String(event)));
+
+      expect(events.map((event) => event.type)).toEqual([
+        'response.created',
+        'response.in_progress',
+        'response.incomplete',
+      ]);
+      expect(events.at(-1)).toMatchObject({
+        response: {
+          incomplete_details: { reason: incompleteReason },
+          output: [],
+          status: 'incomplete',
+          usage: {
+            input_tokens: 2,
+            output_tokens: 4,
+            output_tokens_details: { reasoning_tokens: 1 },
+            total_tokens: 6,
+          },
+        },
+      });
+      expect(JSON.stringify(events)).not.toContain('private reasoning');
+      expect(JSON.stringify(events)).not.toContain('private-signature');
+    },
+  );
+
+  it('uses the last incomplete reason from duplicate hidden terminal input exactly once', async () => {
+    const hiddenPart = {
+      content: { parts: [{ text: 'private reasoning', thought: true }] },
+    };
+    const upstream = Readable.from([
+      Buffer.from(
+        `data: ${JSON.stringify({
+          response: { candidates: [{ ...hiddenPart, finishReason: 'MAX_TOKENS' }] },
+        })}\n\n`,
+      ),
+      Buffer.from(
+        `data: ${JSON.stringify({
+          response: { candidates: [{ ...hiddenPart, finishReason: 'SAFETY' }] },
+        })}\n\n`,
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.filter((event) => event.type === 'response.incomplete')).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      response: {
+        incomplete_details: { reason: 'content_filter' },
+        output: [],
+        status: 'incomplete',
+      },
+      type: 'response.incomplete',
+    });
+  });
+
+  it('keeps hidden-thought-only STOP streams as empty_stream failures', async () => {
+    const upstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"private reasoning","thought":true}]},"finishReason":"STOP"}]}}\n\n',
+      ),
+    ]);
+    const events = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), upstream).pipe(toArray()),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(events.map((event) => event.type).slice(-2)).toEqual(['error', 'response.failed']);
+    expect(events.at(-2)).toMatchObject({ code: 'empty_stream' });
+  });
+
+  it.each([
     ['length', 'response.incomplete', 'incomplete', { reason: 'max_output_tokens' }],
     ['content_filter', 'response.incomplete', 'incomplete', { reason: 'content_filter' }],
     ['stop', 'response.completed', 'completed', null],
