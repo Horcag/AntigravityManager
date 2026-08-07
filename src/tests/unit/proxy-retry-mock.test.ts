@@ -52,12 +52,17 @@ class TestableProxyService extends ProxyService {
       new GenerationConstraintsService(mockAccountLeaseService as any),
       new ProxyRetryService(mockAccountLeaseService as any, new ModelAvailabilityService()),
       new ModelRoutingService(),
+      new SignatureStore(),
     );
   }
 
   public testProcessStream(stream: any, model: string = 'model'): Observable<string> {
     // Access private method using type assertion
-    return (this as any).processAnthropicInternalStream(stream, model);
+    return (this as any).processAnthropicInternalStream(stream, {
+      accountId: 'test-account',
+      model,
+      store: this.signatureStore,
+    });
   }
 
   public testPassthroughStream(stream: any): Observable<string> {
@@ -503,6 +508,160 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       { inlineData: { mimeType: 'image/png', data: 'AAAABBBB' } },
       { text: ' carefully.' },
     ]);
+  });
+
+  it('replays captured signatures only for the same selected account and effective model', async () => {
+    setServerConfig(
+      createProxyConfig({ custom_mapping: { 'custom-tool-model': 'custom-tool-model' } }),
+    );
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken
+      .mockResolvedValueOnce(createToken('acc-1'))
+      .mockResolvedValueOnce(createToken('acc-1'))
+      .mockResolvedValueOnce(createToken('acc-2'));
+    mockGeminiClient.generateInternal
+      .mockResolvedValueOnce({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'search_docs', args: { query: 'api' } },
+                  thoughtSignature: Buffer.from('account-one-signature').toString('base64'),
+                },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      })
+      .mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      });
+
+    await service.handleChatCompletions({
+      model: 'custom-tool-model',
+      stream: false,
+      messages: [{ role: 'user', content: 'Search the docs.' }],
+    });
+
+    const continuation = {
+      model: 'custom-tool-model',
+      stream: false,
+      messages: [
+        {
+          role: 'assistant' as const,
+          content: null,
+          tool_calls: [
+            {
+              id: 'call-1',
+              type: 'function' as const,
+              function: { name: 'search_docs', arguments: '{"query":"api"}' },
+            },
+          ],
+        },
+        { role: 'tool' as const, tool_call_id: 'call-1', content: 'Found it.' },
+      ],
+    };
+    await service.handleChatCompletions(continuation);
+    await service.handleChatCompletions(continuation);
+
+    const sameAccountBody = mockGeminiClient.generateInternal.mock.calls[1][0];
+    const otherAccountBody = mockGeminiClient.generateInternal.mock.calls[2][0];
+    const findToolCall = (body: any) =>
+      body.request.contents
+        .flatMap((content: any) => content.parts)
+        .find((part: any) => part.functionCall?.id === 'call-1');
+
+    expect(findToolCall(sameAccountBody)).toMatchObject({
+      thoughtSignature: 'account-one-signature',
+      thought_signature: 'account-one-signature',
+    });
+    expect(findToolCall(otherAccountBody)?.thoughtSignature).toBeUndefined();
+    expect(findToolCall(otherAccountBody)?.thought_signature).toBeUndefined();
+  });
+
+  it('terminates public Anthropic streams on conflicting tool-call id reuse', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.streamGenerateInternal.mockResolvedValue(
+      Readable.from([
+        Buffer.from(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { functionCall: { id: 'call-1', name: 'search', args: { query: 'a' } } },
+                      { functionCall: { id: 'call-1', name: 'search', args: { query: 'b' } } },
+                    ],
+                  },
+                },
+              ],
+            },
+          })}\n\n`,
+        ),
+      ]),
+    );
+
+    const result = await service.handleAnthropicMessages({
+      model: 'gemini-3-flash',
+      stream: true,
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'Search.' }],
+    });
+    expect(result).toBeInstanceOf(Observable);
+    const error = await new Promise<unknown>((resolve, reject) => {
+      (result as Observable<string>).subscribe({
+        error: resolve,
+        complete: () => reject(new Error('Expected stream failure')),
+      });
+    });
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe('ToolCallIdConflictError');
+  });
+
+  it('terminates public Responses streams on malformed present function arguments', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.streamGenerateInternal.mockResolvedValue(
+      Readable.from([
+        Buffer.from(
+          `data: ${JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ functionCall: { id: 'call-bad', name: 'search', args: null } }],
+                  },
+                },
+              ],
+            },
+          })}\n\n`,
+        ),
+      ]),
+    );
+
+    const result = await service.handleChatCompletions(
+      {
+        model: 'gemini-3-flash',
+        stream: true,
+        messages: [{ role: 'user', content: 'Search.' }],
+      },
+      'responses',
+    );
+    expect(result).toBeInstanceOf(Observable);
+    const error = await new Promise<unknown>((resolve, reject) => {
+      (result as Observable<string>).subscribe({
+        error: resolve,
+        complete: () => reject(new Error('Expected stream failure')),
+      });
+    });
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe('InvalidFunctionCallArgumentsError');
   });
 
   it('keeps the web-search fallback selected by the request mapper', async () => {
@@ -955,14 +1114,16 @@ describe('ProxyService Protocol Parity Fixtures', () => {
   it('matches stable tool-call ordering, deduplication, signatures, and finish semantics', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
-    const sessionKey = 'chat-stream-parity-session';
-    SignatureStore.clear(sessionKey);
+    const signatureState = {
+      accountId: 'account-a',
+      model: 'gemini-3-pro',
+      store: service.signatureStore,
+    };
     const observable = (service as any).processStreamResponse(
       stream,
       'gpt-4o-mini',
       undefined,
-      sessionKey,
-      6,
+      signatureState,
     );
 
     const chunks: string[] = [];
@@ -1049,11 +1210,21 @@ describe('ProxyService Protocol Parity Fixtures', () => {
       completion_tokens: 4,
       total_tokens: 14,
     });
-    expect(SignatureStore.get(sessionKey)).toBe('stable signature');
-    expect(SignatureStore.getAt(sessionKey, 6)).toBe('stable signature');
+    expect(
+      service.signatureStore.get({
+        accountId: signatureState.accountId,
+        model: signatureState.model,
+        toolCallId: 'fc1',
+      }),
+    ).toBe('stable signature');
+    expect(
+      service.signatureStore.get({
+        accountId: signatureState.accountId,
+        model: signatureState.model,
+        toolCallId: 'fc2',
+      }),
+    ).toBe('stable signature');
     expect(chunks.filter((chunk) => chunk.includes('data: [DONE]'))).toHaveLength(1);
-
-    SignatureStore.clear(sessionKey);
   });
 
   it('prepends legacy Cloud Code metadata only when explicitly enabled', async () => {

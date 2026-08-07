@@ -1,9 +1,15 @@
 import { GeminiPart, Usage, UsageMetadata } from './types';
-import { SignatureStore } from './SignatureStore';
+import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
+import { normalizeFunctionCallArgs } from './function-call-args';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
+
+export interface StreamingSignatureState extends SignatureContext {
+  store: SignatureStore;
+}
 
 interface SignatureManager {
   pending: string | null;
@@ -39,6 +45,7 @@ export class StreamingState {
   public messageStopSent: boolean = false;
   private usedTool: boolean = false;
   private signatures: SignatureManagerImpl = new SignatureManagerImpl();
+  private latestResponseSignature: string | null = null;
   public trailingSignature: string | null = null;
 
   // Web Search / Grounding buffers
@@ -47,10 +54,7 @@ export class StreamingState {
 
   private parseErrorCount: number = 0;
 
-  constructor(
-    public readonly signatureSessionKey?: string,
-    public readonly messageCount?: number,
-  ) {}
+  constructor(public readonly signatureState?: StreamingSignatureState) {}
 
   public emit(eventType: string, data: any): string {
     return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -270,6 +274,16 @@ export class StreamingState {
   public storeSignature(signature?: string) {
     this.signatures.store(signature);
   }
+
+  public recordResponseSignature(signature?: string): void {
+    if (signature) {
+      this.latestResponseSignature = signature;
+    }
+  }
+
+  public getResponseSignature(): string | null {
+    return this.latestResponseSignature;
+  }
   public handleParseError(rawData: string): string[] {
     const chunks: string[] = [];
     this.parseErrorCount++;
@@ -326,11 +340,14 @@ export class StreamingState {
  * Part Processor
  */
 export class PartProcessor {
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
+
   constructor(private state: StreamingState) {}
 
   public process(part: GeminiPart): string[] {
     const chunks: string[] = [];
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
+    this.state.recordResponseSignature(signature);
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
@@ -477,6 +494,9 @@ export class PartProcessor {
   ): string[] {
     const chunks: string[] = [];
 
+    const functionArgs = normalizeFunctionCallArgs(fc);
+    const integrity = this.toolCallIdIntegrity.record(fc.id, fc.name, functionArgs);
+
     this.state.markToolUsed();
 
     const toolId = fc.id || `${fc.name}-${Math.random().toString(36).substr(2, 9)}`;
@@ -490,17 +510,28 @@ export class PartProcessor {
 
     if (signature) {
       toolUse.signature = signature;
-      // Store signature to global storage for replay in subsequent requests
-      SignatureStore.store(signature, this.state.signatureSessionKey, this.state.messageCount);
+    }
+
+    const capturedSignature = signature ?? this.state.getResponseSignature();
+    if (capturedSignature && this.state.signatureState) {
+      this.state.signatureState.store.store(
+        {
+          accountId: this.state.signatureState.accountId,
+          model: this.state.signatureState.model,
+          toolCallId: toolId,
+        },
+        capturedSignature,
+      );
+    }
+    if (integrity === 'replay') {
+      return chunks;
     }
 
     chunks.push(...this.state.startBlock('Function', toolUse));
 
     // input_json_delta
-    if (fc.args) {
-      const jsonStr = JSON.stringify(fc.args);
-      chunks.push(this.state.emitDelta('input_json_delta', { partial_json: jsonStr }));
-    }
+    const jsonStr = JSON.stringify(functionArgs);
+    chunks.push(this.state.emitDelta('input_json_delta', { partial_json: jsonStr }));
 
     chunks.push(...this.state.endBlock());
 

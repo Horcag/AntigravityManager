@@ -8,7 +8,13 @@ import {
   GroundingMetadata,
 } from './types';
 import { decodeSignature } from './signature-utils';
-import { SignatureStore } from './SignatureStore';
+import type { SignatureContext, SignatureStore } from './SignatureStore';
+import { normalizeFunctionCallArgs } from './function-call-args';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
+
+export interface ResponseSignatureState extends SignatureContext {
+  store: SignatureStore;
+}
 
 /**
  * Non-streaming response processor (Gemini -> Claude)
@@ -21,11 +27,10 @@ class NonStreamingProcessor {
   private thinkingSignature: string | null = null;
   private trailingSignature: string | null = null;
   private hasToolCall: boolean = false;
+  private responseSignature: string | null = null;
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
 
-  constructor(
-    private readonly signatureSessionKey?: string,
-    private readonly signatureMessageCount?: number,
-  ) {}
+  constructor(private readonly signatureState?: ResponseSignatureState) {}
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
     const candidate = geminiResponse.candidates?.[0];
@@ -62,7 +67,7 @@ class NonStreamingProcessor {
   private processPart(part: GeminiPart) {
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature) || null;
     if (signature) {
-      SignatureStore.store(signature, this.signatureSessionKey, this.signatureMessageCount);
+      this.responseSignature = signature;
     }
 
     // 1. Handle FunctionCall
@@ -83,13 +88,29 @@ class NonStreamingProcessor {
       this.hasToolCall = true;
 
       const fc = part.functionCall;
+      const functionArgs = normalizeFunctionCallArgs(fc);
+      const integrity = this.toolCallIdIntegrity.record(fc.id, fc.name, functionArgs);
       const toolId = fc.id || `${fc.name}-${uuidv4()}`;
+      const capturedSignature = signature ?? this.responseSignature;
+      if (capturedSignature && this.signatureState) {
+        this.signatureState.store.store(
+          {
+            accountId: this.signatureState.accountId,
+            model: this.signatureState.model,
+            toolCallId: toolId,
+          },
+          capturedSignature,
+        );
+      }
+      if (integrity === 'replay') {
+        return;
+      }
 
       const toolUse: ContentBlock = {
         type: 'tool_use',
         id: toolId,
         name: fc.name,
-        input: fc.args || {},
+        input: functionArgs,
         signature: signature || undefined,
       };
 
@@ -276,9 +297,8 @@ class NonStreamingProcessor {
  */
 export function transformResponse(
   geminiResponse: GeminiResponse,
-  signatureSessionKey?: string,
-  signatureMessageCount?: number,
+  signatureState?: ResponseSignatureState,
 ): ClaudeResponse {
-  const processor = new NonStreamingProcessor(signatureSessionKey, signatureMessageCount);
+  const processor = new NonStreamingProcessor(signatureState);
   return processor.process(geminiResponse);
 }

@@ -1,200 +1,113 @@
-/**
- * thought_signature storage for Gemini 3+ tool-call continuation.
- *
- * Clients that provide a stable session identifier are isolated from one another.
- * Requests without one preserve the legacy shared-signature behavior.
- */
-import { logger } from '@/shared/logging/logger';
+import { Injectable } from '@nestjs/common';
 
-interface StoredSignature {
+export interface SignatureContext {
+  accountId: string;
+  model: string;
+}
+
+export interface SignatureKey extends SignatureContext {
+  toolCallId: string;
+}
+
+interface SignatureEntry {
   signature: string;
-  updatedAt: number;
+  storedAt: number;
 }
 
-interface SessionSignatureBucket {
-  signaturesByMessageCount: Map<number, StoredSignature>;
-  legacySignature?: StoredSignature;
-  updatedAt: number;
-}
+const DEFAULT_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_MAX_ENTRIES = 500;
 
-class SignatureStoreImpl {
-  private static instance: SignatureStoreImpl;
-  private static readonly MAX_SESSION_ENTRIES = 500;
-  private static readonly SESSION_TTL_MS = 60 * 60 * 1000;
+/**
+ * Bounded thought-signature state owned by the proxy Nest container.
+ *
+ * A signature is reusable only for the exact account, effective upstream model and
+ * client-visible tool-call id that produced it. There is deliberately no session-only or
+ * process-global fallback.
+ */
+@Injectable()
+export class SignatureStore {
+  private readonly entries = new Map<string, SignatureEntry>();
+  private ttlMs = DEFAULT_TTL_MS;
+  private maxEntries = DEFAULT_MAX_ENTRIES;
 
-  private signature: string | null = null;
-  private readonly signaturesBySession = new Map<string, SessionSignatureBucket>();
-
-  private constructor() {}
-
-  public static getInstance(): SignatureStoreImpl {
-    if (!SignatureStoreImpl.instance) {
-      SignatureStoreImpl.instance = new SignatureStoreImpl();
-    }
-    return SignatureStoreImpl.instance;
-  }
-
-  /**
-   * Stores a signature, preferring the longest value because streaming chunks can
-   * contain partial signatures. A supplied session key prevents cross-session reuse.
-   */
-  public store(sig: string, sessionKey?: string, messageCount?: number): void {
-    if (!sig) {
+  public store(key: SignatureKey, signature: string | null | undefined): void {
+    const storageKey = this.toStorageKey(key);
+    if (!storageKey || !isUsableSignature(signature)) {
       return;
     }
 
-    if (!sessionKey) {
-      const existingLen = this.signature?.length ?? 0;
-      if (sig.length > existingLen) {
-        logger.info(
-          `[ThoughtSig] Storing signature (length: ${sig.length}, replacing old: ${existingLen}, session: legacy)`,
-        );
-        this.signature = sig;
-      } else {
-        logger.debug(
-          `[ThoughtSig] Skipping shorter signature (new length: ${sig.length}, existing: ${existingLen}, session: legacy)`,
-        );
-      }
-      return;
-    }
-
-    this.evictExpiredSessions();
     const now = Date.now();
-    const bucket = this.signaturesBySession.get(sessionKey) ?? {
-      signaturesByMessageCount: new Map<number, StoredSignature>(),
-      updatedAt: now,
-    };
-    bucket.updatedAt = now;
-
-    const normalizedMessageCount =
-      Number.isInteger(messageCount) && (messageCount ?? -1) >= 0 ? messageCount : undefined;
-
-    if (normalizedMessageCount !== undefined) {
-      for (const cachedMessageCount of bucket.signaturesByMessageCount.keys()) {
-        if (cachedMessageCount > normalizedMessageCount) {
-          bucket.signaturesByMessageCount.delete(cachedMessageCount);
-          logger.info(
-            `[ThoughtSig] Rewind detected (session: ${sessionKey}, current: ${normalizedMessageCount}, removed future: ${cachedMessageCount})`,
-          );
-        }
-      }
-    }
-
-    const existing =
-      normalizedMessageCount === undefined
-        ? bucket.legacySignature?.signature
-        : bucket.signaturesByMessageCount.get(normalizedMessageCount)?.signature;
-    const existingLen = existing ? existing.length : 0;
-    const newLen = sig.length;
-
-    if (newLen > existingLen) {
-      logger.info(
-        `[ThoughtSig] Storing signature (length: ${newLen}, replacing old: ${existingLen}, session: ${sessionKey}, message count: ${normalizedMessageCount ?? 'legacy'})`,
-      );
-      const stored = { signature: sig, updatedAt: now };
-      if (normalizedMessageCount === undefined) {
-        bucket.legacySignature = stored;
-      } else {
-        bucket.signaturesByMessageCount.set(normalizedMessageCount, stored);
-      }
-    } else {
-      logger.debug(
-        `[ThoughtSig] Skipping shorter signature (new length: ${newLen}, existing: ${existingLen}, session: ${sessionKey}, message count: ${normalizedMessageCount ?? 'legacy'})`,
-      );
-    }
-
-    this.signaturesBySession.set(sessionKey, bucket);
-    this.evictOverflowSessions();
+    this.evictExpired(now);
+    this.entries.delete(storageKey);
+    this.entries.set(storageKey, { signature, storedAt: now });
+    this.evictOverflow();
   }
 
-  /**
-   * Get the stored thought_signature without clearing it.
-   */
-  public get(sessionKey?: string): string | null {
-    if (sessionKey) {
-      const stored = this.signaturesBySession.get(sessionKey);
-      if (!stored) {
-        return null;
-      }
-      if (Date.now() - stored.updatedAt >= SignatureStoreImpl.SESSION_TTL_MS) {
-        this.signaturesBySession.delete(sessionKey);
-        return null;
-      }
-      let latestMessageCount = -1;
-      let latestSignature: string | null = null;
-      for (const [messageCount, cached] of stored.signaturesByMessageCount) {
-        if (messageCount > latestMessageCount) {
-          latestMessageCount = messageCount;
-          latestSignature = cached.signature;
-        }
-      }
-      return latestSignature ?? stored.legacySignature?.signature ?? null;
-    }
-    return this.signature;
-  }
-
-  /**
-   * Get the signature produced for the assistant message at an exact conversation index.
-   */
-  public getAt(sessionKey: string | undefined, messageCount: number): string | null {
-    if (!sessionKey) {
+  public get(key: SignatureKey): string | null {
+    const storageKey = this.toStorageKey(key);
+    if (!storageKey) {
       return null;
     }
-    const stored = this.signaturesBySession.get(sessionKey);
-    if (!stored) {
+
+    this.evictExpired(Date.now());
+    return this.entries.get(storageKey)?.signature ?? null;
+  }
+
+  public clear(): void {
+    this.entries.clear();
+  }
+
+  public size(): number {
+    this.evictExpired(Date.now());
+    return this.entries.size;
+  }
+
+  /** Instance-local bounds used by focused tests. */
+  public configure(options: { maxEntries?: number; ttlMs?: number }): void {
+    if (typeof options.ttlMs === 'number' && options.ttlMs > 0) {
+      this.ttlMs = options.ttlMs;
+    }
+    if (typeof options.maxEntries === 'number' && options.maxEntries > 0) {
+      this.maxEntries = options.maxEntries;
+    }
+    this.evictExpired(Date.now());
+    this.evictOverflow();
+  }
+
+  public resetConfig(): void {
+    this.ttlMs = DEFAULT_TTL_MS;
+    this.maxEntries = DEFAULT_MAX_ENTRIES;
+  }
+
+  private toStorageKey(key: SignatureKey): string | null {
+    const accountId = key?.accountId?.trim();
+    const model = key?.model?.trim();
+    const toolCallId = key?.toolCallId?.trim();
+    if (!accountId || !model || !toolCallId) {
       return null;
     }
-    if (Date.now() - stored.updatedAt >= SignatureStoreImpl.SESSION_TTL_MS) {
-      this.signaturesBySession.delete(sessionKey);
-      return null;
-    }
-    return stored.signaturesByMessageCount.get(messageCount)?.signature ?? null;
+    return JSON.stringify([accountId, model, toolCallId]);
   }
 
-  /**
-   * Get and clear the stored thought_signature.
-   */
-  public take(sessionKey?: string): string | null {
-    if (sessionKey) {
-      const signature = this.get(sessionKey);
-      this.signaturesBySession.delete(sessionKey);
-      return signature;
-    }
-    const sig = this.signature;
-    this.signature = null;
-    return sig;
-  }
-
-  /**
-   * Clear the stored thought_signature.
-   */
-  public clear(sessionKey?: string): void {
-    if (sessionKey) {
-      this.signaturesBySession.delete(sessionKey);
-      return;
-    }
-    this.signature = null;
-    this.signaturesBySession.clear();
-  }
-
-  private evictExpiredSessions(): void {
-    const oldestAllowed = Date.now() - SignatureStoreImpl.SESSION_TTL_MS;
-    for (const [sessionKey, stored] of this.signaturesBySession.entries()) {
-      if (stored.updatedAt < oldestAllowed) {
-        this.signaturesBySession.delete(sessionKey);
+  private evictExpired(now: number): void {
+    for (const [storageKey, entry] of this.entries) {
+      if (now - entry.storedAt >= this.ttlMs) {
+        this.entries.delete(storageKey);
       }
     }
   }
 
-  private evictOverflowSessions(): void {
-    while (this.signaturesBySession.size > SignatureStoreImpl.MAX_SESSION_ENTRIES) {
-      const oldestSessionKey = this.signaturesBySession.keys().next().value;
-      if (!oldestSessionKey) {
+  private evictOverflow(): void {
+    while (this.entries.size > this.maxEntries) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey === undefined) {
         return;
       }
-      this.signaturesBySession.delete(oldestSessionKey);
+      this.entries.delete(oldestKey);
     }
   }
 }
 
-export const SignatureStore = SignatureStoreImpl.getInstance();
+function isUsableSignature(signature: string | null | undefined): signature is string {
+  return typeof signature === 'string' && signature.trim().length > 0;
+}

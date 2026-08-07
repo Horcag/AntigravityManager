@@ -16,6 +16,7 @@ import {
 } from './modules/shared/services/model-availability.service';
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
+import { SignatureStore } from '../antigravity/SignatureStore';
 
 @Module({
   imports: [],
@@ -31,6 +32,7 @@ import { GenerationConstraintsService } from './modules/shared/services/generati
     AccountLeaseService,
     ProxyRetryService,
     GenerationConstraintsService,
+    SignatureStore,
     ProxyService,
     GeminiClient,
     ProxyGuard,
@@ -46,6 +48,7 @@ import { GenerationConstraintsService } from './modules/shared/services/generati
     ModelAvailabilityService,
     ProxyRetryService,
     GenerationConstraintsService,
+    SignatureStore,
     ProxyService,
   ],
 })

@@ -16,7 +16,11 @@ import {
   toOpenAIUsage,
   toOpenAIUsageFromGeminiUsageMetadata,
 } from '../antigravity/OpenAIUsageMapper';
-import {PartProcessor, StreamingState} from '../antigravity/ClaudeStreamingMapper';
+import {
+  PartProcessor,
+  type StreamingSignatureState,
+  StreamingState,
+} from '../antigravity/ClaudeStreamingMapper';
 import {
   type GeminiResponsesGroundingMetadata,
   type GeminiResponsesStreamPart,
@@ -31,6 +35,14 @@ import {resolveShellToolName} from '../antigravity/ShellToolName';
 import {sanitizeSystemInstructionForCache} from '../antigravity/StablePromptPrefix';
 import {classifyStreamError} from '../antigravity/stream-error-utils';
 import {SignatureStore} from '../antigravity/SignatureStore';
+import {
+  InvalidFunctionCallArgumentsError,
+  normalizeFunctionCallArgs,
+} from '../antigravity/function-call-args';
+import {
+  ToolCallIdConflictError,
+  ToolCallIdIntegrityTracker,
+} from '../antigravity/tool-call-id-integrity';
 import {decodeSignature} from '../antigravity/signature-utils';
 import {decodeInternalSseData} from '../antigravity/internal-sse';
 import {
@@ -65,6 +77,7 @@ export class ProxyService extends BaseProxyService {
     @Inject(GenerationConstraintsService) readonly generationConstraintsService: GenerationConstraintsService,
     @Inject(ProxyRetryService) readonly proxyRetryService: ProxyRetryService,
     @Inject(ModelRoutingService) readonly customModelRoutingService: ModelRoutingService,
+    @Inject(SignatureStore) readonly signatureStore: SignatureStore,
   ) {
     super(
       accountLeaseService,
@@ -83,9 +96,6 @@ export class ProxyService extends BaseProxyService {
     const appliedVariantRequest = applyAnthropicModelVariant(request);
     const routedRequest = appliedVariantRequest.request;
     const sessionKey = this.extractAnthropicSessionKey(request);
-    const signatureMessageCount = request.messages.filter(
-      (message) => message.role !== 'system',
-    ).length;
 
     const targetModel = this.resolveTargetModel(routedRequest.model);
     const extraHeaders = this.createModelSpecificHeaders(request.model);
@@ -126,6 +136,7 @@ export class ProxyService extends BaseProxyService {
           projectId,
           requestUserAgent,
           accountTargetModel,
+          { accountId: token.id, store: this.signatureStore },
         );
         this.applyInternalGenerationConstraints(
           geminiBody,
@@ -144,9 +155,7 @@ export class ProxyService extends BaseProxyService {
           this.markUpstreamSuccess(token.id, geminiBody.model);
           return this.processAnthropicInternalStream(
             stream,
-            geminiBody.model,
-            sessionKey,
-            signatureMessageCount,
+            this.createSignatureState(token.id, geminiBody.model),
           );
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -157,7 +166,7 @@ export class ProxyService extends BaseProxyService {
           );
           this.markUpstreamSuccess(token.id, geminiBody.model);
           return this.toAnthropicChatResponse(
-            transformResponse(response, sessionKey, signatureMessageCount),
+            transformResponse(response, this.createSignatureState(token.id, geminiBody.model)),
           );
         }
       } catch (error) {
@@ -172,6 +181,7 @@ export class ProxyService extends BaseProxyService {
               '',
               requestUserAgent,
               accountTargetModel,
+              { accountId: token.id, store: this.signatureStore },
             );
             this.applyInternalGenerationConstraints(
               fallbackBody,
@@ -189,9 +199,7 @@ export class ProxyService extends BaseProxyService {
               this.markUpstreamSuccess(token.id, fallbackBody.model);
               return this.processAnthropicInternalStream(
                 stream,
-                fallbackBody.model,
-                sessionKey,
-                signatureMessageCount,
+                this.createSignatureState(token.id, fallbackBody.model),
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -202,7 +210,10 @@ export class ProxyService extends BaseProxyService {
               );
               this.markUpstreamSuccess(token.id, fallbackBody.model);
               return this.toAnthropicChatResponse(
-                transformResponse(response, sessionKey, signatureMessageCount),
+                transformResponse(
+                  response,
+                  this.createSignatureState(token.id, fallbackBody.model),
+                ),
               );
             }
           } catch (fallbackErr) {
@@ -235,6 +246,7 @@ export class ProxyService extends BaseProxyService {
               token.token.project_id ?? '',
               requestUserAgent,
               downgradedVariant.request.model,
+              { accountId: token.id, store: this.signatureStore },
             );
             this.applyInternalGenerationConstraints(
               downgradedBody,
@@ -252,9 +264,7 @@ export class ProxyService extends BaseProxyService {
               this.markUpstreamSuccess(token.id, downgradedBody.model);
               return this.processAnthropicInternalStream(
                 stream,
-                downgradedBody.model,
-                sessionKey,
-                signatureMessageCount,
+                this.createSignatureState(token.id, downgradedBody.model),
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -265,7 +275,10 @@ export class ProxyService extends BaseProxyService {
               );
               this.markUpstreamSuccess(token.id, downgradedBody.model);
               const transformed = this.toAnthropicChatResponse(
-                transformResponse(response, sessionKey, signatureMessageCount),
+                transformResponse(
+                  response,
+                  this.createSignatureState(token.id, downgradedBody.model),
+                ),
               );
               return {
                 ...transformed,
@@ -292,15 +305,13 @@ export class ProxyService extends BaseProxyService {
 
   private processAnthropicInternalStream(
     upstreamStream: NodeJS.ReadableStream,
-    _model: string,
-    signatureSessionKey?: string,
-    signatureMessageCount?: number,
+    signatureState: StreamingSignatureState,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
 
-      const state = new StreamingState(signatureSessionKey, signatureMessageCount);
+      const state = new StreamingState(signatureState);
       const processor = new PartProcessor(state);
 
       let lastFinishReason: string | undefined;
@@ -365,6 +376,15 @@ export class ProxyService extends BaseProxyService {
             // Reset error state on successful parse
             state.resetErrorState();
           } catch (e) {
+            if (
+              e instanceof ToolCallIdConflictError ||
+              e instanceof InvalidFunctionCallArgumentsError
+            ) {
+              idleTimer.clear();
+              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+              subscriber.error(e);
+              return;
+            }
             this.logger.error('Stream parse error', e);
             const errorChunks = state.handleParseError(dataStr);
             errorChunks.forEach((c) => subscriber.next(c));
@@ -674,6 +694,7 @@ export class ProxyService extends BaseProxyService {
           projectId,
           requestUserAgent,
           accountTargetModel,
+          { accountId: token.id, store: this.signatureStore },
         );
         this.applyInternalGenerationConstraints(
           geminiBody,
@@ -696,9 +717,8 @@ export class ProxyService extends BaseProxyService {
               stream,
               request.model,
               outputProtocol,
-              sessionKey,
               clientToolNames,
-              claudeRequest.messages.length,
+              this.createSignatureState(token.id, geminiBody.model),
             );
           } catch (streamError) {
             this.logger.warn(
@@ -719,8 +739,7 @@ export class ProxyService extends BaseProxyService {
             );
             const claudeResponse = transformResponse(
               response,
-              sessionKey,
-              claudeRequest.messages.length,
+              this.createSignatureState(token.id, geminiBody.model),
             );
             const openaiResponse = this.convertClaudeToOpenAIResponse(
               claudeResponse,
@@ -730,9 +749,7 @@ export class ProxyService extends BaseProxyService {
             return outputProtocol === 'responses'
               ? this.createSyntheticResponsesStream(
                   openaiResponse,
-                  sessionKey,
                   clientToolNames,
-                  claudeRequest.messages.length,
                 )
               : this.createSyntheticOpenAIStream(openaiResponse);
           }
@@ -750,8 +767,7 @@ export class ProxyService extends BaseProxyService {
           // Transform Gemini response to OpenAI format
           const claudeResponse = transformResponse(
             response,
-            sessionKey,
-            claudeRequest.messages.length,
+            this.createSignatureState(token.id, geminiBody.model),
           );
           this.logger.log(
             `Transformed Claude response snippet: ${safeStringifyPacket(claudeResponse).substring(0, 500)}`,
@@ -771,6 +787,7 @@ export class ProxyService extends BaseProxyService {
               '',
               requestUserAgent,
               accountTargetModel,
+              { accountId: token.id, store: this.signatureStore },
             );
             this.applyInternalGenerationConstraints(
               fallbackBody,
@@ -790,9 +807,8 @@ export class ProxyService extends BaseProxyService {
                 stream,
                 request.model,
                 outputProtocol,
-                sessionKey,
                 clientToolNames,
-                claudeRequest.messages.length,
+                this.createSignatureState(token.id, fallbackBody.model),
               );
             }
 
@@ -805,8 +821,7 @@ export class ProxyService extends BaseProxyService {
             this.markUpstreamSuccess(token.id, fallbackBody.model);
             const claudeResponse = transformResponse(
               response,
-              sessionKey,
-              claudeRequest.messages.length,
+              this.createSignatureState(token.id, fallbackBody.model),
             );
             return this.convertClaudeToOpenAIResponse(
               claudeResponse,
@@ -836,34 +851,30 @@ export class ProxyService extends BaseProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     outputProtocol: OpenAIOutputProtocol,
-    signatureSessionKey?: string,
     clientToolNames?: ReadonlySet<string>,
-    signatureMessageCount?: number,
+    signatureState?: StreamingSignatureState,
   ): Observable<string> {
     if (outputProtocol === 'responses') {
       return this.processResponsesStreamResponse(
         upstreamStream,
         model,
-        signatureSessionKey,
         clientToolNames,
-        signatureMessageCount,
+        signatureState,
       );
     }
     return this.processStreamResponse(
       upstreamStream,
       model,
       clientToolNames,
-      signatureSessionKey,
-      signatureMessageCount,
+      signatureState,
     );
   }
 
   private processResponsesStreamResponse(
     upstreamStream: NodeJS.ReadableStream,
     model: string,
-    signatureSessionKey?: string,
     clientToolNames?: ReadonlySet<string>,
-    signatureMessageCount?: number,
+    signatureState?: StreamingSignatureState,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
@@ -873,8 +884,7 @@ export class ProxyService extends BaseProxyService {
         clientToolNames,
         model,
         responseId: `resp_${uuidv4()}`,
-        signatureMessageCount,
-        signatureSessionKey,
+        signatureState,
       });
       let heartbeatTimer: NodeJS.Timeout | undefined;
 
@@ -972,7 +982,18 @@ export class ProxyService extends BaseProxyService {
               complete();
               return;
             }
-          } catch {
+          } catch (error) {
+            if (
+              error instanceof ToolCallIdConflictError ||
+              error instanceof InvalidFunctionCallArgumentsError
+            ) {
+              completed = true;
+              idleTimer.clear();
+              clearHeartbeat();
+              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+              subscriber.error(error);
+              return;
+            }
             // Preserve compatibility: ignore per-chunk mapping failures.
           }
         }
@@ -1007,7 +1028,6 @@ export class ProxyService extends BaseProxyService {
 
     const functionCallRecord = this.toUnknownRecord(part.functionCall);
     const functionName = isString(functionCallRecord?.name) ? functionCallRecord.name : null;
-    const functionArgs = this.toUnknownRecord(functionCallRecord?.args) ?? {};
     const functionId = isString(functionCallRecord?.id) ? functionCallRecord.id : undefined;
     const inlineDataRecord = this.toUnknownRecord(part.inlineData);
     const inlineData =
@@ -1021,7 +1041,9 @@ export class ProxyService extends BaseProxyService {
     return {
       functionCall: functionName
         ? {
-            args: functionArgs,
+            ...(functionCallRecord && Object.hasOwn(functionCallRecord, 'args')
+              ? { args: functionCallRecord.args }
+              : {}),
             id: functionId,
             name: functionName,
           }
@@ -1123,8 +1145,7 @@ export class ProxyService extends BaseProxyService {
     upstreamStream: NodeJS.ReadableStream,
     model: string,
     clientToolNames?: ReadonlySet<string>,
-    signatureSessionKey?: string,
-    signatureMessageCount?: number,
+    signatureState?: StreamingSignatureState,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
@@ -1133,7 +1154,9 @@ export class ProxyService extends BaseProxyService {
       let hasSentDone = false;
       let lastUsage: OpenAIUsage | undefined;
       let toolCallIndex = 0;
-      const emittedToolCalls = new Set<string>();
+      let emittedToolCallCount = 0;
+      let latestResponseSignature: string | null = null;
+      const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
 
       const streamId = `chatcmpl-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
@@ -1218,22 +1241,39 @@ export class ProxyService extends BaseProxyService {
                     : undefined;
                 const signature = decodeSignature(rawSignature);
                 if (signature) {
-                  SignatureStore.store(signature, signatureSessionKey, signatureMessageCount);
+                  latestResponseSignature = signature;
                 }
 
                 const functionCall = this.toUnknownRecord(part.functionCall);
                 if (functionCall && isString(functionCall.name)) {
-                  const dedupeKey = JSON.stringify(functionCall);
-                  if (emittedToolCalls.has(dedupeKey)) {
+                  const rawArguments = normalizeFunctionCallArgs(functionCall);
+                  const explicitToolCallId = isString(functionCall.id)
+                    ? functionCall.id
+                    : undefined;
+                  const integrity = toolCallIdIntegrity.record(
+                    explicitToolCallId,
+                    functionCall.name,
+                    rawArguments,
+                  );
+                  if (integrity === 'replay') {
+                    const replaySignature = signature ?? latestResponseSignature;
+                    if (replaySignature && signatureState && explicitToolCallId) {
+                      signatureState.store.store(
+                        {
+                          accountId: signatureState.accountId,
+                          model: signatureState.model,
+                          toolCallId: explicitToolCallId,
+                        },
+                        replaySignature,
+                      );
+                    }
                     continue;
                   }
-                  emittedToolCalls.add(dedupeKey);
 
                   const splitName = splitNamespaceToolName(functionCall.name);
                   const functionName = clientToolNames
                     ? resolveShellToolName(splitName.name, clientToolNames)
                     : splitName.name;
-                  const rawArguments = this.toUnknownRecord(functionCall.args) ?? {};
                   const functionArguments = isCustomToolCall(functionName)
                     ? toCustomToolArguments(
                         functionName,
@@ -1241,6 +1281,18 @@ export class ProxyService extends BaseProxyService {
                           .input,
                       )
                     : rawArguments;
+                  const clientToolCallId = explicitToolCallId ?? `${functionName}-${uuidv4()}`;
+                  const capturedSignature = signature ?? latestResponseSignature;
+                  if (capturedSignature && signatureState) {
+                    signatureState.store.store(
+                      {
+                        accountId: signatureState.accountId,
+                        model: signatureState.model,
+                        toolCallId: clientToolCallId,
+                      },
+                      capturedSignature,
+                    );
+                  }
                   const toolCallChunk = {
                     id: streamId,
                     object: 'chat.completion.chunk',
@@ -1254,9 +1306,7 @@ export class ProxyService extends BaseProxyService {
                           tool_calls: [
                             {
                               index: toolCallIndex,
-                              id: isString(functionCall.id)
-                                ? functionCall.id
-                                : `${functionName}-${uuidv4()}`,
+                              id: clientToolCallId,
                               type: 'function',
                               function: {
                                 name: functionName,
@@ -1271,6 +1321,7 @@ export class ProxyService extends BaseProxyService {
                   };
                   pushChunk(toolCallChunk);
                   toolCallIndex += 1;
+                  emittedToolCallCount += 1;
                 }
 
                 const inlineData = this.toUnknownRecord(part.inlineData);
@@ -1334,7 +1385,7 @@ export class ProxyService extends BaseProxyService {
                       // OpenAI clients only continue the tool loop when the finish reason reflects
                       // the emitted tool call, even if Gemini reports a generic STOP.
                       finish_reason:
-                        emittedToolCalls.size > 0
+                        emittedToolCallCount > 0
                           ? 'tool_calls'
                           : this.mapGeminiFinishReasonToOpenAIFinishReason(candidate.finishReason),
                     },
@@ -1348,7 +1399,16 @@ export class ProxyService extends BaseProxyService {
                 return;
               }
             }
-          } catch {
+          } catch (error) {
+            if (
+              error instanceof ToolCallIdConflictError ||
+              error instanceof InvalidFunctionCallArgumentsError
+            ) {
+              idleTimer.clear();
+              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+              subscriber.error(error);
+              return;
+            }
             // Preserve compatibility: ignore per-chunk mapping failures.
           }
         }
@@ -1457,17 +1517,13 @@ export class ProxyService extends BaseProxyService {
 
   private createSyntheticResponsesStream(
     response: OpenAIChatResponse,
-    signatureSessionKey?: string,
     clientToolNames?: ReadonlySet<string>,
-    signatureMessageCount?: number,
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const mapper = new OpenAIResponsesStreamingMapper({
         clientToolNames,
         model: response.model,
         responseId: `resp_${uuidv4()}`,
-        signatureMessageCount,
-        signatureSessionKey,
       });
       const choice = response.choices?.[0];
       const content =
@@ -1507,6 +1563,10 @@ export class ProxyService extends BaseProxyService {
       }
       subscriber.complete();
     });
+  }
+
+  private createSignatureState(accountId: string, model: string): StreamingSignatureState {
+    return { accountId, model, store: this.signatureStore };
   }
 
   private toClaudeRequest(

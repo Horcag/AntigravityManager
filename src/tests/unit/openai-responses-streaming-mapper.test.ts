@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { OpenAIResponsesStreamingMapper } from '@/modules/proxy-gateway/antigravity/OpenAIResponsesStreamingMapper';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
@@ -27,10 +27,6 @@ function createMapper(): OpenAIResponsesStreamingMapper {
 }
 
 describe('OpenAIResponsesStreamingMapper', () => {
-  afterEach(() => {
-    SignatureStore.clear();
-  });
-
   it('emits a complete Responses tool-call lifecycle without creating an empty text item', () => {
     const mapper = createMapper();
     const events = [
@@ -200,7 +196,12 @@ describe('OpenAIResponsesStreamingMapper', () => {
   });
 
   it('emits a text diagnostic instead of an invalid apply_patch tool call', () => {
-    const mapper = createMapper();
+    const store = new SignatureStore();
+    const mapper = new OpenAIResponsesStreamingMapper({
+      model: 'gemini-3-pro',
+      responseId: 'resp_test',
+      signatureState: { accountId: 'account-a', model: 'gemini-3-pro', store },
+    });
     const events = mapper
       .processPart({
         functionCall: {
@@ -208,6 +209,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
           id: 'call_patch_invalid',
           name: 'apply_patch',
         },
+        thoughtSignature: Buffer.from('must-not-be-stored').toString('base64'),
       })
       .map(parseEvent);
 
@@ -224,6 +226,13 @@ describe('OpenAIResponsesStreamingMapper', () => {
     expect(events[2]).toMatchObject({
       delta: expect.stringContaining('apply_patch rejected'),
     });
+    expect(
+      store.get({
+        accountId: 'account-a',
+        model: 'gemini-3-pro',
+        toolCallId: 'call_patch_invalid',
+      }),
+    ).toBeNull();
   });
 
   it('allocates sequential output indexes across text and tool calls', () => {
@@ -380,7 +389,12 @@ describe('OpenAIResponsesStreamingMapper', () => {
   });
 
   it('preserves a function call marked as thought and stores its thought signature', () => {
-    const mapper = createMapper();
+    const store = new SignatureStore();
+    const mapper = new OpenAIResponsesStreamingMapper({
+      model: 'gemini-3-pro',
+      responseId: 'resp_test',
+      signatureState: { accountId: 'account-a', model: 'gemini-3-pro', store },
+    });
     const encodedSignature = Buffer.from('stored thought signature').toString('base64');
     const events = mapper.processPart({
       functionCall: {
@@ -398,23 +412,43 @@ describe('OpenAIResponsesStreamingMapper', () => {
       'response.custom_tool_call_input.done',
       'response.output_item.done',
     ]);
-    expect(SignatureStore.get()).toBe('stored thought signature');
+    expect(
+      store.get({
+        accountId: 'account-a',
+        model: 'gemini-3-pro',
+        toolCallId: 'call_thought_1',
+      }),
+    ).toBe('stored thought signature');
   });
 
-  it('stores thought signatures under the supplied session key', () => {
+  it('binds a preceding thought signature to the next emitted tool-call id and exact context', () => {
+    const store = new SignatureStore();
     const mapper = new OpenAIResponsesStreamingMapper({
       model: 'gemini-3-pro',
       responseId: 'resp_session_test',
-      signatureMessageCount: 4,
-      signatureSessionKey: 'openai:session-a',
+      signatureState: { accountId: 'account-a', model: 'gemini-3-pro', store },
     });
     const encodedSignature = Buffer.from('session a thought signature').toString('base64');
 
     mapper.processPart({ thought: true, thoughtSignature: encodedSignature });
+    mapper.processPart({
+      functionCall: { args: {}, id: 'call_after_thought', name: 'search_docs' },
+    });
 
-    expect(SignatureStore.get('openai:session-a')).toBe('session a thought signature');
-    expect(SignatureStore.getAt('openai:session-a', 4)).toBe('session a thought signature');
-    expect(SignatureStore.get()).toBeNull();
+    expect(
+      store.get({
+        accountId: 'account-a',
+        model: 'gemini-3-pro',
+        toolCallId: 'call_after_thought',
+      }),
+    ).toBe('session a thought signature');
+    expect(
+      store.get({
+        accountId: 'account-b',
+        model: 'gemini-3-pro',
+        toolCallId: 'call_after_thought',
+      }),
+    ).toBeNull();
   });
 
   it('emits grounding metadata as visible Responses text', () => {

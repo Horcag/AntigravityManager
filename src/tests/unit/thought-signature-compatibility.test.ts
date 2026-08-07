@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import { transformClaudeRequestIn } from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import { transformResponse } from '@/modules/proxy-gateway/antigravity/ClaudeResponseMapper';
@@ -10,15 +10,13 @@ import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureSto
 import type { ClaudeRequest } from '@/modules/proxy-gateway/antigravity/types';
 
 const THOUGHT_SIGNATURE = 'thought-signature-for-tool-call';
+const ACCOUNT_ID = 'account-a';
+const MODEL = 'gemini-3-flash';
 
 describe('thought signature compatibility', () => {
-  afterEach(() => {
-    SignatureStore.clear();
-  });
-
-  it('sends both signature field names for thinking, function calls, and tool results', () => {
+  it('sends both signature field names for explicit thinking, function calls, and results', () => {
     const request: ClaudeRequest = {
-      model: 'gemini-3-flash',
+      model: MODEL,
       max_tokens: 1024,
       thinking: { type: 'enabled', budget_tokens: 256 },
       messages: [
@@ -36,13 +34,7 @@ describe('thought signature compatibility', () => {
         },
         {
           role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call_weather',
-              content: 'Cloudy',
-            },
-          ],
+          content: [{ type: 'tool_result', tool_use_id: 'call_weather', content: 'Cloudy' }],
         },
       ],
     };
@@ -57,7 +49,8 @@ describe('thought signature compatibility', () => {
     }
   });
 
-  it('accepts snake-case signatures from non-streaming Gemini responses', () => {
+  it('captures a snake-case non-stream signature under the emitted tool id and exact context', () => {
+    const store = new SignatureStore();
     const response = transformResponse(
       {
         candidates: [
@@ -78,8 +71,7 @@ describe('thought signature compatibility', () => {
           },
         ],
       },
-      'anthropic:non-stream-session',
-      2,
+      { accountId: ACCOUNT_ID, model: MODEL, store },
     );
 
     expect(response.content).toContainEqual({
@@ -89,7 +81,9 @@ describe('thought signature compatibility', () => {
       input: { location: 'London' },
       signature: THOUGHT_SIGNATURE,
     });
-    expect(SignatureStore.getAt('anthropic:non-stream-session', 2)).toBe(THOUGHT_SIGNATURE);
+    expect(store.get({ accountId: ACCOUNT_ID, model: MODEL, toolCallId: 'call_weather' })).toBe(
+      THOUGHT_SIGNATURE,
+    );
   });
 
   it('accepts snake-case signatures from streaming Gemini responses', () => {
@@ -105,127 +99,100 @@ describe('thought signature compatibility', () => {
     expect(chunks.join('')).toContain(THOUGHT_SIGNATURE);
   });
 
-  it('reuses only the signature belonging to the request session', () => {
-    const alphaSignature = 'thought-signature-for-session-alpha';
-    SignatureStore.store(alphaSignature, 'anthropic:session-alpha');
-    SignatureStore.store('thought-signature-for-session-beta', 'anthropic:session-beta');
+  it('replays only the signature matching account, effective model, and tool-call id', () => {
+    const store = new SignatureStore();
+    store.store(
+      { accountId: ACCOUNT_ID, model: MODEL, toolCallId: 'call_alpha' },
+      'alpha-signature-value',
+    );
+    store.store(
+      { accountId: 'account-b', model: MODEL, toolCallId: 'call_alpha' },
+      'wrong-account-signature',
+    );
 
     const request: ClaudeRequest = {
-      model: 'gemini-3-flash',
+      model: MODEL,
       max_tokens: 1024,
       thinking: { type: 'enabled', budget_tokens: 256 },
-      metadata: { signature_session_key: 'anthropic:session-alpha' },
       messages: [
         {
           role: 'assistant',
           content: [
-            {
-              type: 'tool_use',
-              id: 'call_session_alpha',
-              name: 'get_weather',
-              input: { location: 'London' },
-            },
+            { type: 'tool_use', id: 'call_alpha', name: 'get_weather', input: {} },
+            { type: 'tool_use', id: 'call_missing', name: 'get_time', input: {} },
           ],
         },
       ],
     };
 
-    const body = transformClaudeRequestIn(request);
-    const functionCallPart = body.request.contents[0].parts.find((part) => part.functionCall);
+    const body = transformClaudeRequestIn(request, undefined, undefined, MODEL, {
+      accountId: ACCOUNT_ID,
+      store,
+    });
+    const functionCalls = body.request.contents[0].parts.filter((part) => part.functionCall);
 
-    expect(functionCallPart?.thoughtSignature).toBe(alphaSignature);
-    expect(functionCallPart?.thought_signature).toBe(alphaSignature);
+    expect(functionCalls[0].thoughtSignature).toBe('alpha-signature-value');
+    expect(functionCalls[1].thoughtSignature).toBe('skip_thought_signature_validator');
+    expect(
+      store.get({ accountId: ACCOUNT_ID, model: 'gemini-3-pro', toolCallId: 'call_alpha' }),
+    ).toBeNull();
   });
 
-  it('stores signatures by message count and removes future entries after rewind', () => {
-    const sessionKey = 'anthropic:rewind-session';
-    const firstSignature = 'a'.repeat(60);
-    const shorterFirstSignature = 'b'.repeat(55);
-    const futureSignature = 'c'.repeat(70);
-    const rewindSignature = 'd'.repeat(65);
-
-    SignatureStore.store(firstSignature, sessionKey, 1);
-    SignatureStore.store(shorterFirstSignature, sessionKey, 1);
-    SignatureStore.store(futureSignature, sessionKey, 3);
-
-    expect(SignatureStore.getAt(sessionKey, 1)).toBe(firstSignature);
-    expect(SignatureStore.getAt(sessionKey, 3)).toBe(futureSignature);
-    expect(SignatureStore.get(sessionKey)).toBe(futureSignature);
-
-    SignatureStore.store(rewindSignature, sessionKey, 2);
-
-    expect(SignatureStore.getAt(sessionKey, 1)).toBe(firstSignature);
-    expect(SignatureStore.getAt(sessionKey, 2)).toBe(rewindSignature);
-    expect(SignatureStore.getAt(sessionKey, 3)).toBeNull();
-    expect(SignatureStore.get(sessionKey)).toBe(rewindSignature);
-  });
-
-  it('replays the signature matching each historical message index before the latest fallback', () => {
-    const sessionKey = 'anthropic:multi-turn-session';
-    const firstTurnSignature = 'first-turn-signature'.repeat(4);
-    const latestTurnSignature = 'latest-turn-signature'.repeat(4);
-
-    SignatureStore.store(firstTurnSignature, sessionKey, 1);
-    SignatureStore.store(latestTurnSignature, sessionKey, 3);
+  it('replays distinct signatures for distinct historical tool-call ids', () => {
+    const store = new SignatureStore();
+    store.store(
+      { accountId: ACCOUNT_ID, model: MODEL, toolCallId: 'call_first' },
+      'first-turn-signature',
+    );
+    store.store(
+      { accountId: ACCOUNT_ID, model: MODEL, toolCallId: 'call_latest' },
+      'latest-turn-signature',
+    );
 
     const request: ClaudeRequest = {
-      model: 'gemini-3-flash',
+      model: MODEL,
       max_tokens: 1024,
       thinking: { type: 'enabled', budget_tokens: 256 },
-      metadata: { signature_session_key: sessionKey },
       messages: [
-        { role: 'user', content: 'First request' },
         {
           role: 'assistant',
           content: [
-            {
-              type: 'tool_use',
-              id: 'call_first_turn',
-              name: 'first_tool',
-              input: {},
-            },
-          ],
-        },
-        {
-          role: 'user',
-          content: [{ type: 'tool_result', tool_use_id: 'call_first_turn', content: 'Done' }],
-        },
-        {
-          role: 'assistant',
-          content: [
-            {
-              type: 'tool_use',
-              id: 'call_latest_turn',
-              name: 'latest_tool',
-              input: {},
-            },
+            { type: 'tool_use', id: 'call_first', name: 'first_tool', input: {} },
+            { type: 'tool_use', id: 'call_latest', name: 'latest_tool', input: {} },
           ],
         },
       ],
     };
 
-    const body = transformClaudeRequestIn(request);
-    const firstTurnCall = body.request.contents[1].parts.find((part) => part.functionCall);
-    const latestTurnCall = body.request.contents[3].parts.find((part) => part.functionCall);
+    const body = transformClaudeRequestIn(request, undefined, undefined, MODEL, {
+      accountId: ACCOUNT_ID,
+      store,
+    });
+    const functionCalls = body.request.contents[0].parts.filter((part) => part.functionCall);
 
-    expect(firstTurnCall?.thoughtSignature).toBe(firstTurnSignature);
-    expect(latestTurnCall?.thoughtSignature).toBe(latestTurnSignature);
+    expect(functionCalls[0].thoughtSignature).toBe('first-turn-signature');
+    expect(functionCalls[1].thoughtSignature).toBe('latest-turn-signature');
   });
 
-  it('stores a streamed tool signature at the request message count', () => {
-    const sessionKey = 'anthropic:stream-message-count';
-    const state = new StreamingState(sessionKey, 5);
+  it('stores a streamed tool signature under the client-visible generated id', () => {
+    const store = new SignatureStore();
+    const state = new StreamingState({ accountId: ACCOUNT_ID, model: MODEL, store });
     const processor = new PartProcessor(state);
 
-    processor.process({
-      functionCall: {
-        id: 'call_streamed',
-        name: 'streamed_tool',
-        args: {},
-      },
+    const chunks = processor.process({
+      functionCall: { name: 'streamed_tool', args: {} },
       thoughtSignature: THOUGHT_SIGNATURE,
     });
+    const startEvent = chunks
+      .map((chunk) => chunk.split('\n').find((line) => line.startsWith('data: ')))
+      .filter((line): line is string => Boolean(line))
+      .map((line) => JSON.parse(line.slice('data: '.length)) as Record<string, unknown>)
+      .find((event) => event.type === 'content_block_start');
+    const contentBlock = startEvent?.content_block as { id?: string } | undefined;
 
-    expect(SignatureStore.getAt(sessionKey, 5)).toBe(THOUGHT_SIGNATURE);
+    expect(contentBlock?.id).toBeTruthy();
+    expect(
+      store.get({ accountId: ACCOUNT_ID, model: MODEL, toolCallId: contentBlock?.id ?? '' }),
+    ).toBe(THOUGHT_SIGNATURE);
   });
 });

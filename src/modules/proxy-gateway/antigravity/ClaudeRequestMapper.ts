@@ -4,7 +4,7 @@ import { isEmpty, isPlainObject, isString, sortBy } from 'lodash-es';
 import { mapClaudeModelToGemini, normalizeGeminiModelAlias } from './ModelMapping';
 import { getMaxOutputTokens, getThinkingBudget } from './ModelSpecs';
 import { cleanJsonSchema, normalizeObjectJsonSchema } from './JsonSchemaUtils';
-import { SignatureStore } from './SignatureStore';
+import type { SignatureKey, SignatureStore } from './SignatureStore';
 import { sanitizeSystemInstructionForCache } from './StablePromptPrefix';
 import { buildOfficialSystemInstruction } from './OfficialSystemInstruction';
 import { parseMarkdownImagesToGeminiParts } from './MarkdownImageParts';
@@ -46,6 +46,15 @@ interface ResolvedRequestConfig {
 
 type RequestType = 'agent' | 'web_search' | 'image_gen';
 
+export interface RequestSignatureState {
+  accountId: string;
+  store: SignatureStore;
+}
+
+type SignatureLookup = (toolCallId: string) => string | null;
+
+const NO_SIGNATURE_LOOKUP: SignatureLookup = () => null;
+
 const AGENT_CREDIT_TYPES = ['GOOGLE_ONE_AI'];
 const TOOL_SCHEMA_CACHE_LIMIT = 100;
 const TOOL_SCHEMA_CACHE_TTL_MS = 30 * 60 * 1000;
@@ -76,11 +85,9 @@ export function transformClaudeRequestIn(
   projectId?: string,
   userAgent?: string,
   resolvedModel?: string,
+  signatureState?: RequestSignatureState,
 ): GeminiInternalRequest {
   const { extraSystemMessages, messages } = extractEmbeddedSystemMessages(claudeReq.messages);
-  const signatureSessionKey = isString(claudeReq.metadata?.signature_session_key)
-    ? claudeReq.metadata.signature_session_key
-    : undefined;
   // Check for networking tools (server tool or built-in tool)
   const hasWebSearchTool = detectsNetworkingTool(claudeReq.tools);
 
@@ -106,6 +113,7 @@ export function transformClaudeRequestIn(
 
   // Resolve grounding config
   const requestConfig = resolveRequestConfig(claudeReq.model, mappedModel, normalizedTools);
+  const signatureLookup = createSignatureLookup(signatureState, requestConfig.finalModel);
 
   const allowDummyThought = requestConfig.finalModel.startsWith('gemini-');
 
@@ -124,7 +132,6 @@ export function transformClaudeRequestIn(
   }
 
   if (isThinkingEnabled) {
-    const sessionSignature = SignatureStore.get(signatureSessionKey);
     const hasFunctionCalls = messages.some((m) => {
       if (Array.isArray(m.content)) {
         return m.content.some((b) => b.type === 'tool_use');
@@ -132,7 +139,7 @@ export function transformClaudeRequestIn(
       return false;
     });
 
-    if (hasFunctionCalls && !hasValidSignatureForFunctionCalls(messages, sessionSignature)) {
+    if (hasFunctionCalls && !hasValidSignatureForFunctionCalls(messages, signatureLookup)) {
       if (!isGeminiFlashModel(requestConfig.finalModel)) {
         isThinkingEnabled = false;
       }
@@ -157,7 +164,7 @@ export function transformClaudeRequestIn(
     isThinkingEnabled,
     allowDummyThought,
     requestConfig.finalModel,
-    signatureSessionKey,
+    signatureLookup,
   );
 
   // 3. Tools
@@ -616,23 +623,33 @@ function buildSystemInstruction(
  */
 const MIN_SIGNATURE_LENGTH = 10;
 
+function createSignatureLookup(
+  state: RequestSignatureState | undefined,
+  effectiveModel: string,
+): SignatureLookup {
+  const accountId = state?.accountId?.trim();
+  const model = effectiveModel.trim();
+  if (!state?.store || !accountId || !model) {
+    return NO_SIGNATURE_LOOKUP;
+  }
+
+  return (toolCallId: string): string | null => {
+    const key: SignatureKey = { accountId, model, toolCallId };
+    return state.store.get(key);
+  };
+}
+
 /**
  * Check if we have any valid signature available for function calls
  * @param messages  Messages from ClaudeRequest
- * @param sessionSignature  Signature from session-scoped storage
+ * @param lookupSignature  Exact account/model/tool-call lookup
  * @returns  True if any valid signature is available for function calls
  */
 function hasValidSignatureForFunctionCalls(
   messages: Message[],
-  sessionSignature: string | null | undefined,
+  lookupSignature: SignatureLookup,
 ): boolean {
-  // 1. Check session-scoped store
-  if (sessionSignature && sessionSignature.length >= MIN_SIGNATURE_LENGTH) {
-    return true;
-  }
-
-  // 2. Check if any message has a thinking block with valid signature
-  // Traverse in reverse to find recent signatures
+  // Traverse in reverse to prefer the most recent explicit or exact-keyed signature.
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role === 'assistant') {
@@ -642,6 +659,13 @@ function hasValidSignatureForFunctionCalls(
             block.type === 'thinking' &&
             block.signature &&
             block.signature.length >= MIN_SIGNATURE_LENGTH
+          ) {
+            return true;
+          }
+          if (
+            block.type === 'tool_use' &&
+            ((block.signature && block.signature.length >= MIN_SIGNATURE_LENGTH) ||
+              (block.id && (lookupSignature(block.id)?.length ?? 0) >= MIN_SIGNATURE_LENGTH))
           ) {
             return true;
           }
@@ -662,7 +686,7 @@ function buildContents(
   isThinkingEnabled: boolean,
   allowDummyThought: boolean,
   mappedModel: string,
-  signatureSessionKey?: string,
+  lookupSignature: SignatureLookup,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
   let lastThoughtSignature: string | null = null;
@@ -702,11 +726,7 @@ function buildContents(
         };
         cleanJsonSchema(part);
         toolIdToName.set(block.id, block.name);
-        const finalSig =
-          block.signature ||
-          lastThoughtSignature ||
-          SignatureStore.getAt(signatureSessionKey, i) ||
-          SignatureStore.get(signatureSessionKey);
+        const finalSig = block.signature || lastThoughtSignature || lookupSignature(block.id);
         if (finalSig) {
           part.thoughtSignature = finalSig;
           part.thought_signature = finalSig;
@@ -977,6 +997,7 @@ function buildToolConfig(toolChoice: ClaudeRequest['tool_choice']): {
   };
 } {
   let mode = 'VALIDATED';
+  let allowedFunctionNames: string[] | undefined;
   if (typeof toolChoice === 'string') {
     if (toolChoice === 'none') {
       mode = 'NONE';
@@ -986,12 +1007,23 @@ function buildToolConfig(toolChoice: ClaudeRequest['tool_choice']): {
       mode = 'ANY';
     }
   } else if (toolChoice) {
-    mode = 'ANY';
+    if (toolChoice.type === 'none') {
+      mode = 'NONE';
+    } else if (toolChoice.type === 'auto') {
+      mode = 'AUTO';
+    } else {
+      mode = 'ANY';
+      const selectedName = toolChoice.name || toolChoice.function?.name;
+      if (selectedName?.trim()) {
+        allowedFunctionNames = [selectedName.trim()];
+      }
+    }
   }
 
   return {
     functionCallingConfig: {
       mode,
+      ...(allowedFunctionNames ? { allowedFunctionNames } : {}),
     },
   };
 }

@@ -1,14 +1,16 @@
-import { SignatureStore } from './SignatureStore';
+import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { optimizeApplyPatch, validateApplyPatchV4A } from './ApplyPatchPreflight';
 import { extractCustomToolInput, isCustomToolCall } from './CustomToolCall';
 import { resolveShellToolName } from './ShellToolName';
 import { splitNamespaceToolName } from './ToolNamespace';
 import type { OpenAIResponsesUsage } from './OpenAIUsageMapper';
+import { normalizeFunctionCallArgs } from './function-call-args';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: {
-    args: Record<string, unknown>;
+    args?: unknown;
     id?: string;
     name: string;
   };
@@ -76,16 +78,19 @@ interface ActiveMessageOutput {
   text: string;
 }
 
+interface OpenAIResponsesSignatureState extends SignatureContext {
+  store: SignatureStore;
+}
+
 interface OpenAIResponsesStreamingMapperOptions {
   clientToolNames?: ReadonlySet<string>;
   model: string;
   responseId: string;
-  signatureMessageCount?: number;
-  signatureSessionKey?: string;
+  signatureState?: OpenAIResponsesSignatureState;
 }
 
 export class OpenAIResponsesStreamingMapper {
-  private readonly emittedToolCallIds = new Set<string>();
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private readonly outputItems: ResponsesOutputItem[] = [];
   private activeMessage: ActiveMessageOutput | null = null;
   private activeThought: ActiveMessageOutput | null = null;
@@ -96,6 +101,7 @@ export class OpenAIResponsesStreamingMapper {
   private nextOutputIndex = 0;
   private sequenceNumber = 0;
   private usage: OpenAIResponsesUsage | undefined;
+  private latestResponseSignature: string | null = null;
 
   constructor(private readonly options: OpenAIResponsesStreamingMapperOptions) {}
 
@@ -132,15 +138,11 @@ export class OpenAIResponsesStreamingMapper {
 
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
     if (signature) {
-      SignatureStore.store(
-        signature,
-        this.options.signatureSessionKey,
-        this.options.signatureMessageCount,
-      );
+      this.latestResponseSignature = signature;
     }
 
     if (part.functionCall) {
-      return this.processFunctionCall(part.functionCall);
+      return this.processFunctionCall(part.functionCall, signature);
     }
 
     if (part.thought && part.text) {
@@ -327,20 +329,15 @@ export class OpenAIResponsesStreamingMapper {
 
   private processFunctionCall(
     functionCall: NonNullable<GeminiResponsesStreamPart['functionCall']>,
+    signature?: string,
   ): string[] {
+    const functionArgs = normalizeFunctionCallArgs(functionCall);
     const splitName = splitNamespaceToolName(functionCall.name);
     const functionName = this.options.clientToolNames
       ? resolveShellToolName(splitName.name, this.options.clientToolNames)
       : splitName.name;
     const callId = functionCall.id || `call_${this.options.responseId}_${this.nextOutputIndex}`;
-    if (functionCall.id && this.emittedToolCallIds.has(callId)) {
-      return [];
-    }
-    if (functionCall.id) {
-      this.emittedToolCallIds.add(callId);
-    }
-
-    const normalizedArguments = this.normalizeShellArguments(functionName, functionCall.args);
+    const normalizedArguments = this.normalizeShellArguments(functionName, functionArgs);
     const isCustomTool = isCustomToolCall(functionName) || functionName === 'shell';
     const argumentsString = JSON.stringify(normalizedArguments);
     let input = isCustomTool
@@ -357,6 +354,26 @@ export class OpenAIResponsesStreamingMapper {
         );
       }
       input = optimizedPatch.input;
+    }
+
+    const integrity = this.toolCallIdIntegrity.record(
+      functionCall.id,
+      functionCall.name,
+      functionArgs,
+    );
+    const capturedSignature = signature ?? this.latestResponseSignature;
+    if (capturedSignature && this.options.signatureState) {
+      this.options.signatureState.store.store(
+        {
+          accountId: this.options.signatureState.accountId,
+          model: this.options.signatureState.model,
+          toolCallId: callId,
+        },
+        capturedSignature,
+      );
+    }
+    if (integrity === 'replay') {
+      return [];
     }
 
     const outputIndex = this.nextOutputIndex;
