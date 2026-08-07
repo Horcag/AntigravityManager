@@ -1878,29 +1878,29 @@ export class ProxyService {
           return;
         }
 
-        if (json?.error) {
-          const upstreamMessage = isString(json.error?.message) ? json.error.message : undefined;
-          failStream(new Error(upstreamMessage ?? 'Upstream stream returned an error payload'));
+        const upstreamError = this.getUpstreamStreamError(json);
+        if (upstreamError) {
+          failStream(upstreamError);
           return;
         }
 
         {
           const candidate = json?.candidates?.[0];
-          let parts: InternalGeminiPart[] = [];
-          try {
-            parts = Array.isArray(candidate?.content?.parts)
-              ? candidate.content.parts.flatMap((part: unknown) => {
-                  const normalizedPart = this.normalizeGeminiPart(part);
-                  return normalizedPart ? [normalizedPart] : [];
-                })
-              : [];
-          } catch (error) {
-            failStream(
-              error instanceof Error
-                ? error
-                : new Error('Malformed Gemini function call arguments'),
-            );
-            return;
+          const parts: InternalGeminiPart[] = [];
+          if (Array.isArray(candidate?.content?.parts)) {
+            for (const part of candidate.content.parts) {
+              try {
+                const normalizedPart = this.normalizeGeminiPart(part);
+                if (normalizedPart) {
+                  parts.push(normalizedPart);
+                }
+              } catch (error) {
+                failStream(
+                  error instanceof Error ? error : new Error('Malformed Gemini stream part'),
+                );
+                return;
+              }
+            }
           }
           groundingMetadata = this.mergeGroundingMetadata(
             groundingMetadata,

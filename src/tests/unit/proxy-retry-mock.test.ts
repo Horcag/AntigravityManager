@@ -49,8 +49,12 @@ class TestableProxyService extends ProxyService {
     return (this as any).processAnthropicInternalStream(stream, model);
   }
 
-  public testOpenAIStream(stream: any, model: string = 'model'): Observable<string> {
-    return (this as any).processStreamResponse(stream, model);
+  public testOpenAIStream(
+    stream: any,
+    model: string = 'model',
+    streamOptions?: { variant: 'chat' | 'text'; includeUsage: boolean },
+  ): Observable<string> {
+    return (this as any).processStreamResponse(stream, model, undefined, streamOptions);
   }
 
   public testResponsesStream(stream: any, model: string = 'model'): Observable<string> {
@@ -1097,6 +1101,59 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(output).not.toContain('[DONE]');
     expect(raw.end).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['chat', 400, 'invalid_request_error'],
+    ['chat', 401, 'authentication_error'],
+    ['chat', 403, 'permission_error'],
+    ['chat', 429, 'rate_limit_error'],
+    ['chat', 500, 'server_error'],
+    ['chat', 503, 'server_error'],
+    ['text', 400, 'invalid_request_error'],
+    ['text', 401, 'authentication_error'],
+    ['text', 403, 'permission_error'],
+    ['text', 429, 'rate_limit_error'],
+    ['text', 500, 'server_error'],
+    ['text', 503, 'server_error'],
+  ] as const)(
+    'preserves an in-band %s stream error with status %i on the OpenAI wire',
+    (variant, status, expectedType) => {
+      const service = new TestableProxyService();
+      const controller = new ProxyController({} as any);
+      const stream = new EventEmitter();
+      const raw = {
+        end: vi.fn(),
+        on: vi.fn(),
+        writableEnded: false,
+        write: vi.fn(),
+        writeHead: vi.fn(),
+      };
+
+      (controller as any).writeSseResponse(
+        { hijack: vi.fn(), raw },
+        service.testOpenAIStream(stream, 'gpt-4o-mini', { variant, includeUsage: false }),
+      );
+      stream.emit(
+        'data',
+        Buffer.from('data: {"candidates":[{"content":{"parts":[{"text":"partial output"}]}}]}\n\n'),
+      );
+      stream.emit(
+        'data',
+        Buffer.from(
+          `data: ${JSON.stringify({ error: { code: status, message: `upstream ${status} failure` } })}\n\n`,
+        ),
+      );
+      stream.emit('end');
+
+      const output = raw.write.mock.calls.map(([chunk]) => String(chunk)).join('');
+      const terminalFrame = `data: {"error":{"message":"upstream ${status} failure","type":"${expectedType}","param":null,"code":null}}\n\n`;
+      expect(output).toContain('partial output');
+      expect(output).toContain(terminalFrame);
+      expect(output.match(/"error":\{/g)).toHaveLength(1);
+      expect(output).not.toContain('[DONE]');
+      expect(raw.end).toHaveBeenCalledOnce();
+    },
+  );
 
   it('ends the assembled Responses wire with error then failed for a same-frame conflicting tool id', () => {
     const service = new TestableProxyService();
