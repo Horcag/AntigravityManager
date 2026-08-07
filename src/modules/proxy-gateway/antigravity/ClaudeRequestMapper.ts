@@ -72,14 +72,6 @@ const SAFETY_SETTINGS: SafetySetting[] = [
   { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'OFF' },
   { category: 'HARM_CATEGORY_CIVIC_INTEGRITY', threshold: 'OFF' },
 ];
-const INTERNAL_STOP_SEQUENCES = [
-  '<|user|>',
-  '<|endoftext|>',
-  '<|end_of_turn|>',
-  '[DONE]',
-  '\n\nHuman:',
-];
-const MAX_GEMINI_STOP_SEQUENCES = 5;
 
 /**
  * Transforms Claude request into Gemini internal request format
@@ -619,6 +611,7 @@ function buildContents(
   const contents: GeminiContent[] = [];
   /** Signature effectively attached to each tool_use id, replayed onto its tool_result. */
   const toolIdToSignature = new Map<string, string>();
+  let toolResultImageIndex = 0;
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -628,14 +621,11 @@ function buildContents(
     const parts: GeminiPart[] = [];
     const contentBlocks = Array.isArray(msg.content)
       ? msg.content
-      : msg.content
-        ? [{ type: 'text' as const, text: msg.content }]
-        : [];
+      : [{ type: 'text' as const, text: msg.content }];
 
     for (const block of contentBlocks) {
       if (block.type === 'text') {
-        if (block.text && block.text !== '(no content)' && !isEmpty(block.text.trim()))
-          parts.push({ text: block.text.trim() });
+        parts.push({ text: block.text });
       } else if (block.type === 'thinking') {
         const part: GeminiPart = { text: block.thinking, thought: true };
         cleanJsonSchema(part);
@@ -673,22 +663,42 @@ function buildContents(
         parts.push(part);
       } else if (block.type === 'tool_result') {
         const funcName = toolIdToName.get(block.tool_use_id) || block.tool_use_id;
-        let mergedContent = '';
-        if (isString(block.content)) mergedContent = block.content;
-        else if (Array.isArray(block.content))
-          mergedContent = block.content
-            .filter((b: any) => b.type === 'text')
-            .map((b: any) => b.text)
-            .join('\n');
-        if (isEmpty(mergedContent.trim()))
-          mergedContent = block.is_error
-            ? 'Tool execution failed with no output.'
-            : 'Command executed successfully.';
+        const responseKey = block.is_error ? 'error' : 'result';
+        const responseParts: Array<string | { $ref: string }> = [];
+        const mediaParts: GeminiPart[] = [];
+
+        if (isString(block.content)) {
+          responseParts.push(block.content);
+        } else if (Array.isArray(block.content)) {
+          for (const nestedBlock of block.content) {
+            if (nestedBlock.type === 'text') {
+              responseParts.push(nestedBlock.text);
+            } else if (nestedBlock.type === 'image') {
+              const displayName = `tool_result_${i}_${block.tool_use_id}_image_${toolResultImageIndex++}`;
+              mediaParts.push({
+                inlineData: {
+                  mimeType: nestedBlock.source.media_type,
+                  data: nestedBlock.source.data,
+                  displayName,
+                },
+              });
+              responseParts.push({ $ref: displayName });
+            }
+          }
+        }
+
+        const responseValue =
+          responseParts.length === 0
+            ? '(no content)'
+            : responseParts.length === 1
+              ? responseParts[0]
+              : responseParts;
         const part: any = {
           functionResponse: {
             name: funcName,
-            response: { result: mergedContent },
+            response: { [responseKey]: responseValue },
             id: block.tool_use_id,
+            ...(mediaParts.length > 0 ? { parts: mediaParts } : {}),
           },
         };
         const resultSig = toolIdToSignature.get(block.tool_use_id) ?? lastThoughtSignature;
@@ -835,9 +845,9 @@ function buildGenerationConfig(
   if (claudeReq.max_tokens !== undefined) {
     config.maxOutputTokens = claudeReq.max_tokens;
   }
-  config.stopSequences = Array.from(
-    new Set([...(claudeReq.stop_sequences ?? []), ...INTERNAL_STOP_SEQUENCES]),
-  ).slice(0, MAX_GEMINI_STOP_SEQUENCES);
+  if (claudeReq.stop_sequences && claudeReq.stop_sequences.length > 0) {
+    config.stopSequences = claudeReq.stop_sequences;
+  }
   return config;
 }
 

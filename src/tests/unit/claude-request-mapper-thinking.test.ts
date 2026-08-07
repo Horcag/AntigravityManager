@@ -44,7 +44,7 @@ describe('ClaudeRequestMapper thinking support', () => {
     },
   );
 
-  it('keeps caller stop sequences first, deduplicates them, and reserves only remaining capacity for guards', () => {
+  it('sends caller stop sequences exactly without internal guards or deduplication', () => {
     const body = transformClaudeRequestIn({
       ...createThinkingRequest('gemini-3-flash'),
       stop_sequences: ['custom', '<|user|>', 'custom', '[DONE]', 'another'],
@@ -53,24 +53,123 @@ describe('ClaudeRequestMapper thinking support', () => {
     expect(body.request.generationConfig?.stopSequences).toEqual([
       'custom',
       '<|user|>',
+      'custom',
       '[DONE]',
       'another',
-      '<|endoftext|>',
     ]);
   });
 
-  it('does not truncate five distinct caller stop sequences to add internal guards', () => {
+  it('omits stopSequences when the caller does not provide them', () => {
+    const body = transformClaudeRequestIn(createThinkingRequest('gemini-3-flash'));
+
+    expect(body.request.generationConfig?.stopSequences).toBeUndefined();
+  });
+
+  it('preserves Anthropic text and maps interleaved tool-result media inside functionResponse', () => {
     const body = transformClaudeRequestIn({
-      ...createThinkingRequest('gemini-3-flash'),
-      stop_sequences: ['one', 'two', 'three', 'four', 'five'],
+      model: 'gemini-3-flash',
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '  (no content)  ' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'tool_1', name: 'inspect', input: {}, signature: 'tool-signature' },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool_1',
+              content: [
+                { type: 'text', text: ' first ' },
+                {
+                  type: 'image',
+                  source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+                },
+                { type: 'text', text: ' last ' },
+              ],
+            },
+          ],
+        },
+      ],
     });
 
-    expect(body.request.generationConfig?.stopSequences).toEqual([
-      'one',
-      'two',
-      'three',
-      'four',
-      'five',
-    ]);
+    expect(body.request.contents[0]?.parts).toEqual([{ text: '  (no content)  ' }]);
+    expect(body.request.contents[2]?.parts[0]?.functionResponse).toEqual({
+      name: 'inspect',
+      id: 'tool_1',
+      response: {
+        result: [' first ', { $ref: 'tool_result_2_tool_1_image_0' }, ' last '],
+      },
+      parts: [
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aGVsbG8=',
+            displayName: 'tool_result_2_tool_1_image_0',
+          },
+        },
+      ],
+    });
+    expect(body.request.contents[2]?.parts[0]?.thoughtSignature).toBe('tool-signature');
+  });
+
+  it('maps image-only tool results to a single response reference', () => {
+    const body = transformClaudeRequestIn({
+      model: 'gemini-3-flash',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'inspect', input: {} }],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'tool_1',
+              content: [
+                {
+                  type: 'image',
+                  source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(body.request.contents[1]?.parts[0]?.functionResponse).toMatchObject({
+      response: { result: { $ref: 'tool_result_1_tool_1_image_0' } },
+      parts: [
+        { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=', displayName: 'tool_result_1_tool_1_image_0' } },
+      ],
+    });
+  });
+
+  it('uses the error response key without fabricating success for empty tool results', () => {
+    const body = transformClaudeRequestIn({
+      model: 'gemini-3-flash',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'inspect', input: {} }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'tool_1', is_error: true }],
+        },
+      ],
+    });
+
+    expect(body.request.contents[1]?.parts[0]?.functionResponse?.response).toEqual({
+      error: '(no content)',
+    });
   });
 });

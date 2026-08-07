@@ -1333,19 +1333,43 @@ export class ProxyController {
         continue;
       }
       if (block.type === 'tool_result' && isString(block.tool_use_id)) {
-        if (
-          block.content === undefined ||
-          (Array.isArray(block.content) && block.content.length === 0)
-        ) {
-          continue;
-        }
-        this.validateAnthropicContent(block.content);
+        this.validateAnthropicToolResultContent(block.content);
         continue;
       }
       if (block.type === 'redacted_thinking' && isString(block.data)) {
         continue;
       }
       throw this.invalidRequest('messages contains unsupported content', 'messages');
+    }
+  }
+
+  /** Tool results can carry only the content that the Gemini function-response wire preserves. */
+  private validateAnthropicToolResultContent(content: unknown): void {
+    if (content === undefined || isString(content)) {
+      return;
+    }
+    if (!Array.isArray(content)) {
+      throw this.invalidRequest('tool_result contains unsupported content', 'messages');
+    }
+    for (const block of content) {
+      if (!isPlainObject(block) || !isString(block.type)) {
+        throw this.invalidRequest('tool_result contains unsupported content', 'messages');
+      }
+      if (block.type === 'text' && isString(block.text)) {
+        continue;
+      }
+      if (
+        block.type === 'image' &&
+        isPlainObject(block.source) &&
+        block.source.type === 'base64' &&
+        isString(block.source.media_type) &&
+        isString(block.source.data) &&
+        this.isSupportedAnthropicImageMimeType(block.source.media_type) &&
+        !this.hasInvalidBase64Data(block.source.data)
+      ) {
+        continue;
+      }
+      throw this.invalidRequest('tool_result contains unsupported content', 'messages');
     }
   }
 

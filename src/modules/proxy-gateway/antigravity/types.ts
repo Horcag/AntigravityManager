@@ -265,6 +265,8 @@ export interface FunctionResponse {
   response: Record<string, unknown>;
   /** Call ID */
   id?: string;
+  /** Media attached to a function response. */
+  parts?: GeminiPart[];
 }
 
 export interface GeminiRequest {
@@ -318,6 +320,7 @@ export interface GeminiPart {
   inlineData?: {
     mimeType: string;
     data: string;
+    displayName?: string;
   };
 }
 

@@ -649,7 +649,7 @@ describe('ProxyController Integration', () => {
       expect(
         transformClaudeRequestIn(request, 'project_1', 'test-agent').request.generationConfig,
       ).toMatchObject({
-        stopSequences: ['custom', '<|user|>', '[DONE]', 'another', '<|endoftext|>'],
+        stopSequences: ['custom', '<|user|>', 'custom', '[DONE]', 'another'],
       });
     } finally {
       await app.close();
@@ -706,9 +706,19 @@ describe('ProxyController Integration', () => {
 
           return mapped.request.contents.at(-1)?.parts[0]?.functionResponse?.response.result;
         }),
-      ).toEqual(['Command executed successfully.', 'Command executed successfully.']);
+      ).toEqual(['(no content)', '(no content)']);
 
-      for (const content of [null, 42, [{ type: 'text' }], [{ type: 'unsupported' }]]) {
+      for (const content of [
+        null,
+        42,
+        [{ type: 'text' }],
+        [{ type: 'unsupported' }],
+        [{ type: 'thinking', thinking: 'hidden' }],
+        [{ type: 'tool_use', id: 'nested_tool', name: 'nested', input: {} }],
+        [{ type: 'tool_result', tool_use_id: 'nested_tool' }],
+        [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'aGVsbG8=' } }],
+        [{ type: 'search_result', content: 'not mapped' }],
+      ]) {
         const response = await server.inject({
           method: 'POST',
           url: '/v1/messages',
