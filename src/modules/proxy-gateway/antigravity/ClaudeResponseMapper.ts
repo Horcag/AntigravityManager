@@ -30,7 +30,7 @@ class NonStreamingProcessor {
 
   constructor(
     private readonly signatureContext?: SignatureContext,
-    private readonly fallbackModel?: string,
+    private readonly requestedModel?: string,
   ) {}
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
@@ -258,7 +258,9 @@ class NonStreamingProcessor {
       id: geminiResponse.responseId || `msg_${uuidv4()}`,
       type: 'message',
       role: 'assistant',
-      model: geminiResponse.modelVersion || this.fallbackModel || '',
+      // Anthropic clients must see the model they requested, even when the upstream selected
+      // a mapped or fallback Gemini model for this request.
+      model: this.requestedModel || geminiResponse.modelVersion || '',
       content: this.contentBlocks,
       stop_reason: stopReason,
       // Gemini does not identify a matched stop sequence, so Anthropic responses must not guess.

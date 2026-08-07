@@ -15,6 +15,7 @@ import { MultipartOpenAIExceptionFilter } from '../../modules/proxy-gateway/serv
 import { transformClaudeRequestIn } from '../../modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import {
   AccountPoolUnavailableException,
+  mapAnthropicProtocolError,
   mapOpenAIProtocolError,
   OpenAIProtocolException,
   ProxyProtocolExceptionFilter,
@@ -1469,6 +1470,68 @@ describe('ProxyController Integration', () => {
     ).toBe(429);
   });
 
+  it.each([
+    [400, 'invalid_request_error'],
+    [401, 'authentication_error'],
+    [403, 'permission_error'],
+    [404, 'not_found_error'],
+    [413, 'request_too_large'],
+    [429, 'rate_limit_error'],
+    [500, 'api_error'],
+    [503, 'api_error'],
+    [504, 'timeout_error'],
+    [529, 'overloaded_error'],
+  ])('maps Anthropic upstream status %i to %s', (status, type) => {
+    expect(
+      mapAnthropicProtocolError(new UpstreamRequestError({ message: 'upstream failure', status })),
+    ).toMatchObject({ status, error: { type, message: 'upstream failure' } });
+  });
+
+  it('preserves retry-after and Anthropic error types through the assembled Fastify route', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleAnthropicMessages: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new UpstreamRequestError({
+            message: 'upstream throttled request',
+            status: 429,
+            headers: { retryAfter: '30' },
+          }),
+        )
+        .mockRejectedValueOnce(
+          new UpstreamRequestError({ message: 'upstream timeout', status: 504 }),
+        ),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const request = {
+      method: 'POST' as const,
+      url: '/v1/messages',
+      headers: { authorization: 'Bearer test-key' },
+      payload: { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'hi' }] },
+    };
+
+    try {
+      const rateLimited = await server.inject(request);
+      expect(rateLimited.statusCode).toBe(429);
+      expect(rateLimited.headers['retry-after']).toBe('30');
+      expect(rateLimited.json()).toEqual({
+        type: 'error',
+        error: { type: 'rate_limit_error', message: 'upstream throttled request' },
+      });
+
+      const timedOut = await server.inject(request);
+      expect(timedOut.statusCode).toBe(504);
+      expect(timedOut.json()).toEqual({
+        type: 'error',
+        error: { type: 'timeout_error', message: 'upstream timeout' },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
   it('does not expose unexpected 5xx implementation details while preserving protocol exceptions', () => {
     expect(mapOpenAIProtocolError(new Error('e is not iterable'))).toMatchObject({
       status: 500,
@@ -1847,6 +1910,32 @@ describe('ProxyController Integration', () => {
           message: 'API key validation failed',
           status: 'UNAUTHENTICATED',
         },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('sanitizes unknown non-HTTP failures under the assembled v1beta route', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const app = await createHttpApp({
+      handleGeminiGenerateContent: vi
+        .fn()
+        .mockRejectedValue(new Error('internal implementation detail')),
+    });
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1beta/models/gemini-2.5-flash:generateContent',
+        headers: { authorization: 'Bearer test-key' },
+        payload: { contents: [{ role: 'user', parts: [{ text: 'hi' }] }] },
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toEqual({
+        error: { code: 500, message: 'Internal Server Error', status: 'INTERNAL' },
       });
     } finally {
       await app.close();

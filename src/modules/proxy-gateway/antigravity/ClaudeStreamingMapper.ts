@@ -73,11 +73,11 @@ export class StreamingState {
     };
 
     const message = {
-      id: rawJson.responseId || 'msg_unknown',
+      id: rawJson.responseId || `msg_${uuidv4()}`,
       type: 'message',
       role: 'assistant',
       content: [],
-      model: rawJson.modelVersion || this.fallbackModel,
+      model: this.fallbackModel || rawJson.modelVersion,
       stop_reason: null,
       stop_sequence: null,
       usage: usage,

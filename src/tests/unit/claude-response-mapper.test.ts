@@ -93,6 +93,19 @@ describe('ClaudeResponseMapper termination reasons', () => {
     expect(response.usage).toMatchObject({ input_tokens: 2, output_tokens: 7 });
   });
 
+  it('keeps the requested Anthropic model when Gemini returns a mapped modelVersion', () => {
+    const response = transformResponse(
+      {
+        candidates: [{ content: { role: 'model', parts: [{ text: 'result' }] } }],
+        modelVersion: 'gemini-3-flash',
+      },
+      undefined,
+      'claude-sonnet-4-5',
+    );
+
+    expect(response.model).toBe('claude-sonnet-4-5');
+  });
+
   it('emits an explicit tool call only once when its exact payload is replayed', () => {
     const response = transformResponse({
       candidates: [

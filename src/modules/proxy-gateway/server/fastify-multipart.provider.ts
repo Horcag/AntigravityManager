@@ -37,6 +37,10 @@ const MULTIPART_PARSER_MESSAGES = new Set([
   'Boundary required',
   'Premature close',
 ]);
+const CONTENT_TYPE_PARSER_ERROR_CODES = new Set([
+  'FST_ERR_CTP_EMPTY_JSON_BODY',
+  'FST_ERR_CTP_INVALID_MEDIA_TYPE',
+]);
 const MAX_MULTIPART_ERROR_CAUSE_DEPTH = 4;
 
 export function isMultipartParserOrLimitError(error: unknown): error is Error {
@@ -92,7 +96,7 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
       response.status(status).send({
         error: {
           code: status,
-          message: error instanceof Error ? error.message : 'Internal Server Error',
+          message: error instanceof HttpException ? error.message : 'Internal Server Error',
           status: getGoogleStatusName(status),
         },
       });
@@ -101,12 +105,12 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
     if (pathname.startsWith('/v1/') && isOpenAIJsonWireError(error, contentType)) {
       if (pathname === '/v1/messages') {
-        response.status(this.getHttpStatus(error)).send({
+        response.status(this.getHttpStatus(error, HttpStatus.BAD_REQUEST)).send({
           type: 'error',
           error: {
             type: 'invalid_request_error',
             message:
-              this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+              this.getHttpStatus(error, HttpStatus.BAD_REQUEST) === HttpStatus.PAYLOAD_TOO_LARGE
                 ? 'Request body too large.'
                 : 'Malformed JSON request body.',
           },
@@ -114,16 +118,16 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
         return;
       }
 
-      response.status(this.getHttpStatus(error)).send({
+      response.status(this.getHttpStatus(error, HttpStatus.BAD_REQUEST)).send({
         error: {
           message:
-            this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+            this.getHttpStatus(error, HttpStatus.BAD_REQUEST) === HttpStatus.PAYLOAD_TOO_LARGE
               ? 'Request body too large.'
               : 'Malformed JSON request body.',
           type: 'invalid_request_error',
           param: null,
           code:
-            this.getHttpStatus(error) === HttpStatus.PAYLOAD_TOO_LARGE
+            this.getHttpStatus(error, HttpStatus.BAD_REQUEST) === HttpStatus.PAYLOAD_TOO_LARGE
               ? 'request_body_too_large'
               : 'invalid_json',
         },
@@ -149,8 +153,18 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
     super.catch(error, host);
   }
-  private getHttpStatus(error: unknown): HttpStatus {
-    return error instanceof HttpException ? error.getStatus() : HttpStatus.BAD_REQUEST;
+  private getHttpStatus(
+    error: unknown,
+    defaultStatus: HttpStatus = HttpStatus.INTERNAL_SERVER_ERROR,
+  ): HttpStatus {
+    if (error instanceof HttpException) {
+      return error.getStatus();
+    }
+
+    const statusCode = (error as { statusCode?: unknown })?.statusCode;
+    return typeof statusCode === 'number' && Number.isInteger(statusCode)
+      ? statusCode
+      : defaultStatus;
   }
 
   private getPathname(url: string | undefined): string {
@@ -182,7 +196,10 @@ function isOpenAIJsonWireError(error: unknown, contentType: string): boolean {
   }
 
   const code = (error as { code?: unknown })?.code;
-  if (code === 'FST_ERR_CTP_INVALID_JSON_BODY') {
+  if (
+    code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+    (typeof code === 'string' && CONTENT_TYPE_PARSER_ERROR_CODES.has(code))
+  ) {
     return true;
   }
 

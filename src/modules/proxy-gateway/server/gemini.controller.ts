@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  HttpException,
   HttpStatus,
   Inject,
   Param,
@@ -138,13 +139,20 @@ export class GeminiController {
         `Unsupported model action: ${action}`,
       );
     } catch (error) {
-      const status = error instanceof UpstreamRequestError ? error.status : undefined;
+      const status =
+        error instanceof UpstreamRequestError
+          ? error.status
+          : error instanceof HttpException
+            ? error.getStatus()
+            : undefined;
       const retryAfter =
         error instanceof UpstreamRequestError ? error.headers?.retryAfter : undefined;
       this.sendGoogleErrorResponse(
         res,
         status ?? HttpStatus.INTERNAL_SERVER_ERROR,
-        error instanceof Error ? error.message : 'Internal Server Error',
+        error instanceof UpstreamRequestError || error instanceof HttpException
+          ? error.message
+          : 'Internal Server Error',
         retryAfter,
       );
     }

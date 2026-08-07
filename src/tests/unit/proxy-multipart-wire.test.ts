@@ -131,6 +131,47 @@ describe('OpenAI multipart media endpoints', () => {
     });
   });
 
+  it('returns the OpenAI envelope for bare POST /v1 through Fastify', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({ method: 'POST', url: '/v1' });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Route POST:/v1 not found',
+        type: 'invalid_request_error',
+        param: null,
+        code: null,
+      },
+    });
+  });
+
+  it.each([
+    ['/v1/messages', { type: 'error', error: { type: 'invalid_request_error' } }],
+    ['/v1/chat/completions', { error: { type: 'invalid_request_error', param: null, code: null } }],
+  ])('uses the protocol envelope for unsupported content types at %s', async (url, expected) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url,
+        headers: { 'content-type': 'text/plain' },
+        payload: 'not-json',
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject(expected);
+  });
+
   it('leaves unmatched non-/v1 routes to Nest default 404 handling', async () => {
     app = await createApp();
     await app.init();

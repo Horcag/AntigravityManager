@@ -18,6 +18,17 @@ type OpenAIErrorType =
   | 'rate_limit_error'
   | 'server_error';
 
+type AnthropicErrorType =
+  | 'api_error'
+  | 'authentication_error'
+  | 'invalid_request_error'
+  | 'not_found_error'
+  | 'overloaded_error'
+  | 'permission_error'
+  | 'rate_limit_error'
+  | 'request_too_large'
+  | 'timeout_error';
+
 export class OpenAIProtocolException extends HttpException {
   constructor(
     message: string,
@@ -47,6 +58,31 @@ export function sendOpenAIProtocolError(res: FastifyReply, error: unknown): void
     res.header('retry-after', mapped.retryAfter);
   }
   res.status(mapped.status).send({ error: mapped.error });
+}
+
+export function sendAnthropicProtocolError(res: FastifyReply, error: unknown): void {
+  const mapped = mapAnthropicProtocolError(error);
+  if (mapped.retryAfter) {
+    res.header('retry-after', mapped.retryAfter);
+  }
+  res.status(mapped.status).send({ type: 'error', error: mapped.error });
+}
+
+export function mapAnthropicProtocolError(error: unknown): {
+  status: HttpStatus;
+  retryAfter?: string;
+  error: { type: AnthropicErrorType; message: string };
+} {
+  const mapped = mapOpenAIProtocolError(error);
+
+  return {
+    status: mapped.status,
+    retryAfter: mapped.retryAfter,
+    error: {
+      type: mapAnthropicErrorType(mapped.status),
+      message: mapped.error.message,
+    },
+  };
 }
 
 export function mapOpenAIProtocolError(
@@ -87,20 +123,40 @@ export class ProxyProtocolExceptionFilter implements ExceptionFilter {
     const reply = context.getResponse<FastifyReply>();
 
     if (request.method === 'POST' && request.url.split('?')[0] === '/v1/messages') {
-      const mapped = mapOpenAIProtocolError(exception);
-      reply.status(mapped.status).send({
-        type: 'error',
-        error: {
-          type:
-            mapped.error.type === 'invalid_request_error' ? 'invalid_request_error' : 'api_error',
-          message: mapped.error.message,
-        },
-      });
+      sendAnthropicProtocolError(reply, exception);
       return;
     }
 
     sendOpenAIProtocolError(reply, exception);
   }
+}
+
+function mapAnthropicErrorType(status: number): AnthropicErrorType {
+  if (status === HttpStatus.BAD_REQUEST) {
+    return 'invalid_request_error';
+  }
+  if (status === HttpStatus.UNAUTHORIZED) {
+    return 'authentication_error';
+  }
+  if (status === HttpStatus.FORBIDDEN) {
+    return 'permission_error';
+  }
+  if (status === HttpStatus.NOT_FOUND) {
+    return 'not_found_error';
+  }
+  if (status === HttpStatus.PAYLOAD_TOO_LARGE) {
+    return 'request_too_large';
+  }
+  if (status === HttpStatus.TOO_MANY_REQUESTS) {
+    return 'rate_limit_error';
+  }
+  if (status === HttpStatus.GATEWAY_TIMEOUT) {
+    return 'timeout_error';
+  }
+  if (status === 529) {
+    return 'overloaded_error';
+  }
+  return 'api_error';
 }
 
 function isValidHttpStatus(status: unknown): status is HttpStatus {

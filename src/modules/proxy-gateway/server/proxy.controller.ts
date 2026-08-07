@@ -53,6 +53,7 @@ import {
   OpenAIProtocolException,
   ProxyProtocolExceptionFilter,
   mapOpenAIProtocolError,
+  sendAnthropicProtocolError,
   sendOpenAIProtocolError,
 } from './openai-protocol-error';
 import { isMultipartParserOrLimitError } from './fastify-multipart.provider';
@@ -633,6 +634,11 @@ export class ProxyController {
       `Route ${request.method}:${request.url} not found`,
       HttpStatus.NOT_FOUND,
     );
+  }
+
+  @All()
+  unmatchedOpenAIRoot(@Req() request: FastifyRequest): never {
+    return this.unmatchedOpenAIRoute(request);
   }
 
   private validateChatRequest(body: OpenAIChatRequest): void {
@@ -3077,13 +3083,7 @@ export class ProxyController {
     const responseError = this.withOverriddenErrorMessage(error, overrideMessage);
     const mapped = mapOpenAIProtocolError(responseError);
     this.logProxyEndpointError(endpoint, mapped.status, mapped.error.message, error);
-    res.status(mapped.status).send({
-      type: 'error',
-      error: {
-        type: mapped.error.type === 'invalid_request_error' ? 'invalid_request_error' : 'api_error',
-        message: mapped.error.message,
-      },
-    });
+    sendAnthropicProtocolError(res, responseError);
   }
 
   private withOverriddenErrorMessage(error: unknown, overrideMessage?: string): unknown {

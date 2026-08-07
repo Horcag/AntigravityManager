@@ -38,6 +38,16 @@ describe('StreamingState', () => {
     state = new StreamingState();
   });
 
+  it('generates distinct Anthropic message ids when upstream response ids are absent', () => {
+    const first = JSON.parse(state.emitMessageStart({}).split('data: ')[1]);
+    const secondState = new StreamingState();
+    const second = JSON.parse(secondState.emitMessageStart({}).split('data: ')[1]);
+
+    expect(first.message.id).toMatch(/^msg_/);
+    expect(second.message.id).toMatch(/^msg_/);
+    expect(first.message.id).not.toBe(second.message.id);
+  });
+
   describe('handleParseError', () => {
     it('should return empty array on first error', () => {
       const chunks = state.handleParseError('invalid json');

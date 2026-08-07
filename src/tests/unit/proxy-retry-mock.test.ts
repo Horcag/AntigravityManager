@@ -785,7 +785,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     stream.emit(
       'data',
       Buffer.from(
-        'data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}\n\n',
+        'data: {"modelVersion":"gemini-3-flash","candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}\n\n',
       ),
     );
     stream.emit('end');
