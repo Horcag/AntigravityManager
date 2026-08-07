@@ -1753,10 +1753,24 @@ describe('ProxyController Integration', () => {
         url: '/v1beta/models/unknown-model',
         headers: authorizedHeaders,
       });
-      expect(geminiResponse.statusCode).toBe(200);
+      expect(geminiResponse.statusCode).toBe(404);
       expect(geminiResponse.json()).toEqual({
-        name: 'models/unknown-model',
-        displayName: 'unknown-model',
+        error: {
+          code: 404,
+          message: 'Model not found: models/unknown-model',
+          status: 'NOT_FOUND',
+        },
+      });
+
+      const knownGeminiModel = await server.inject({
+        method: 'GET',
+        url: '/v1beta/models/gemini-3.5-flash-medium',
+        headers: authorizedHeaders,
+      });
+      expect(knownGeminiModel.statusCode).toBe(200);
+      expect(knownGeminiModel.json()).toEqual({
+        name: 'models/gemini-3.5-flash-medium',
+        displayName: 'gemini-3.5-flash-medium',
       });
     } finally {
       await app.close();
@@ -1982,6 +1996,57 @@ describe('ProxyController Integration', () => {
       });
     } finally {
       await app.close();
+    }
+  });
+
+  it('uses Google envelopes for v1beta parser failures through the assembled Fastify pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const headers = {
+      authorization: 'Bearer test-key',
+      'content-type': 'application/json',
+    };
+    const malformedApp = await createHttpApp({ handleGeminiGenerateContent: vi.fn() });
+    const malformedServer = malformedApp.getHttpAdapter().getInstance();
+
+    try {
+      const malformed = await malformedServer.inject({
+        method: 'POST',
+        url: '/v1beta/models/gemini-2.5-flash:generateContent',
+        headers,
+        payload: '{"contents":',
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(malformed.json()).toEqual({
+        error: {
+          code: 400,
+          message: "Body is not valid JSON but content-type is set to 'application/json'",
+          status: 'INVALID_ARGUMENT',
+        },
+      });
+    } finally {
+      await malformedApp.close();
+    }
+
+    const limitedApp = await createHttpApp({ handleGeminiGenerateContent: vi.fn() }, 1);
+    const limitedServer = limitedApp.getHttpAdapter().getInstance();
+
+    try {
+      const tooLarge = await limitedServer.inject({
+        method: 'POST',
+        url: '/v1beta/models/gemini-2.5-flash:generateContent',
+        headers,
+        payload: '{"contents":[]}',
+      });
+      expect(tooLarge.statusCode).toBe(413);
+      expect(tooLarge.json()).toEqual({
+        error: {
+          code: 413,
+          message: 'Request body is too large',
+          status: 'RESOURCE_EXHAUSTED',
+        },
+      });
+    } finally {
+      await limitedApp.close();
     }
   });
 

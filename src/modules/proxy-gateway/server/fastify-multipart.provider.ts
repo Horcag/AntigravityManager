@@ -38,8 +38,10 @@ const MULTIPART_PARSER_MESSAGES = new Set([
   'Premature close',
 ]);
 const CONTENT_TYPE_PARSER_ERROR_CODES = new Set([
+  'FST_ERR_CTP_BODY_TOO_LARGE',
   'FST_ERR_CTP_EMPTY_JSON_BODY',
   'FST_ERR_CTP_INVALID_MEDIA_TYPE',
+  'FST_ERR_CTP_INVALID_JSON_BODY',
 ]);
 const MAX_MULTIPART_ERROR_CAUSE_DEPTH = 4;
 
@@ -72,6 +74,10 @@ export function isJsonMediaEndpoint(url: string | undefined): boolean {
   return JSON_MEDIA_ENDPOINTS.has(normalizePathname(url));
 }
 
+export function isGoogleJsonEndpoint(url: string | undefined): boolean {
+  return normalizePathname(url).startsWith('/v1beta/');
+}
+
 function normalizePathname(url: string | undefined): string {
   const pathname = url?.split('?', 1)[0] ?? '';
   return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
@@ -93,13 +99,7 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
     if (pathname.startsWith('/v1beta/')) {
       const status = this.getHttpStatus(error);
-      response.status(status).send({
-        error: {
-          code: status,
-          message: error instanceof HttpException ? error.message : 'Internal Server Error',
-          status: getGoogleStatusName(status),
-        },
-      });
+      response.status(status).send(createGoogleErrorEnvelope(status, getGoogleErrorMessage(error, status)));
       return;
     }
 
@@ -172,18 +172,53 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
   }
 }
 
-function getGoogleStatusName(status: number): string {
+export function createGoogleErrorEnvelope(status: number, message: string) {
+  return {
+    error: {
+      code: status,
+      message,
+      status: getGoogleStatusName(status),
+    },
+  };
+}
+
+export function getGoogleStatusName(status: number): string {
   const statusNames: Record<number, string> = {
     [HttpStatus.BAD_REQUEST]: 'INVALID_ARGUMENT',
     [HttpStatus.UNAUTHORIZED]: 'UNAUTHENTICATED',
     [HttpStatus.FORBIDDEN]: 'PERMISSION_DENIED',
     [HttpStatus.NOT_FOUND]: 'NOT_FOUND',
+    [HttpStatus.CONFLICT]: 'ABORTED',
+    [HttpStatus.PAYLOAD_TOO_LARGE]: 'RESOURCE_EXHAUSTED',
+    [HttpStatus.UNSUPPORTED_MEDIA_TYPE]: 'INVALID_ARGUMENT',
     [HttpStatus.TOO_MANY_REQUESTS]: 'RESOURCE_EXHAUSTED',
     [HttpStatus.NOT_IMPLEMENTED]: 'UNIMPLEMENTED',
     [HttpStatus.INTERNAL_SERVER_ERROR]: 'INTERNAL',
     [HttpStatus.SERVICE_UNAVAILABLE]: 'UNAVAILABLE',
+    [HttpStatus.GATEWAY_TIMEOUT]: 'DEADLINE_EXCEEDED',
   };
   return statusNames[status] ?? 'INTERNAL';
+}
+
+function getGoogleErrorMessage(error: unknown, status: number): string {
+  if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
+    return 'Internal Server Error';
+  }
+
+  if (error instanceof HttpException) {
+    return error.message;
+  }
+
+  if (isContentTypeParserError(error)) {
+    return error instanceof Error ? error.message : 'Invalid request body.';
+  }
+
+  return 'Bad Request';
+}
+
+function isContentTypeParserError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return typeof code === 'string' && CONTENT_TYPE_PARSER_ERROR_CODES.has(code);
 }
 
 function isOpenAIJsonWireError(error: unknown, contentType: string): boolean {
@@ -195,11 +230,7 @@ function isOpenAIJsonWireError(error: unknown, contentType: string): boolean {
     return true;
   }
 
-  const code = (error as { code?: unknown })?.code;
-  if (
-    code === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
-    (typeof code === 'string' && CONTENT_TYPE_PARSER_ERROR_CODES.has(code))
-  ) {
+  if (isContentTypeParserError(error)) {
     return true;
   }
 
@@ -231,7 +262,10 @@ export class FastifyMultipartProvider implements OnModuleInit {
     // Nest maps controller routes after constructing providers, so this hook can set Fastify's
     // per-route parser limit before the OpenAI-compatible routes are registered.
     fastify.addHook('onRoute', (routeOptions) => {
-      if (routeOptions.method === 'POST' && isJsonMediaEndpoint(routeOptions.url)) {
+      if (
+        routeOptions.method === 'POST' &&
+        (isJsonMediaEndpoint(routeOptions.url) || isGoogleJsonEndpoint(routeOptions.url))
+      ) {
         routeOptions.bodyLimit = MAX_JSON_MEDIA_BODY_BYTES;
       }
     });

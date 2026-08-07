@@ -22,6 +22,7 @@ import { getServerConfig } from '../../../server/server-config';
 import { getAllDynamicModels } from '../antigravity/ModelMapping';
 import { AccountLeaseService } from './account-lease.service';
 import { UpstreamRequestError } from './clients/upstream-error';
+import { createGoogleErrorEnvelope } from './fastify-multipart.provider';
 
 type GeminiModelMetadata = {
   name: string;
@@ -67,10 +68,7 @@ export class GeminiController {
       return;
     }
 
-    res.status(HttpStatus.OK).send({
-      name: targetName,
-      displayName: targetName.replace(/^models\//, ''),
-    });
+    this.sendGoogleErrorResponse(res, HttpStatus.NOT_FOUND, `Model not found: ${targetName}`);
   }
 
   @Post('models/:modelAction')
@@ -237,33 +235,13 @@ export class GeminiController {
     if (retryAfter) {
       res.header('retry-after', retryAfter);
     }
-    res.status(status).send({
-      error: {
-        code: status,
-        message,
-        status: this.getGoogleStatusName(status),
-      },
-    });
+    res.status(status).send(createGoogleErrorEnvelope(status, message));
   }
 
   private normalizeGoogleHttpStatus(status: number): number {
     return status >= HttpStatus.BAD_REQUEST && status <= 599
       ? status
       : HttpStatus.INTERNAL_SERVER_ERROR;
-  }
-
-  private getGoogleStatusName(status: number): string {
-    const statusNames: Record<number, string> = {
-      [HttpStatus.BAD_REQUEST]: 'INVALID_ARGUMENT',
-      [HttpStatus.UNAUTHORIZED]: 'UNAUTHENTICATED',
-      [HttpStatus.FORBIDDEN]: 'PERMISSION_DENIED',
-      [HttpStatus.NOT_FOUND]: 'NOT_FOUND',
-      [HttpStatus.TOO_MANY_REQUESTS]: 'RESOURCE_EXHAUSTED',
-      [HttpStatus.NOT_IMPLEMENTED]: 'UNIMPLEMENTED',
-      [HttpStatus.INTERNAL_SERVER_ERROR]: 'INTERNAL',
-      [HttpStatus.SERVICE_UNAVAILABLE]: 'UNAVAILABLE',
-    };
-    return statusNames[status] ?? 'INTERNAL';
   }
 
   private normalizeGeminiUsageMetadata(
