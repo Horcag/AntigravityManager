@@ -679,6 +679,10 @@ describe('ProxyController Integration', () => {
           role: 'assistant',
           content: [{ type: 'tool_use', id: 'tool_1', name: 'inspect', input }],
         },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'tool_1', content: 'done' }],
+        },
       ],
     };
     const payloadBeforeRequest = structuredClone(payload);
