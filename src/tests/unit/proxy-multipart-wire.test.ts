@@ -872,6 +872,104 @@ describe('OpenAI multipart media endpoints', () => {
     expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
   });
 
+  it('rejects transcription stream=true for JSON/base64 and multipart requests before upstream work', async () => {
+    app = await createApp();
+    await app.init();
+
+    const jsonResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: {
+          model: 'gemini-3-flash',
+          file: 'data:audio/mpeg;base64,SUQzBAAA',
+          stream: true,
+        },
+      });
+
+    const boundary = '----openai-audio-stream';
+    const multipartResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="model"'], value: 'gemini-3-flash' },
+          { headers: ['Content-Disposition: form-data; name="stream"'], value: 'true' },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="file"; filename="speech.mp3"',
+              'Content-Type: audio/mpeg',
+            ],
+            value: Buffer.from([0x49, 0x44, 0x33, 0x04]),
+          },
+        ]),
+      });
+
+    for (const response of [jsonResponse, multipartResponse]) {
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          message: 'Streaming audio transcriptions are not supported by this endpoint.',
+          type: 'invalid_request_error',
+          param: 'stream',
+          code: 'unsupported_parameter',
+        },
+      });
+    }
+    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+  });
+
+  it('preserves non-streaming JSON/base64 and multipart transcriptions', async () => {
+    proxyService.handleGeminiGenerateContent.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'transcribed' }] } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const jsonResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: {
+          model: 'gemini-3-flash',
+          file: 'data:audio/mpeg;base64,SUQzBAAA',
+          stream: false,
+        },
+      });
+
+    const boundary = '----openai-audio-non-stream';
+    const multipartResponse = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody(boundary, [
+          { headers: ['Content-Disposition: form-data; name="model"'], value: 'gemini-3-flash' },
+          { headers: ['Content-Disposition: form-data; name="stream"'], value: 'false' },
+          {
+            headers: [
+              'Content-Disposition: form-data; name="file"; filename="speech.mp3"',
+              'Content-Type: audio/mpeg',
+            ],
+            value: Buffer.from([0x49, 0x44, 0x33, 0x04]),
+          },
+        ]),
+      });
+
+    expect(jsonResponse.statusCode, jsonResponse.body).toBe(200);
+    expect(multipartResponse.statusCode, multipartResponse.body).toBe(200);
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects repeated timestamp granularities from a real multipart audio request', async () => {
     app = await createApp();
     await app.init();

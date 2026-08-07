@@ -531,6 +531,93 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it.each(['/v1/chat/completions', '/v1/responses'] as const)(
+    'rejects invalid forced function selections through %s before the assembled upstream call',
+    async (url) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = { handleChatCompletions: vi.fn() };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+      const base =
+        url === '/v1/chat/completions'
+          ? { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+          : { model: 'gpt-4o', input: 'hi' };
+
+      try {
+        for (const toolChoice of [
+          { type: 'function', function: {} },
+          { type: 'function', function: { name: 'missing' } },
+        ]) {
+          const response = await server.inject({
+            method: 'POST',
+            url,
+            headers: { authorization: 'Bearer test-key' },
+            payload: {
+              ...base,
+              tools: [{ type: 'function', function: { name: 'lookup' } }],
+              tool_choice: toolChoice,
+            },
+          });
+
+          expect(response.statusCode).toBe(400);
+          expect(response.json().error).toMatchObject({
+            type: 'invalid_request_error',
+            param: 'tool_choice',
+          });
+        }
+        expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it.each(['/v1/chat/completions', '/v1/responses'] as const)(
+    'preserves valid tool-choice controls through %s',
+    async (url) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = {
+        handleChatCompletions: vi.fn().mockResolvedValue({
+          id: 'chatcmpl_1',
+          created: 1700000000,
+          model: 'gpt-4o',
+          choices: [{ message: { content: 'done' } }],
+        }),
+      };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+      const base =
+        url === '/v1/chat/completions'
+          ? { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
+          : { model: 'gpt-4o', input: 'hi' };
+
+      try {
+        for (const toolChoice of [
+          'auto',
+          'none',
+          'required',
+          { type: 'function', function: { name: 'lookup' } },
+        ]) {
+          const response = await server.inject({
+            method: 'POST',
+            url,
+            headers: { authorization: 'Bearer test-key' },
+            payload: {
+              ...base,
+              tools: [{ type: 'function', function: { name: 'lookup' } }],
+              tool_choice: toolChoice,
+            },
+          });
+
+          expect(response.statusCode, response.body).toBe(200);
+        }
+        expect(proxyService.handleChatCompletions).toHaveBeenCalledTimes(4);
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
   it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const anthropicResult = {
@@ -2004,6 +2091,7 @@ describe('ProxyController Integration', () => {
             output: { content: 'result: ok' },
           },
         ],
+        tools: [{ type: 'function', function: { name: 'search_docs' } }],
         tool_choice: { type: 'function', function: { name: 'search_docs' } },
       },
       reply as any,
@@ -2038,7 +2126,7 @@ describe('ProxyController Integration', () => {
         temperature: 1,
         text: { format: { type: 'text' } },
         tool_choice: { type: 'function', function: { name: 'search_docs' } },
-        tools: [],
+        tools: [{ type: 'function', function: { name: 'search_docs' } }],
         top_p: 1,
         truncation: 'disabled',
         output: [

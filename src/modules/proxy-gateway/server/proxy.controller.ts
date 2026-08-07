@@ -451,6 +451,7 @@ export class ProxyController {
       response_format?: string;
       temperature?: number | string;
       timestamp_granularities?: string | string[];
+      stream?: boolean | string;
       file?: InlineInput;
       audio?: InlineInput;
     },
@@ -465,6 +466,19 @@ export class ProxyController {
       return;
     }
     const input = this.mergeMediaInput(body ?? {}, multipart);
+    if (input.stream !== undefined && input.stream !== 'false') {
+      if (input.stream === 'true') {
+        this.sendInvalidRequest(
+          res,
+          'Streaming audio transcriptions are not supported by this endpoint.',
+          'stream',
+          'unsupported_parameter',
+        );
+        return;
+      }
+      this.sendInvalidRequest(res, 'stream must be a boolean.', 'stream', 'invalid_value');
+      return;
+    }
     this.requireNonEmptyString(input.model, 'model');
     if (input.invalidTemperature) {
       this.sendInvalidRequest(
@@ -1232,6 +1246,15 @@ export class ProxyController {
         isEmpty(toolChoice.function.name.trim()))
     ) {
       throw this.invalidRequest('tool_choice is invalid', 'tool_choice');
+    }
+    if (typeof toolChoice === 'object' && toolChoice !== null && toolChoice.type === 'function') {
+      const name = toolChoice.function?.name.trim();
+      if (!tools?.some((tool) => tool.function?.name === name)) {
+        throw this.invalidRequest(
+          `tool_choice function "${name}" is not among the provided tools`,
+          'tool_choice',
+        );
+      }
     }
   }
 
