@@ -830,6 +830,139 @@ describe('OpenAI multipart media endpoints', () => {
     );
   });
 
+  it('accepts documented JSON images data URLs through the assembled Fastify pipeline', async () => {
+    proxyService.handleChatCompletions.mockResolvedValue({
+      choices: [{ message: { content: 'data:image/png;base64,UkVTVUxU' } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: {
+          prompt: 'make it blue',
+          images: [{ image_url: 'data:image/png;base64,iVBORw0KGgo=' }],
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        messages: [
+          expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' },
+              }),
+            ]),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    [{}, 'images[0]', 'images[0] must contain exactly one of image_url or file_id.'],
+    [null, 'images[0]', 'images[0] must be an object.'],
+    [
+      { image_url: 'data:image/png;base64,iVBORw0KGgo=', file_id: 'file_123' },
+      'images[0]',
+      'images[0] must contain exactly one of image_url or file_id.',
+    ],
+    [
+      { image_url: 'data:text/plain;base64,SGVsbG8=' },
+      'images[0].image_url',
+      'images[0].image_url must be a valid base64 image data URL or fully qualified HTTP(S) URL.',
+    ],
+  ])('rejects invalid documented JSON images entries', async (entry, param, message) => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: { prompt: 'make it blue', images: [entry] },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: { message, type: 'invalid_request_error', param, code: 'invalid_value' },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      { image_url: 'https://example.com/image.png' },
+      'images[0].image_url',
+      'images[0].image_url is not supported because this gateway does not fetch remote image URLs; use a data URL.',
+    ],
+    [
+      { file_id: 'file_123' },
+      'images[0].file_id',
+      'images[0].file_id cannot be resolved because this gateway does not implement the Files API.',
+    ],
+  ])(
+    'fails closed for JSON images entries the local gateway cannot resolve',
+    async (entry, param, message) => {
+      app = await createApp();
+      await app.init();
+
+      const response = await app
+        .getHttpAdapter()
+        .getInstance()
+        .inject({
+          method: 'POST',
+          url: '/v1/images/edits',
+          payload: { prompt: 'make it blue', images: [entry] },
+        });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: { message, type: 'invalid_request_error', param, code: 'unsupported_parameter' },
+      });
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    },
+  );
+
+  it('counts documented JSON images with extension image inputs against the shared limit', async () => {
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/images/edits',
+        payload: {
+          prompt: 'combine images',
+          image: 'data:image/png;base64,iVBORw0KGgo=',
+          images: Array.from({ length: 16 }, () => ({
+            image_url: 'data:image/png;base64,iVBORw0KGgo=',
+          })),
+        },
+      });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'At most 16 image inputs are supported by this endpoint.',
+        type: 'invalid_request_error',
+        param: 'image',
+        code: 'invalid_value',
+      },
+    });
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+  });
+
   it('normalizes bare JSON audio base64 from its recognized signature', async () => {
     const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00]);
     proxyService.handleGeminiGenerateContent.mockResolvedValue({

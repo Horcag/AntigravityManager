@@ -69,6 +69,7 @@ import {
 } from './image-data-url';
 
 type InlineInput = string | { data?: string; mimeType?: string };
+type ImageEditJsonImage = { image_url?: unknown; file_id?: unknown };
 
 interface MultipartMediaInput {
   fields: Record<string, string | string[]>;
@@ -354,6 +355,7 @@ export class ProxyController {
       user?: string;
       image?: InlineInput;
       reference_images?: InlineInput[];
+      images?: ImageEditJsonImage[];
       mask?: InlineInput;
     },
     @Req() req: FastifyRequest,
@@ -374,12 +376,20 @@ export class ProxyController {
         );
         return;
       }
+      if (body.images !== undefined && !Array.isArray(body.images)) {
+        this.sendInvalidRequest(res, 'images must be an array.', 'images', 'invalid_value');
+        return;
+      }
     }
     const multipart = await this.readMultipartMediaInput(req, body, res);
     if (!multipart) {
       return;
     }
     const input = this.mergeMediaInput(body ?? {}, multipart);
+    const officialImages = this.resolveJsonImageEditImages(body?.images, res);
+    if (!officialImages) {
+      return;
+    }
     this.requireNonEmptyString(input.prompt, 'prompt');
 
     if (!this.validateImageOptions(input, res)) {
@@ -393,7 +403,13 @@ export class ProxyController {
       );
       return;
     }
-    if (!this.validateImageInputCount(input.images, input.referenceImages, res)) {
+    if (
+      !this.validateImageInputCount(
+        [...input.images, ...officialImages],
+        input.referenceImages,
+        res,
+      )
+    ) {
       return;
     }
     if (
@@ -403,7 +419,11 @@ export class ProxyController {
       return;
     }
 
-    const imageParts = this.collectImageContentParts([...input.images, ...input.referenceImages]);
+    const imageParts = this.collectImageContentParts([
+      ...input.images,
+      ...input.referenceImages,
+      ...officialImages,
+    ]);
     if (imageParts.length === 0) {
       this.sendInvalidRequest(
         res,
@@ -2645,6 +2665,100 @@ export class ProxyController {
       'invalid_value',
     );
     return false;
+  }
+
+  /**
+   * Converts documented JSON image entries to the gateway's inline-image representation.
+   * Remote URLs and Files API references are rejected before request mapping: forwarding either
+   * would silently turn it into text or require an unsafe server-side fetch.
+   */
+  private resolveJsonImageEditImages(
+    images: ImageEditJsonImage[] | undefined,
+    res: FastifyReply,
+  ): InlineInput[] | null {
+    if (!images) {
+      return [];
+    }
+
+    const resolved: InlineInput[] = [];
+    for (const [index, image] of images.entries()) {
+      const entryParam = `images[${index}]`;
+      if (!isPlainObject(image)) {
+        this.sendInvalidRequest(
+          res,
+          `${entryParam} must be an object.`,
+          entryParam,
+          'invalid_value',
+        );
+        return null;
+      }
+
+      const hasImageUrl = Object.hasOwn(image, 'image_url');
+      const hasFileId = Object.hasOwn(image, 'file_id');
+      if (hasImageUrl === hasFileId) {
+        this.sendInvalidRequest(
+          res,
+          `${entryParam} must contain exactly one of image_url or file_id.`,
+          entryParam,
+          'invalid_value',
+        );
+        return null;
+      }
+
+      if (hasFileId) {
+        if (!isString(image.file_id) || isEmpty(image.file_id.trim())) {
+          this.sendInvalidRequest(
+            res,
+            `${entryParam}.file_id must be a non-empty string.`,
+            `${entryParam}.file_id`,
+            'invalid_value',
+          );
+          return null;
+        }
+        this.sendInvalidRequest(
+          res,
+          `${entryParam}.file_id cannot be resolved because this gateway does not implement the Files API.`,
+          `${entryParam}.file_id`,
+          'unsupported_parameter',
+        );
+        return null;
+      }
+
+      if (!isString(image.image_url) || isEmpty(image.image_url.trim())) {
+        this.sendInvalidRequest(
+          res,
+          `${entryParam}.image_url must be a non-empty string.`,
+          `${entryParam}.image_url`,
+          'invalid_value',
+        );
+        return null;
+      }
+
+      const imageUrl = image.image_url.trim();
+      if (parseImageDataUrl(imageUrl)) {
+        resolved.push(imageUrl);
+        continue;
+      }
+      if (/^https?:\/\//i.test(imageUrl)) {
+        this.sendInvalidRequest(
+          res,
+          `${entryParam}.image_url is not supported because this gateway does not fetch remote image URLs; use a data URL.`,
+          `${entryParam}.image_url`,
+          'unsupported_parameter',
+        );
+        return null;
+      }
+
+      this.sendInvalidRequest(
+        res,
+        `${entryParam}.image_url must be a valid base64 image data URL or fully qualified HTTP(S) URL.`,
+        `${entryParam}.image_url`,
+        'invalid_value',
+      );
+      return null;
+    }
+
+    return resolved;
   }
 
   private hasInvalidBase64Data(input: InlineInput | undefined): boolean {
