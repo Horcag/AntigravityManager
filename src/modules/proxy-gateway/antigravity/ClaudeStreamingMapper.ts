@@ -147,6 +147,15 @@ export class StreamingState {
     });
   }
 
+  /** Emit a complete signature-only thinking block through the normal block lifecycle. */
+  public emitSignatureBlock(signature: string): string[] {
+    const chunks = this.startBlock('Thinking', { type: 'thinking', thinking: '' });
+    chunks.push(this.emitDelta('thinking_delta', { thinking: '' }));
+    chunks.push(this.emitDelta('signature_delta', { signature }));
+    chunks.push(...this.endBlock());
+    return chunks;
+  }
+
   public emitFinish(finishReason?: string, usageMetadata?: UsageMetadata): string[] {
     const chunks: string[] = [];
 
@@ -157,25 +166,7 @@ export class StreamingState {
     if (this.trailingSignature) {
       const sig = this.trailingSignature;
       this.trailingSignature = null;
-
-      chunks.push(
-        this.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
-
-      chunks.push(this.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.emitDelta('signature_delta', { signature: sig }));
-
-      chunks.push(
-        this.emit('content_block_stop', {
-          type: 'content_block_stop',
-          index: this.blockIndex,
-        }),
-      );
-      this.blockIndex++;
+      chunks.push(...this.emitSignatureBlock(sig));
     }
 
     // Process grounding (web search) -> convert to Markdown text block
@@ -379,17 +370,7 @@ export class PartProcessor {
         chunks.push(...this.state.endBlock());
         const trailingSig = this.state.trailingSignature;
         this.state.trailingSignature = null;
-
-        chunks.push(
-          this.state.emit('content_block_start', {
-            type: 'content_block_start',
-            index: this.state.blockIndex,
-            content_block: { type: 'thinking', thinking: '' },
-          }),
-        );
-        chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-        chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-        chunks.push(...this.state.endBlock());
+        chunks.push(...this.state.emitSignatureBlock(trailingSig));
       }
 
       chunks.push(
@@ -427,17 +408,7 @@ export class PartProcessor {
       chunks.push(...this.state.endBlock());
       const trailingSig = this.state.trailingSignature;
       this.state.trailingSignature = null;
-
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-      chunks.push(...this.state.endBlock());
+      chunks.push(...this.state.emitSignatureBlock(trailingSig));
     }
 
     if (this.state.currentBlockType() !== 'Thinking') {
@@ -469,17 +440,7 @@ export class PartProcessor {
       chunks.push(...this.state.endBlock());
       const trailingSig = this.state.trailingSignature;
       this.state.trailingSignature = null;
-
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-      chunks.push(...this.state.endBlock());
+      chunks.push(...this.state.emitSignatureBlock(trailingSig));
     }
 
     // Non-empty text with signature -> flush immediately
@@ -489,17 +450,7 @@ export class PartProcessor {
       chunks.push(this.state.emitDelta('text_delta', { text: text }));
       chunks.push(...this.state.endBlock());
 
-      // Empty thinking block for signature
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: signature }));
-      chunks.push(...this.state.endBlock());
+      chunks.push(...this.state.emitSignatureBlock(signature));
 
       return chunks;
     }

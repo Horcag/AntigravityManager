@@ -5,6 +5,32 @@ import {
 } from '../../modules/proxy-gateway/antigravity/ClaudeStreamingMapper';
 import { ToolCallIdConflictError } from '../../modules/proxy-gateway/antigravity/tool-call-id-integrity';
 
+type ClaudeSseEvent = {
+  type: string;
+  index?: number;
+  content_block?: { type?: string };
+  delta?: { signature?: string; text?: string };
+};
+
+function encodeSignature(signature: string): string {
+  return Buffer.from(signature).toString('base64');
+}
+
+function parseEvents(chunks: string[]): ClaudeSseEvent[] {
+  return chunks
+    .flatMap((chunk) => chunk.split('\n'))
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => JSON.parse(line.slice('data: '.length)) as ClaudeSseEvent);
+}
+
+function expectBalancedBlockLifecycle(events: ClaudeSseEvent[]): void {
+  const starts = events.filter((event) => event.type === 'content_block_start');
+  const stops = events.filter((event) => event.type === 'content_block_stop');
+
+  expect(starts.map((event) => event.index)).toEqual(starts.map((_, index) => index));
+  expect(stops.map((event) => event.index)).toEqual(starts.map((event) => event.index));
+}
+
 describe('StreamingState', () => {
   let state: StreamingState;
 
@@ -62,6 +88,87 @@ describe('StreamingState', () => {
   });
 
   describe('stream aggregation compatibility', () => {
+    it('balances a signature block after non-empty signed text before later text', () => {
+      const processor = new PartProcessor(state);
+      const chunks = [
+        ...processor.process({
+          text: 'signed text',
+          thoughtSignature: encodeSignature('text-signature'),
+        }),
+        ...processor.process({ text: 'later text' }),
+        ...state.emitFinish('STOP'),
+      ];
+      const events = parseEvents(chunks);
+
+      expectBalancedBlockLifecycle(events);
+      expect(events.map((event) => event.delta?.signature).filter(Boolean)).toEqual([
+        'text-signature',
+      ]);
+      expect(events.map((event) => event.delta?.text).filter(Boolean)).toEqual([
+        'signed text',
+        'later text',
+      ]);
+    });
+
+    it('balances a pending signature after thinking before subsequent text', () => {
+      const processor = new PartProcessor(state);
+      const chunks = [
+        ...processor.process({ text: 'reasoning', thought: true }),
+        ...processor.process({ text: '', thoughtSignature: encodeSignature('thinking-signature') }),
+        ...processor.process({ text: 'answer' }),
+        ...state.emitFinish('STOP'),
+      ];
+      const events = parseEvents(chunks);
+
+      expectBalancedBlockLifecycle(events);
+      expect(events.map((event) => event.delta?.signature).filter(Boolean)).toEqual([
+        'thinking-signature',
+      ]);
+      expect(events.map((event) => event.delta?.text).filter(Boolean)).toEqual(['answer']);
+    });
+
+    it('balances a pending signature before ordinary text', () => {
+      const processor = new PartProcessor(state);
+      const chunks = [
+        ...processor.process({
+          text: '',
+          thoughtSignature: encodeSignature('pending-text-signature'),
+        }),
+        ...processor.process({ text: 'visible text' }),
+        ...state.emitFinish('STOP'),
+      ];
+      const events = parseEvents(chunks);
+
+      expectBalancedBlockLifecycle(events);
+      expect(events.map((event) => event.delta?.signature).filter(Boolean)).toEqual([
+        'pending-text-signature',
+      ]);
+      expect(events.map((event) => event.delta?.text).filter(Boolean)).toEqual(['visible text']);
+    });
+
+    it('balances a pending signature before a function call', () => {
+      const processor = new PartProcessor(state);
+      const chunks = [
+        ...processor.process({
+          text: '',
+          thoughtSignature: encodeSignature('pending-tool-signature'),
+        }),
+        ...processor.process({
+          functionCall: { args: { city: 'Samara' }, id: 'call_weather', name: 'get_weather' },
+        }),
+        ...state.emitFinish('STOP'),
+      ];
+      const events = parseEvents(chunks);
+
+      expectBalancedBlockLifecycle(events);
+      expect(events.map((event) => event.delta?.signature).filter(Boolean)).toEqual([
+        'pending-tool-signature',
+      ]);
+      expect(events.find((event) => event.content_block?.type === 'tool_use')).toMatchObject({
+        index: 1,
+      });
+    });
+
     it('emits tool_use stop reason when functionCall appears in stream', () => {
       const processor = new PartProcessor(state);
       const functionChunks = processor.process({

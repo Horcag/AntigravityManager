@@ -569,6 +569,48 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(chunks.join('')).toContain('no-space stream text');
   });
 
+  it('keeps downstream text visible after a pending signature on the Anthropic wire', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      service.testProcessStream(stream).subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    const payload = JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: '', thoughtSignature: Buffer.from('wire-signature').toString('base64') },
+              { text: 'downstream visible text' },
+            ],
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+    stream.emit('data', Buffer.from(`data: ${payload}\n\n`));
+    stream.emit('end');
+    await completed;
+
+    const events = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+      .filter((event) => event.type.startsWith('content_block'));
+    const starts = events.filter((event) => event.type === 'content_block_start');
+    const stops = events.filter((event) => event.type === 'content_block_stop');
+
+    expect(chunks.join('')).toContain('downstream visible text');
+    expect(starts.map((event) => event.index)).toEqual([0, 1]);
+    expect(stops.map((event) => event.index)).toEqual([0, 1]);
+  });
+
   it('uses the requested model and zero usage in Anthropic message_start when the first chunk omits them', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
