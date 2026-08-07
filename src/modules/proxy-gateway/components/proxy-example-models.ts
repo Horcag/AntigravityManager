@@ -1,5 +1,5 @@
 import type { CloudAccount } from '@/modules/cloud-account/types';
-import { getPublicModelIdForDisplayName } from '../antigravity/ModelMapping';
+import { getPublicModelIdForDisplayName } from '../antigravity/model-display-presets';
 
 export interface ProxyExampleModel {
   id: string;
