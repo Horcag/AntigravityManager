@@ -256,4 +256,72 @@ describe('ClaudeRequestMapper thinking support', () => {
       }),
     ).toThrow('tool_result references unknown tool_use_id: unknown_tool');
   });
+
+  it('normalizes adjacent Anthropic turns without changing block order or caller data', () => {
+    const request: ClaudeRequest = {
+      model: 'gemini-3-flash',
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'first user text' }] },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' },
+            },
+            { type: 'text', text: 'second user text' },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Looking up both cities.', signature: 'sig_one' },
+            { type: 'tool_use', id: 'call_one', name: 'lookup', input: { city: 'Paris' } },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'call_two', name: 'lookup', input: { city: 'Rome' } }],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_one', content: 'Paris result' },
+            { type: 'tool_result', tool_use_id: 'call_two', content: 'Rome result' },
+          ],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'explain both results' }] },
+      ],
+    };
+    const before = structuredClone(request);
+
+    const contents = transformClaudeRequestIn(request).request.contents;
+
+    expect(contents.map((content) => content.role)).toEqual(['user', 'model', 'user']);
+    expect(contents[0]?.parts).toEqual([
+      { text: 'first user text' },
+      { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+      { text: 'second user text' },
+    ]);
+    expect(contents[1]?.parts.map((part) => part.functionCall?.id ?? part.text)).toEqual([
+      'Looking up both cities.',
+      'call_one',
+      'call_two',
+    ]);
+    expect(contents[1]?.parts[1]).toMatchObject({
+      functionCall: { id: 'call_one', args: { city: 'Paris' } },
+      thoughtSignature: 'sig_one',
+    });
+    expect(contents[2]?.parts[0]).toMatchObject({
+      functionResponse: { id: 'call_one' },
+      thoughtSignature: 'sig_one',
+    });
+    expect(contents[2]?.parts.map((part) => part.functionResponse?.id ?? part.text)).toEqual([
+      'call_one',
+      'call_two',
+      'explain both results',
+    ]);
+    expect(request).toEqual(before);
+  });
 });

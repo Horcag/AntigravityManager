@@ -236,6 +236,19 @@ export function mapClaudeModelToGemini(input: string): string {
   return input;
 }
 
+/**
+ * Only the legacy Gemini 3 Flash target is explicitly known to accept a final model turn.
+ * Newer Gemini and Claude 4.6 targets reject Anthropic assistant prefills upstream.
+ */
+export function supportsAnthropicAssistantPrefill(modelId: string): boolean {
+  return (
+    modelId
+      .trim()
+      .replace(/^models\//i, '')
+      .toLowerCase() === 'gemini-3-flash'
+  );
+}
+
 export function normalizeGeminiModelAlias(modelId: string): string {
   const normalizedModelId = modelId.trim().toLowerCase();
   return GEMINI_MODEL_ALIASES[normalizedModelId] ?? modelId;

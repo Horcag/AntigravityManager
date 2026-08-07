@@ -717,7 +717,16 @@ function buildContents(
       const hasThought = parts.some((p) => p.thought === true);
       if (!hasThought) parts.unshift({ text: 'Thinking...', thought: true });
     }
-    if (parts.length > 0) contents.push({ role, parts });
+    if (parts.length === 0) {
+      continue;
+    }
+
+    const previousContent = contents.at(-1);
+    if (previousContent?.role === role) {
+      previousContent.parts.push(...parts);
+    } else {
+      contents.push({ role, parts });
+    }
   }
   return contents;
 }

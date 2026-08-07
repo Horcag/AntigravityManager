@@ -1113,6 +1113,109 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it.each([
+    ['claude-sonnet-4-6', 'claude-sonnet-4-6-thinking', false],
+    ['claude-sonnet-4-6', 'claude-sonnet-4-6-thinking', true],
+    ['gemini-3.5-flash-high', 'gemini-3.5-flash-high', false],
+    ['gemini-3.5-flash-high', 'gemini-3.5-flash-high', true],
+  ])(
+    'rejects unsupported Anthropic final assistant prefills for %s before %s dispatch',
+    async (model, targetModel, stream) => {
+      vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+      const proxyService = {
+        handleAnthropicMessages: vi.fn(),
+      };
+      const app = await createHttpApp(proxyService);
+      const server = app.getHttpAdapter().getInstance();
+
+      try {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers: { authorization: 'Bearer test-key' },
+          payload: {
+            model,
+            stream,
+            messages: [
+              { role: 'user', content: 'start' },
+              { role: 'assistant', content: 'continue from this prefill' },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: `Final assistant prefill is not supported for target model '${targetModel}'.`,
+          },
+        });
+        expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+      } finally {
+        await app.close();
+      }
+    },
+  );
+
+  it('allows a user-final Anthropic history for targets that reject assistant prefills', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer test-key' },
+        payload: {
+          model: 'gemini-3.5-flash-high',
+          messages: [
+            { role: 'assistant', content: 'prior reply' },
+            { role: 'user', content: 'new request' },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('preserves final assistant prefills for the explicitly supported legacy target', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const messages = [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'continue from this prefill' },
+    ];
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer test-key' },
+        payload: { model: 'gemini-3-flash', messages },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledWith(
+        expect.objectContaining({ messages }),
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

@@ -42,9 +42,11 @@ import {
 import { ProxyGuard } from './proxy.guard';
 import {
   getOpenAICompatibleModels,
+  mapClaudeModelToGemini,
   MODEL_LIST_CREATED_AT,
   MODEL_LIST_OWNER,
   OPENAI_COMPATIBLE_DEFAULT_MODELS,
+  supportsAnthropicAssistantPrefill,
 } from '../antigravity/ModelMapping';
 import { getServerConfig } from '../../../server/server-config';
 import { AccountLeaseService } from './account-lease.service';
@@ -1292,10 +1294,24 @@ export class ProxyController {
       this.validateAnthropicContent(message.content);
     }
     this.validateAnthropicToolHistory(body.messages);
+    this.validateAnthropicAssistantPrefill(body);
     this.validateAnthropicTools(body.tools);
     this.validateAnthropicToolChoice(body.tool_choice, body.tools);
     this.validateAnthropicSystem(body.system);
     this.validateAnthropicStopSequences(body.stop_sequences);
+  }
+
+  private validateAnthropicAssistantPrefill(body: AnthropicChatRequest): void {
+    if (body.messages.at(-1)?.role !== 'assistant') {
+      return;
+    }
+    const targetModel = mapClaudeModelToGemini(body.model);
+    if (!supportsAnthropicAssistantPrefill(targetModel)) {
+      throw this.invalidRequest(
+        `Final assistant prefill is not supported for target model '${targetModel}'.`,
+        'messages',
+      );
+    }
   }
 
   private validateAnthropicContent(content: unknown): void {

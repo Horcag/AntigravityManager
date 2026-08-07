@@ -7,6 +7,7 @@ import { AccountPoolUnavailableException, OpenAIProtocolException } from './open
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import { supportsAnthropicAssistantPrefill } from '../antigravity/ModelMapping';
 import { transformResponse } from '../antigravity/ClaudeResponseMapper';
 import { StreamingState, PartProcessor } from '../antigravity/ClaudeStreamingMapper';
 import { type SignatureContext, SignatureStore } from '../antigravity/SignatureStore';
@@ -198,6 +199,15 @@ export class ProxyService {
     const sessionKey = this.extractAnthropicSessionKey(request);
 
     const targetModel = this.resolveTargetModel(request.model);
+    if (
+      request.messages.at(-1)?.role === 'assistant' &&
+      !supportsAnthropicAssistantPrefill(targetModel)
+    ) {
+      throw this.invalidOpenAIRequest(
+        `Final assistant prefill is not supported for target model '${targetModel}'.`,
+        'messages',
+      );
+    }
     const extraHeaders = this.createModelSpecificHeaders(request.model);
     this.logger.log(
       `Anthropic request received: model=${request.model}, mappedModel=${targetModel}, stream=${request.stream}`,
