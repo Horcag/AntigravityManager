@@ -160,6 +160,18 @@ npm run lint
 # Ensure NestJS dependency injection resolves correctly during Electron main process launch and route handlers register without errors
 ```
 
+For a faster protocol-focused feedback loop, use the scoped suites below before the full test run:
+
+```powershell
+npm run test:proxy:conformance # assembled public HTTP/SSE contracts across all three APIs
+npm run test:proxy:gemini      # native Gemini REST and SSE wire behavior
+npm run test:proxy:openai      # OpenAI request, response, and streaming contracts
+npm run test:proxy:anthropic   # Anthropic Messages request, response, and thinking contracts
+npm run test:proxy:media       # multipart, image, audio, and media streaming contracts
+```
+
+The shared harness in `src/tests/support/proxy-conformance-harness.ts` boots the real Nest/Fastify controllers with deterministic service and account fixtures. `src/tests/support/http-payloads.ts` owns reusable SSE parsing and multipart builders so protocol tests do not maintain divergent wire helpers. Scoped suites supplement rather than replace `npm run test`.
+
 ---
 
 ## 7. Native Gemini API Support & Honest Limitations

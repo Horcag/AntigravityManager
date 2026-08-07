@@ -9,6 +9,7 @@ import {
   OPENAI_MEDIA_MULTIPART_OPTIONS,
 } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import { applyProxyRouteBodyLimit } from '@/server/proxy-body-limit';
+import { createMultipartPayload } from '../support/http-payloads';
 
 const png = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -21,29 +22,6 @@ const wav = Buffer.concat([
   Buffer.from('WAVE'),
   Buffer.alloc(8),
 ]);
-
-function createMultipartPayload(
-  boundary: string,
-  fields: Array<[string, string]>,
-  files: Array<{ bytes: Buffer; field: string; filename: string; mimeType: string }>,
-): Buffer {
-  const chunks: Uint8Array[] = fields.map(([name, value]) =>
-    Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`,
-    ),
-  );
-  for (const file of files) {
-    chunks.push(
-      Buffer.from(
-        `--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.filename}"\r\nContent-Type: ${file.mimeType}\r\n\r\n`,
-      ),
-      file.bytes,
-      Buffer.from('\r\n'),
-    );
-  }
-  chunks.push(Buffer.from(`--${boundary}--\r\n`));
-  return Buffer.concat(chunks);
-}
 
 describe('OpenAI media HTTP wire contract', () => {
   let server: FastifyInstance;
