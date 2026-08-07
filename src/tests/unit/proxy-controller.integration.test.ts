@@ -3085,6 +3085,70 @@ describe('ProxyController Integration', () => {
     expect(raw.end).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    ['invalid_request_error', 400],
+    ['authentication_error', 401],
+    ['billing_error', 402],
+    ['permission_error', 403],
+    ['not_found_error', 404],
+    ['conflict_error', 409],
+    ['request_too_large', 413],
+    ['rate_limit_error', 429],
+    ['api_error', 500],
+    ['timeout_error', 504],
+    ['overloaded_error', 529],
+  ])('preserves Anthropic SSE error type %s for status %i after partial output', (type, status) => {
+    const controller = new ProxyController({} as any);
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const reply = { hijack: vi.fn(), raw };
+    const stream = concat(
+      of('event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'),
+      throwError(() => new UpstreamRequestError({ message: 'upstream failure', status })),
+    );
+
+    (controller as any).writeSseResponse(reply, stream, 'anthropic');
+
+    expect(raw.write).toHaveBeenNthCalledWith(
+      2,
+      `event: error\ndata: ${JSON.stringify({
+        type: 'error',
+        error: { type, message: 'upstream failure' },
+      })}\n\n`,
+    );
+    expect(raw.write.mock.calls.flat().join('')).not.toContain('[DONE]');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
+  it('sanitizes unexpected Anthropic SSE failures after partial output', () => {
+    const controller = new ProxyController({} as any);
+    const raw = {
+      end: vi.fn(),
+      on: vi.fn(),
+      writableEnded: false,
+      write: vi.fn(),
+      writeHead: vi.fn(),
+    };
+    const reply = { hijack: vi.fn(), raw };
+    const stream = concat(
+      of('event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'),
+      throwError(() => new Error('internal implementation detail')),
+    );
+
+    (controller as any).writeSseResponse(reply, stream, 'anthropic');
+
+    expect(raw.write).toHaveBeenLastCalledWith(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}\n\n',
+    );
+    expect(raw.write.mock.calls.flat().join('')).not.toContain('[DONE]');
+    expect(raw.end).toHaveBeenCalledOnce();
+  });
+
   it('normalizes web_search_call in /v1/responses into builtin_web_search tool messages', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({

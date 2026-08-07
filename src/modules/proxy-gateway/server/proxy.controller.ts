@@ -54,6 +54,7 @@ import { UpstreamRequestError } from './clients/upstream-error';
 import {
   OpenAIProtocolException,
   ProxyProtocolExceptionFilter,
+  mapAnthropicProtocolError,
   mapOpenAIProtocolError,
   sendAnthropicProtocolError,
   sendOpenAIProtocolError,
@@ -2899,6 +2900,8 @@ export class ProxyController {
           return;
         }
         const mapped = mapOpenAIProtocolError(error);
+        const anthropicMapped =
+          wireProtocol === 'anthropic' ? mapAnthropicProtocolError(error) : undefined;
         const payload =
           wireProtocol === 'responses'
             ? {
@@ -2912,11 +2915,8 @@ export class ProxyController {
               ? {
                   type: 'error',
                   error: {
-                    type:
-                      mapped.error.type === 'invalid_request_error'
-                        ? 'invalid_request_error'
-                        : 'api_error',
-                    message: mapped.error.message,
+                    type: anthropicMapped!.error.type,
+                    message: anthropicMapped!.error.message,
                   },
                 }
               : { error: mapped.error };
