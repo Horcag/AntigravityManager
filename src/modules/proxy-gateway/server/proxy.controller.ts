@@ -469,16 +469,8 @@ export class ProxyController {
       return;
     }
     const input = this.mergeMediaInput(body ?? {}, multipart);
-    if (input.stream !== undefined && input.stream !== 'false') {
-      if (input.stream === 'true') {
-        this.sendInvalidRequest(
-          res,
-          'Streaming audio transcriptions are not supported by this endpoint.',
-          'stream',
-          'unsupported_parameter',
-        );
-        return;
-      }
+    const stream = this.normalizeOptionalBoolean(input.stream);
+    if (stream === 'invalid') {
       this.sendInvalidRequest(res, 'stream must be a boolean.', 'stream', 'invalid_value');
       return;
     }
@@ -553,6 +545,11 @@ export class ProxyController {
         ?.map((part) => part.text ?? '')
         .join('')
         .trim();
+
+      if (stream && input.model !== 'whisper-1') {
+        this.sendTranscriptionSse(res, text ?? '');
+        return;
+      }
 
       if (input.responseFormat === 'text') {
         res
@@ -2547,6 +2544,32 @@ export class ProxyController {
       return value;
     }
     return value ? [value] : [];
+  }
+
+  private normalizeOptionalBoolean(value: string | undefined): boolean | 'invalid' | undefined {
+    if (value === undefined) {
+      return undefined;
+    }
+    if (value === 'true') {
+      return true;
+    }
+    if (value === 'false') {
+      return false;
+    }
+    return 'invalid';
+  }
+
+  private sendTranscriptionSse(res: FastifyReply, text: string): void {
+    const delta = { type: 'transcript.text.delta', delta: text };
+    const done = { type: 'transcript.text.done', text };
+    const payload = `event: ${delta.type}\ndata: ${JSON.stringify(delta)}\n\nevent: ${done.type}\ndata: ${JSON.stringify(done)}\n\n`;
+
+    res
+      .header('Cache-Control', 'no-cache')
+      .header('Connection', 'keep-alive')
+      .type('text/event-stream; charset=utf-8')
+      .status(HttpStatus.OK)
+      .send(payload);
   }
 
   private buildTranscriptionPrompt(prompt?: string, language?: string): string {

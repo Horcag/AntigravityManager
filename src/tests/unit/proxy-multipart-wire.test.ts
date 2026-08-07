@@ -913,7 +913,10 @@ describe('OpenAI multipart media endpoints', () => {
     expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
   });
 
-  it('rejects transcription stream=true for JSON/base64 and multipart requests before upstream work', async () => {
+  it('returns transcript SSE events for stream=true JSON/base64 and multipart requests', async () => {
+    proxyService.handleGeminiGenerateContent.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'transcribed' }] } }],
+    });
     app = await createApp();
     await app.init();
 
@@ -952,20 +955,16 @@ describe('OpenAI multipart media endpoints', () => {
       });
 
     for (const response of [jsonResponse, multipartResponse]) {
-      expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({
-        error: {
-          message: 'Streaming audio transcriptions are not supported by this endpoint.',
-          type: 'invalid_request_error',
-          param: 'stream',
-          code: 'unsupported_parameter',
-        },
-      });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.headers['content-type']).toContain('text/event-stream');
+      expect(response.body).toBe(
+        'event: transcript.text.delta\ndata: {"type":"transcript.text.delta","delta":"transcribed"}\n\nevent: transcript.text.done\ndata: {"type":"transcript.text.done","text":"transcribed"}\n\n',
+      );
     }
-    expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledTimes(2);
   });
 
-  it('preserves non-streaming JSON/base64 and multipart transcriptions', async () => {
+  it('preserves false and omitted transcription stream values as non-streaming', async () => {
     proxyService.handleGeminiGenerateContent.mockResolvedValue({
       candidates: [{ content: { parts: [{ text: 'transcribed' }] } }],
     });
@@ -995,7 +994,6 @@ describe('OpenAI multipart media endpoints', () => {
         headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
         payload: multipartBody(boundary, [
           { headers: ['Content-Disposition: form-data; name="model"'], value: 'gemini-3-flash' },
-          { headers: ['Content-Disposition: form-data; name="stream"'], value: 'false' },
           {
             headers: [
               'Content-Disposition: form-data; name="file"; filename="speech.mp3"',
@@ -1009,6 +1007,122 @@ describe('OpenAI multipart media endpoints', () => {
     expect(jsonResponse.statusCode, jsonResponse.body).toBe(200);
     expect(multipartResponse.statusCode, multipartResponse.body).toBe(200);
     expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores stream=true for whisper-1 and returns the ordinary JSON transcription', async () => {
+    proxyService.handleGeminiGenerateContent.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'whisper transcription' }] } }],
+    });
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: {
+          model: 'whisper-1',
+          file: 'data:audio/mpeg;base64,SUQzBAAA',
+          stream: true,
+        },
+      });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(response.json()).toEqual({ text: 'whisper transcription' });
+  });
+
+  it.each([
+    ['JSON/base64', undefined, { stream: 'not-a-boolean' }],
+    ['multipart', 'not-a-boolean', undefined],
+  ])(
+    'rejects invalid transcription stream values from %s before upstream work',
+    async (_source, multipartStream, jsonPayload) => {
+      app = await createApp();
+      await app.init();
+
+      const boundary = '----openai-audio-invalid-stream';
+      const response = multipartStream
+        ? await app
+            .getHttpAdapter()
+            .getInstance()
+            .inject({
+              method: 'POST',
+              url: '/v1/audio/transcriptions',
+              headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+              payload: multipartBody(boundary, [
+                {
+                  headers: ['Content-Disposition: form-data; name="model"'],
+                  value: 'gemini-3-flash',
+                },
+                {
+                  headers: ['Content-Disposition: form-data; name="stream"'],
+                  value: multipartStream,
+                },
+                {
+                  headers: [
+                    'Content-Disposition: form-data; name="file"; filename="speech.mp3"',
+                    'Content-Type: audio/mpeg',
+                  ],
+                  value: Buffer.from([0x49, 0x44, 0x33, 0x04]),
+                },
+              ]),
+            })
+        : await app
+            .getHttpAdapter()
+            .getInstance()
+            .inject({
+              method: 'POST',
+              url: '/v1/audio/transcriptions',
+              payload: {
+                model: 'gemini-3-flash',
+                file: 'data:audio/mpeg;base64,SUQzBAAA',
+                ...jsonPayload,
+              },
+            });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          message: 'stream must be a boolean.',
+          type: 'invalid_request_error',
+          param: 'stream',
+          code: 'invalid_value',
+        },
+      });
+      expect(proxyService.handleGeminiGenerateContent).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves OpenAI-shaped errors when a streaming transcription upstream call fails', async () => {
+    proxyService.handleGeminiGenerateContent.mockRejectedValue(new Error('Gemini unavailable'));
+    app = await createApp();
+    await app.init();
+
+    const response = await app
+      .getHttpAdapter()
+      .getInstance()
+      .inject({
+        method: 'POST',
+        url: '/v1/audio/transcriptions',
+        payload: {
+          model: 'gemini-3-flash',
+          file: 'data:audio/mpeg;base64,SUQzBAAA',
+          stream: true,
+        },
+      });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({
+      error: {
+        message: 'Internal Server Error',
+        type: 'server_error',
+        param: null,
+        code: null,
+      },
+    });
   });
 
   it('rejects repeated timestamp granularities from a real multipart audio request', async () => {
