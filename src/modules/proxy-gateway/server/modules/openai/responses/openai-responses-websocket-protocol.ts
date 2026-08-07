@@ -161,10 +161,6 @@ export class OpenAIResponsesWebSocketProtocol {
     this.pendingSession = null;
   }
 
-  public getPreviousResponseId(): string {
-    return this.lastResponseId;
-  }
-
   private prepareRequest(
     payload: Record<string, unknown>,
     prewarm: boolean,

@@ -519,6 +519,7 @@ describe('OpenAIResponsesStreamingMapper', () => {
       response: {
         status: 'incomplete',
         incomplete_details: { reason: 'max_output_tokens' },
+        output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
       },
     });
   });

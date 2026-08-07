@@ -175,7 +175,7 @@ describe('OpenAIResponsesWebSocketProtocol', () => {
     ]);
   });
 
-  it('evicts a failed store=false continuation from connection memory', () => {
+  it('evicts a failed store=false parent as required by the WebSocket contract', () => {
     const protocol = new OpenAIResponsesWebSocketProtocol(new OpenAIResponsesSessionStoreImpl());
     const prewarm = protocol.accept({
       type: 'response.create',

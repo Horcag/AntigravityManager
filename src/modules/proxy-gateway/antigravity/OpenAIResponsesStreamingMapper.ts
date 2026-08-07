@@ -43,7 +43,7 @@ interface ResponsesMessageOutputItem {
   id: string;
   phase: 'commentary' | 'final_answer';
   role: 'assistant';
-  status: 'completed';
+  status: 'completed' | 'incomplete';
   type: 'message';
 }
 
@@ -53,7 +53,7 @@ interface ResponsesReasoningOutputItem {
     type: 'reasoning_text';
   }>;
   id: string;
-  status: 'completed';
+  status: 'completed' | 'incomplete';
   summary: Array<{
     text: string;
     type: 'summary_text';
@@ -231,8 +231,8 @@ export class OpenAIResponsesStreamingMapper {
     const incompleteReason = toIncompleteReason(finishReason);
     const status = incompleteReason ? 'incomplete' : 'completed';
     const events = [
-      ...this.closeThought(),
-      ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer'),
+      ...this.closeThought(status),
+      ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer', status),
     ];
 
     events.push(
@@ -263,8 +263,8 @@ export class OpenAIResponsesStreamingMapper {
     this.completed = true;
     const message = error instanceof Error ? error.message : String(error);
     const events = [
-      ...this.closeThought(),
-      ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer'),
+      ...this.closeThought('incomplete'),
+      ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer', 'incomplete'),
     ];
     events.push(
       this.serialize({
@@ -377,13 +377,14 @@ export class OpenAIResponsesStreamingMapper {
     ];
   }
 
-  private closeThought(): string[] {
+  private closeThought(status: 'completed' | 'incomplete' = 'completed'): string[] {
     const thought = this.activeThought;
     if (!thought) {
       return [];
     }
     this.activeThought = null;
     thought.item.content = [{ text: thought.text, type: 'reasoning_text' }];
+    thought.item.status = status;
     thought.item.summary = [{ text: thought.text, type: 'summary_text' }];
     return [
       this.serialize({
@@ -401,21 +402,26 @@ export class OpenAIResponsesStreamingMapper {
     ];
   }
 
-  private closeMessage(phase: 'commentary' | 'final_answer'): string[] {
+  private closeMessage(
+    phase: 'commentary' | 'final_answer',
+    status: 'completed' | 'incomplete' = 'completed',
+  ): string[] {
     const message = this.activeMessage;
     if (!message) {
       return [];
     }
     this.activeMessage = null;
-    return this.finishMessage(message, phase);
+    return this.finishMessage(message, phase, status);
   }
 
   private finishMessage(
     message: ActiveMessageOutput,
     phase: 'commentary' | 'final_answer',
+    status: 'completed' | 'incomplete',
   ): string[] {
     message.item.content = [{ annotations: [], text: message.text, type: 'output_text' }];
     message.item.phase = phase;
+    message.item.status = status;
     return [
       this.serialize({
         content_index: 0,
