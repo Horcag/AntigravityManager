@@ -12,6 +12,7 @@ import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/
 import { setServerConfig } from '../../server/server-config';
 import { DEFAULT_APP_CONFIG, ProxyConfig } from '@/modules/config/types';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
+import type { ClaudeResponse } from '@/modules/proxy-gateway/antigravity/types';
 
 // Mock dependencies
 const mockAccountLeaseService = {
@@ -71,6 +72,10 @@ class TestableProxyService extends ProxyService {
 
   public testModelHeaders(model: string): Record<string, string> {
     return (this as any).createModelSpecificHeaders(model);
+  }
+
+  public testToAnthropicResponse(response: ClaudeResponse) {
+    return (this as any).toAnthropicChatResponse(response);
   }
 }
 
@@ -162,6 +167,27 @@ describe('ProxyService Empty Stream Retry Logic', () => {
 
     expect(errorReceived).toBeDefined();
     expect(errorReceived?.message).toBe('Empty response stream');
+  });
+
+  it('does not report a malformed-only Anthropic stream as a successful message', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const resultObservable = service.testProcessStream(stream);
+    const receivedChunks: string[] = [];
+
+    const errorReceived = await new Promise<Error | undefined>((resolve) => {
+      resultObservable.subscribe({
+        next: (chunk) => receivedChunks.push(chunk),
+        error: (error: Error) => resolve(error),
+        complete: () => resolve(undefined),
+      });
+
+      stream.emit('data', Buffer.from('data: {not-json}\n\n'));
+      stream.emit('end');
+    });
+
+    expect(errorReceived?.message).toBe('Empty response stream');
+    expect(receivedChunks.join('')).not.toContain('event: message_stop');
   });
 
   it('should NOT emit error when stream has data', async () => {
@@ -407,27 +433,81 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(errorMessage).toBe('Empty response stream');
   });
 
-  it('propagates Anthropic stream interruption errors', async () => {
+  it('emits a terminal Anthropic error event for upstream interruptions', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
     const observable = service.testProcessStream(stream);
-    let errorMessage = '';
+    const receivedChunks: string[] = [];
+    let completed = false;
 
     const done = new Promise<void>((resolve) => {
       observable.subscribe({
-        next: () => {},
-        error: (error: Error) => {
-          errorMessage = error.message;
+        next: (chunk) => receivedChunks.push(chunk),
+        error: () => resolve(),
+        complete: () => {
+          completed = true;
           resolve();
         },
-        complete: () => resolve(),
       });
     });
 
     setTimeout(() => stream.emit('error', new Error('upstream interrupted')), 10);
     await done;
 
-    expect(errorMessage).toBe('upstream interrupted');
+    expect(completed).toBe(true);
+    expect(receivedChunks.join('')).toBe(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"upstream interrupted"}}\n\n',
+    );
+  });
+
+  it('returns a visible Anthropic refusal block when Gemini blocks the whole prompt', () => {
+    const service = new TestableProxyService();
+
+    expect(
+      service.testToAnthropicResponse({
+        id: 'msg_refusal',
+        type: 'message',
+        role: 'assistant',
+        model: 'gemini-3-flash',
+        content: [],
+        stop_reason: 'refusal',
+        refusal: 'Request blocked by safety policy.',
+        usage: { input_tokens: 3, output_tokens: 0 },
+      }),
+    ).toEqual({
+      id: 'msg_refusal',
+      type: 'message',
+      role: 'assistant',
+      model: 'gemini-3-flash',
+      content: [{ type: 'text', text: 'Request blocked by safety policy.' }],
+      stop_reason: 'refusal',
+      stop_sequence: undefined,
+      usage: {
+        input_tokens: 3,
+        output_tokens: 0,
+        cache_creation_input_tokens: undefined,
+        cache_read_input_tokens: undefined,
+      },
+    });
+  });
+
+  it('destroys the upstream and removes listeners when an Anthropic client disconnects', () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter() as EventEmitter & { destroy: ReturnType<typeof vi.fn> };
+    stream.destroy = vi.fn();
+    const observable = service.testProcessStream(stream);
+
+    const subscription = observable.subscribe();
+    expect(stream.listenerCount('data')).toBe(1);
+    expect(stream.listenerCount('end')).toBe(1);
+    expect(stream.listenerCount('error')).toBe(1);
+
+    subscription.unsubscribe();
+
+    expect(stream.destroy).toHaveBeenCalledOnce();
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(stream.listenerCount('end')).toBe(0);
+    expect(stream.listenerCount('error')).toBe(0);
   });
 
   it('propagates Gemini passthrough interruption errors', async () => {
@@ -705,7 +785,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
   });
 
-  it('terminates public Anthropic streams on conflicting tool-call id reuse', async () => {
+  it('closes public Anthropic blocks before a terminal tool-call conflict error', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
     mockGeminiClient.streamGenerateInternal.mockResolvedValue(
@@ -736,15 +816,48 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       messages: [{ role: 'user', content: 'Search.' }],
     });
     expect(result).toBeInstanceOf(Observable);
-    const error = await new Promise<unknown>((resolve, reject) => {
+    const events = await new Promise<string[]>((resolve, reject) => {
+      const received: string[] = [];
       (result as Observable<string>).subscribe({
-        error: resolve,
-        complete: () => reject(new Error('Expected stream failure')),
+        next: (event) => received.push(event),
+        error: reject,
+        complete: () => resolve(received),
       });
     });
 
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).name).toBe('ToolCallIdConflictError');
+    expect(events.join('')).toContain('event: content_block_stop');
+    expect(events.at(-1)).toContain('event: error');
+    expect(events.at(-1)).toContain('api_error');
+    expect(events.join('')).not.toContain('event: message_stop');
+  });
+
+  it('destroys a malformed Anthropic upstream after the terminal parse error', async () => {
+    const service = new TestableProxyService();
+    const stream = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const observable = service.testProcessStream(stream);
+    const received: string[] = [];
+
+    const done = new Promise<void>((resolve, reject) => {
+      observable.subscribe({
+        next: (event) => received.push(event),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    setTimeout(() => {
+      for (let index = 0; index < 4; index++) {
+        stream.emit('data', Buffer.from('data: {not-json}\n\n'));
+      }
+    }, 10);
+    await done;
+
+    expect(received.at(-1)).toContain('event: error');
+    expect(received.at(-1)).toContain('api_error');
+    expect(stream.destroy).toHaveBeenCalledOnce();
+    expect(stream.listenerCount('data')).toBe(0);
+    expect(stream.listenerCount('end')).toBe(0);
+    expect(stream.listenerCount('error')).toBe(0);
   });
 
   it('terminates public Responses streams on malformed present function arguments', async () => {

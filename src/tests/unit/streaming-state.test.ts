@@ -25,8 +25,8 @@ describe('StreamingState', () => {
       const chunks = state.handleParseError('error 4');
 
       expect(chunks.length).toBeGreaterThan(0);
-      expect(chunks[0]).toContain('network_error');
-      expect(chunks[0]).toContain('Unstable network');
+      expect(chunks[0]).toContain('api_error');
+      expect(chunks[0]).toContain('malformed streaming data');
     });
 
     it('should safely close active block on error', () => {
@@ -63,6 +63,12 @@ describe('StreamingState', () => {
   });
 
   describe('stream aggregation compatibility', () => {
+    it('always starts with zeroed usage when upstream omits usage metadata', () => {
+      const event = state.emitMessageStart({ responseId: 'msg_1', modelVersion: 'gemini-3-flash' });
+
+      expect(event).toContain('"usage":{"input_tokens":0,"output_tokens":0}');
+    });
+
     it('emits tool_use stop reason when functionCall appears in stream', () => {
       const processor = new PartProcessor(state);
       const functionChunks = processor.process({
@@ -126,6 +132,74 @@ describe('StreamingState', () => {
       expect(output).toContain('Searched for you');
       expect(output).toContain('Citations');
       expect(output).toContain('https://example.com/gemini');
+    });
+
+    it('maps Gemini safety termination to Anthropic refusal', () => {
+      const chunks = state.emitFinish('SAFETY');
+
+      expect(chunks.join('')).toContain('"stop_reason":"refusal"');
+    });
+
+    it('closes an active block before a terminal Anthropic error event', () => {
+      state.startBlock('Text', { type: 'text', text: '' });
+
+      const chunks = state.emitTerminalError('timeout_error', 'Upstream timed out.');
+
+      expect(chunks).toEqual([
+        expect.stringContaining('event: content_block_stop'),
+        'event: error\ndata: {"type":"error","error":{"type":"timeout_error","message":"Upstream timed out."}}\n\n',
+      ]);
+      expect(chunks.join('')).not.toContain('message_stop');
+    });
+
+    it('balances content block indexes for parallel tool calls', () => {
+      const processor = new PartProcessor(state);
+      const chunks = [
+        ...processor.process({
+          functionCall: { id: 'toolu_1', name: 'lookup', args: { key: 'a' } },
+        }),
+        ...processor.process({
+          functionCall: { id: 'toolu_2', name: 'lookup', args: { key: 'b' } },
+        }),
+        ...state.emitFinish('STOP'),
+      ];
+      const payload = chunks.join('');
+
+      expect(payload.match(/event: content_block_start/g)).toHaveLength(2);
+      expect(payload.match(/event: content_block_stop/g)).toHaveLength(2);
+      expect(payload).toContain('"index":0');
+      expect(payload).toContain('"index":1');
+      expect(payload).toContain('"stop_reason":"tool_use"');
+    });
+
+    it('balances the synthetic thinking block that carries a text signature', () => {
+      const processor = new PartProcessor(state);
+      const signature = Buffer.from('opaque-signature').toString('base64');
+      const payload = [
+        ...processor.process({ text: 'answer', thoughtSignature: signature }),
+        ...state.emitFinish('STOP'),
+      ].join('');
+
+      expect(payload.match(/event: content_block_start/g)).toHaveLength(2);
+      expect(payload.match(/event: content_block_stop/g)).toHaveLength(2);
+      expect(payload).toContain('"index":0');
+      expect(payload).toContain('"index":1');
+      expect(payload).toContain('"type":"signature_delta","signature":"opaque-signature"');
+    });
+
+    it('balances a trailing signature before the following function call', () => {
+      const processor = new PartProcessor(state);
+      const signature = Buffer.from('trailing-signature').toString('base64');
+      const payload = [
+        ...processor.process({ text: '', thoughtSignature: signature }),
+        ...processor.process({ functionCall: { id: 'toolu_1', name: 'lookup', args: {} } }),
+        ...state.emitFinish('STOP'),
+      ].join('');
+
+      expect(payload.match(/event: content_block_start/g)).toHaveLength(2);
+      expect(payload.match(/event: content_block_stop/g)).toHaveLength(2);
+      expect(payload).toContain('"type":"signature_delta","signature":"trailing-signature"');
+      expect(payload).toContain('"type":"tool_use","id":"toolu_1"');
     });
   });
 });

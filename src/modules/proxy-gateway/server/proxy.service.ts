@@ -334,16 +334,31 @@ export class ProxyService extends BaseProxyService {
       let lastFinishReason: string | undefined;
       let lastUsageMetadata: UsageMetadata | undefined;
 
-      let receivedData = false;
+      let receivedResponse = false;
+      let cleanedUp = false;
       const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
-        subscriber.next('data: {"type": "message_stop"}\n\ndata: [DONE]\n\n');
+        state
+          .emitTerminalError('timeout_error', 'The upstream stopped producing streaming data.')
+          .forEach((chunk) => subscriber.next(chunk));
+        cleanup(false);
         subscriber.complete();
       });
 
-      idleTimer.reset();
+      const cleanup = (destroy: boolean): void => {
+        if (cleanedUp) {
+          return;
+        }
+        cleanedUp = true;
+        idleTimer.clear();
+        upstreamStream.removeListener('data', onData);
+        upstreamStream.removeListener('end', onEnd);
+        upstreamStream.removeListener('error', onError);
+        if (destroy) {
+          idleTimer.dispose();
+        }
+      };
 
-      upstreamStream.on('data', (chunk: Buffer) => {
-        receivedData = true; // Mark that we got data
+      const onData = (chunk: Buffer): void => {
         idleTimer.reset();
         buffer += decoder.decode(chunk, { stream: true });
         const lines = buffer.split('\n');
@@ -362,11 +377,17 @@ export class ProxyService extends BaseProxyService {
             this.logger.error('Stream parse error: invalid v1internal SSE payload');
             const errorChunks = state.handleParseError(dataStr);
             errorChunks.forEach((c) => subscriber.next(c));
+            if (errorChunks.some((event) => event.startsWith('event: error'))) {
+              cleanup(true);
+              subscriber.complete();
+              return;
+            }
             continue;
           }
 
           try {
             const response = decoded.response;
+            receivedResponse = true;
 
             const startMsg = state.emitMessageStart(response);
             if (startMsg) subscriber.next(startMsg);
@@ -397,42 +418,61 @@ export class ProxyService extends BaseProxyService {
               e instanceof ToolCallIdConflictError ||
               e instanceof InvalidFunctionCallArgumentsError
             ) {
-              idleTimer.clear();
-              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-              subscriber.error(e);
+              state
+                .emitTerminalError('api_error', e.message)
+                .forEach((chunk) => subscriber.next(chunk));
+              cleanup(true);
+              subscriber.complete();
               return;
             }
             this.logger.error('Stream parse error', e);
             const errorChunks = state.handleParseError(dataStr);
             errorChunks.forEach((c) => subscriber.next(c));
+            if (errorChunks.some((event) => event.startsWith('event: error'))) {
+              cleanup(true);
+              subscriber.complete();
+              return;
+            }
           }
         }
-      });
+      };
 
-      upstreamStream.on('end', () => {
-        idleTimer.clear();
-        if (!receivedData) {
+      const onEnd = (): void => {
+        if (!receivedResponse) {
           this.logger.warn('Empty response stream detected');
+          cleanup(false);
           subscriber.error(new Error('Empty response stream'));
           return;
         }
 
         const finishChunks = state.emitFinish(lastFinishReason, lastUsageMetadata);
         finishChunks.forEach((c) => subscriber.next(c));
+        cleanup(false);
         subscriber.complete();
-      });
+      };
 
-      upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
+      const onError = (err: unknown): void => {
         const cleanError = err instanceof Error ? err : new Error(String(err));
         const { type } = classifyStreamError(cleanError);
 
         this.logger.error(`Stream error: ${type} - ${cleanError.message}`);
-        subscriber.error(cleanError);
-      });
+        state
+          .emitTerminalError(
+            type === 'timeout_error' ? 'timeout_error' : 'api_error',
+            cleanError.message,
+          )
+          .forEach((chunk) => subscriber.next(chunk));
+        cleanup(false);
+        subscriber.complete();
+      };
+
+      upstreamStream.on('data', onData);
+      upstreamStream.on('end', onEnd);
+      upstreamStream.on('error', onError);
+      idleTimer.reset();
 
       return () => {
-        idleTimer.dispose();
+        cleanup(true);
       };
     });
   }
@@ -1830,7 +1870,10 @@ export class ProxyService extends BaseProxyService {
       type: response.type,
       role: response.role,
       model: response.model,
-      content: response.content,
+      content:
+        response.content.length === 0 && response.refusal
+          ? [{ type: 'text', text: response.refusal }]
+          : response.content,
       stop_reason: response.stop_reason,
       stop_sequence: response.stop_sequence,
       usage: {
@@ -2191,6 +2234,9 @@ export class ProxyService extends BaseProxyService {
     }
     if (stopReason === 'tool_use') {
       return 'tool_calls';
+    }
+    if (stopReason === 'refusal') {
+      return 'content_filter';
     }
 
     return stopReason;

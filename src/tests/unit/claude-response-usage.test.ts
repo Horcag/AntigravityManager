@@ -52,7 +52,7 @@ describe('ClaudeResponseMapper usage', () => {
 
     expect(response).toMatchObject({
       refusal: 'Request blocked by safety policy (blockReason: SAFETY)',
-      stop_reason: 'content_filter',
+      stop_reason: 'refusal',
     });
   });
 });

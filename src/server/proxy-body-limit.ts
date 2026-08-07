@@ -1,4 +1,5 @@
 import { OPENAI_JSON_BODY_LIMIT_BYTES } from '../modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
+import { ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES } from '../modules/proxy-gateway/server/modules/anthropic/anthropic-request-contract';
 
 interface ProxyRouteOptions {
   bodyLimit?: number;
@@ -11,7 +12,6 @@ const LARGE_INLINE_MEDIA_ROUTES = new Set([
   '/v1/chat/completions',
   '/v1/images/edits',
   '/v1/images/generations',
-  '/v1/messages',
   '/v1/responses',
 ]);
 
@@ -26,6 +26,9 @@ export function resolveProxyRouteBodyLimit(
 ): number | undefined {
   if (!acceptsPost(method)) {
     return undefined;
+  }
+  if (url === '/v1/messages') {
+    return ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES;
   }
   if (LARGE_INLINE_MEDIA_ROUTES.has(url) || url.startsWith('/v1beta/models/')) {
     return OPENAI_JSON_BODY_LIMIT_BYTES;

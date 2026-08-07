@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { OPENAI_JSON_BODY_LIMIT_BYTES } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
+import { ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-request-contract';
 import { applyProxyRouteBodyLimit, resolveProxyRouteBodyLimit } from '@/server/proxy-body-limit';
 
 describe('proxy route body limits', () => {
@@ -14,7 +15,6 @@ describe('proxy route body limits', () => {
   it.each([
     '/v1/chat/completions',
     '/v1/responses',
-    '/v1/messages',
     '/v1/images/generations',
     '/v1/images/edits',
     '/v1/audio/transcriptions',
@@ -22,6 +22,12 @@ describe('proxy route body limits', () => {
     '/v1beta/models/:model:streamGenerateContent',
   ])('assigns the large inline-media envelope only to %s', (url) => {
     expect(resolveProxyRouteBodyLimit('POST', url)).toBe(OPENAI_JSON_BODY_LIMIT_BYTES);
+  });
+
+  it("uses Anthropic's 32 MiB Messages request envelope", () => {
+    expect(resolveProxyRouteBodyLimit('POST', '/v1/messages')).toBe(
+      ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES,
+    );
   });
 
   it('leaves unrelated and read-only routes at the Fastify default', () => {

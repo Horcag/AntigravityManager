@@ -43,6 +43,7 @@ export class StreamingState {
   public blockIndex: number = 0;
   public messageStartSent: boolean = false;
   public messageStopSent: boolean = false;
+  private terminalErrorSent: boolean = false;
   private usedTool: boolean = false;
   private signatures: SignatureManagerImpl = new SignatureManagerImpl();
   private latestResponseSignature: string | null = null;
@@ -64,7 +65,7 @@ export class StreamingState {
     if (this.messageStartSent) return '';
 
     const usageMeta = rawJson.usageMetadata;
-    const usage: Usage | undefined = usageMeta
+    const usage: Usage = usageMeta
       ? {
           input_tokens: usageMeta.total_input_tokens ?? usageMeta.promptTokenCount ?? 0,
           output_tokens: usageMeta.total_output_tokens ?? usageMeta.candidatesTokenCount ?? 0,
@@ -79,7 +80,7 @@ export class StreamingState {
             usageMeta.thoughtsTokenCount ??
             0,
         }
-      : undefined;
+      : { input_tokens: 0, output_tokens: 0 };
 
     const message = {
       id: rawJson.responseId || 'msg_unknown',
@@ -157,6 +158,9 @@ export class StreamingState {
   }
 
   public emitFinish(finishReason?: string, usageMetadata?: UsageMetadata): string[] {
+    if (this.terminalErrorSent) {
+      return [];
+    }
     const chunks: string[] = [];
 
     // Close last block
@@ -227,6 +231,16 @@ export class StreamingState {
       stopReason = 'tool_use';
     } else if (finishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
+    } else if (
+      finishReason === 'SAFETY' ||
+      finishReason === 'RECITATION' ||
+      finishReason === 'BLOCKLIST' ||
+      finishReason === 'PROHIBITED_CONTENT' ||
+      finishReason === 'SPII' ||
+      finishReason === 'IMAGE_SAFETY' ||
+      finishReason === 'IMAGE_PROHIBITED_CONTENT'
+    ) {
+      stopReason = 'refusal';
     }
 
     const usage: Usage = usageMetadata
@@ -260,6 +274,21 @@ export class StreamingState {
       this.messageStopSent = true;
     }
 
+    return chunks;
+  }
+
+  public emitTerminalError(type: string, message: string): string[] {
+    if (this.terminalErrorSent || this.messageStopSent) {
+      return [];
+    }
+    const chunks = this.endBlock();
+    chunks.push(
+      this.emit('error', {
+        type: 'error',
+        error: { type, message },
+      }),
+    );
+    this.terminalErrorSent = true;
     return chunks;
   }
 
@@ -303,18 +332,10 @@ export class StreamingState {
         `[SSE-Parser] High error rate (${this.parseErrorCount} errors). Stream may be corrupted.`,
       );
       chunks.push(
-        this.emit('error', {
-          type: 'error',
-          error: {
-            type: 'network_error',
-            message: 'Unstable network connection. Please check your network or proxy settings.',
-            code: 'stream_decode_error',
-            details: {
-              error_count: this.parseErrorCount,
-              suggestion: 'Check network connection',
-            },
-          },
-        }),
+        ...this.emitTerminalError(
+          'api_error',
+          'The upstream returned malformed streaming data repeatedly.',
+        ),
       );
     }
 
@@ -357,13 +378,7 @@ export class PartProcessor {
         const trailingSig = this.state.trailingSignature;
         this.state.trailingSignature = null;
 
-        chunks.push(
-          this.state.emit('content_block_start', {
-            type: 'content_block_start',
-            index: this.state.blockIndex,
-            content_block: { type: 'thinking', thinking: '' },
-          }),
-        );
+        chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
         chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
         chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
         chunks.push(...this.state.endBlock());
@@ -403,13 +418,7 @@ export class PartProcessor {
       const trailingSig = this.state.trailingSignature;
       this.state.trailingSignature = null;
 
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
+      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
       chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
       chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
       chunks.push(...this.state.endBlock());
@@ -445,13 +454,7 @@ export class PartProcessor {
       const trailingSig = this.state.trailingSignature;
       this.state.trailingSignature = null;
 
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
+      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
       chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
       chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
       chunks.push(...this.state.endBlock());
@@ -465,13 +468,7 @@ export class PartProcessor {
       chunks.push(...this.state.endBlock());
 
       // Empty thinking block for signature
-      chunks.push(
-        this.state.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.state.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
+      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
       chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
       chunks.push(this.state.emitDelta('signature_delta', { signature: signature }));
       chunks.push(...this.state.endBlock());

@@ -10,7 +10,7 @@ export interface CacheControl {
   /** Cache type, typically 'ephemeral' for temporary caching */
   type: 'ephemeral' | string;
   /** Cache Time-To-Live (seconds) */
-  ttl?: number;
+  ttl?: number | '5m' | '1h';
 }
 
 /**
@@ -58,7 +58,14 @@ export interface ClaudeRequest {
   temperature?: number;
   top_p?: number;
   top_k?: number;
-  tool_choice?: string | { type: string; name?: string; function?: { name: string } };
+  tool_choice?:
+    | string
+    | {
+        type: string;
+        name?: string;
+        function?: { name: string };
+        disable_parallel_tool_use?: boolean;
+      };
   presence_penalty?: number;
   frequency_penalty?: number;
   seed?: number;
@@ -139,8 +146,9 @@ export interface ToolUseBlock {
 export interface ToolResultBlock {
   type: 'tool_result';
   tool_use_id: string;
-  content: string | ContentBlock[]; // Supports text or nested blocks
+  content?: string | ContentBlock[]; // Supports text or nested blocks
   is_error?: boolean;
+  cache_control?: CacheControl;
 }
 
 export interface RedactedThinkingBlock {

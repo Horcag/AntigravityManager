@@ -29,7 +29,7 @@ describe('applyAnthropicModelVariant', () => {
       request: {
         model: 'gemini-pro-agent',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 65535,
+        max_tokens: 2048,
         thinking: {
           type: 'enabled',
           budget_tokens: 10001,
@@ -103,6 +103,24 @@ describe('applyAnthropicModelVariant', () => {
       },
       tools: undefined,
       tool_choice: undefined,
+    });
+  });
+
+  it('preserves an explicit Anthropic disabled-thinking request and output cap', () => {
+    const applied = applyAnthropicModelVariant({
+      model: 'gemini-3.5-flash',
+      messages: [{ role: 'user', content: 'Answer directly' }],
+      max_tokens: 512,
+      thinking: { type: 'disabled' },
+    });
+
+    expect(applied.request).toMatchObject({
+      max_tokens: 512,
+      thinking: { type: 'disabled' },
+    });
+    expect(rebindAnthropicModelVariant(applied, 'gemini-3-flash-agent').request).toMatchObject({
+      max_tokens: 512,
+      thinking: { type: 'disabled' },
     });
   });
 });

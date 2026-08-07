@@ -56,6 +56,31 @@ describe('GenerationConstraintsService', () => {
     });
   });
 
+  it('keeps a caller output cap authoritative inside a registered model tuple', () => {
+    const policy = createPolicy();
+    const request = createInternalRequest({
+      maxOutputTokens: 2048,
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingBudget: 10001,
+      },
+    });
+
+    policy.applyInternalGenerationConstraints(request, 'gemini-pro-agent', 'acc-1', {
+      thinkingBudget: 10001,
+      maxOutputTokens: 65535,
+      includeThoughts: true,
+    });
+
+    expect(request.request.generationConfig).toEqual({
+      maxOutputTokens: 2048,
+      thinkingConfig: {
+        includeThoughts: true,
+        thinkingBudget: 2047,
+      },
+    });
+  });
+
   it('converts Gemini thinking levels into budgets and reserves output tokens', () => {
     const policy = createPolicy({
       outputLimit: 20_000,

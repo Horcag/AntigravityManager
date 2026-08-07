@@ -215,3 +215,30 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - A stream interrupted before the final usage event has no authoritative usage total. This matches the OpenAI warning that interrupted streams may not deliver the final usage chunk.
 - Response `model` still reflects the client-requested identifier while routing aliases are being separated from physical model selection. Honest requested/resolved/served model diagnostics and opt-in cross-model fallback belong to the routing policy work, not this wire adapter.
 - HTTP error typing for upstream quota/access/routing failures is handled by the shared retry/error layer. The Chat validator only owns deterministic client-side 400 errors.
+
+---
+
+## 9. Anthropic Messages API Contract
+
+`POST /v1/messages` is an Anthropic-compatible adapter over Antigravity's Gemini/Claude transport. It follows the public [Messages request](https://platform.claude.com/docs/en/api/messages/create), [SSE event](https://platform.claude.com/docs/en/build-with-claude/streaming), and [error](https://platform.claude.com/docs/en/api/errors) envelopes where the upstream transport can preserve their meaning.
+
+### Supported Messages Surface
+
+- Top-level text `system` blocks plus ordered `user` and `assistant` messages containing text, base64 images, client-side `tool_use` / `tool_result` blocks, and supported thinking blocks.
+- Client tool schemas, automatic/any/specific/none tool choice, parallel tool calls, immediate parallel tool-result batches, sampling controls, caller stop sequences, metadata-derived session identity, and caller-selected output limits.
+- Non-stream responses use Anthropic message/content/usage shapes. SSE uses named Anthropic events (`message_start`, content-block events, `message_delta`, `message_stop`) without an OpenAI `[DONE]` marker.
+- Stream interruption, parse failure, upstream failure, and idle timeout close any active content block and emit a terminal Anthropic `event: error`. They are not reported as successful `message_stop` events.
+- Client disconnects remove the installed listeners and destroy the exact upstream readable. Messages requests use Anthropic's 32 MiB request limit; each inline image remains limited to 5 MiB by the adapter.
+- Deterministic request failures return Anthropic error types, a `request_id` field, and a `request-id` response header. Upstream overload is exposed as HTTP 529 `overloaded_error`.
+
+### Explicit Compatibility Limits
+
+- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, token counting, Files, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable.
+- Anthropic prompt-cache controls are accepted as inert compatibility metadata. Usage cannot report genuine Anthropic cache creation; a Gemini implicit-cache hit is not equivalent to Anthropic cache semantics.
+- `redacted_thinking` is rejected because Anthropic ciphertext cannot be converted into a valid Gemini thought signature. `thinking.display` is also unavailable. Supported opaque thought signatures are round-tripped only when the upstream transport supplies compatible signature bytes.
+- Structured output via `output_config.format`, deferred/strict tools, and `disable_parallel_tool_use=true` are rejected instead of being silently weakened. Gemini cannot guarantee those Anthropic execution semantics through this path.
+- Inline images are restricted to verified JPEG, PNG, and WebP base64 sources. Anthropic-supported GIF, URL, and Files API sources are rejected because this proxy has no faithful upstream representation for them.
+- Custom stop strings are forwarded, but the internal response does not identify which string matched. Therefore `stop_reason` can be preserved while `stop_sequence` may remain `null` instead of fabricating an attribution.
+- Thinking budget is constrained to fit the effective output-token cap. Some native Anthropic interleaved-thinking combinations allow budgets that this Gemini transport cannot represent and are rejected locally.
+- For special unregistered Claude thinking presets, the upstream-compatible request recipe may still remove stop sequences. Registered model variants retain caller stops and clamp, but never increase, `max_tokens`.
+- `anthropic-version` is accepted by the HTTP compatibility surface but does not select different proxy schemas. Newly introduced Anthropic fields are rejected until the adapter explicitly supports their semantics.

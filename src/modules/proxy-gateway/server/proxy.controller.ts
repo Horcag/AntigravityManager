@@ -13,13 +13,13 @@ import {
 } from '@nestjs/common';
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
+import { v4 as uuidv4 } from 'uuid';
 import { ProxyService } from './proxy.service';
 import { map, Observable, of, tap } from 'rxjs';
 import {
   OpenAIChatRequest,
   OpenAICompletionRequest,
   OpenAIToolCall,
-  AnthropicChatRequest,
   OpenAIChatResponse,
   OpenAIContentPart,
   GeminiRequest,
@@ -42,6 +42,10 @@ import {
   normalizeOpenAICompletionRequest,
   OpenAIRequestValidationError,
 } from './modules/openai/chat/openai-request-contract';
+import {
+  AnthropicRequestValidationError,
+  normalizeAnthropicMessagesRequest,
+} from './modules/anthropic/anthropic-request-contract';
 import {
   mapResponsesReasoningEffort,
   normalizeOpenAIResponsesRequest,
@@ -369,18 +373,20 @@ export class ProxyController {
   }
 
   @Post('messages')
-  async anthropicMessages(@Body() body: AnthropicChatRequest, @Res() res: FastifyReply) {
+  async anthropicMessages(@Body() body: unknown, @Res() res: FastifyReply) {
+    const requestId = this.createAnthropicRequestId();
     try {
-      const result = await this.proxyService.handleAnthropicMessages(body);
+      const request = normalizeAnthropicMessagesRequest(body);
+      const result = await this.proxyService.handleAnthropicMessages(request);
 
-      if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result);
+      if (request.stream && this.isObservableLike(result)) {
+        this.writeSseResponse(res, result, 'anthropic', { 'request-id': requestId });
         return;
       } else {
-        res.status(HttpStatus.OK).send(result);
+        res.header('request-id', requestId).status(HttpStatus.OK).send(result);
       }
     } catch (error) {
-      this.sendAnthropicErrorResponse(res, '/v1/messages', error);
+      this.sendAnthropicErrorResponse(res, '/v1/messages', error, undefined, requestId);
     }
   }
 
@@ -1023,11 +1029,19 @@ export class ProxyController {
     return isObjectLike(value) && isFunction((value as { subscribe?: unknown }).subscribe);
   }
 
-  private writeSseResponse(res: FastifyReply, stream: Observable<unknown>): void {
+  private writeSseResponse(
+    res: FastifyReply,
+    stream: Observable<unknown>,
+    protocol: 'anthropic' | 'openai' = 'openai',
+    responseHeaders: Record<string, string> = {},
+  ): void {
     if (!res.raw || !isFunction(res.raw.writeHead) || !isFunction(res.raw.write)) {
       res.header('Content-Type', 'text/event-stream');
       res.header('Cache-Control', 'no-cache');
       res.header('Connection', 'keep-alive');
+      for (const [name, value] of Object.entries(responseHeaders)) {
+        res.header(name, value);
+      }
       res.send(stream);
       return;
     }
@@ -1040,6 +1054,7 @@ export class ProxyController {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
+      ...responseHeaders,
     });
 
     const subscription = stream.subscribe({
@@ -1055,6 +1070,20 @@ export class ProxyController {
           return;
         }
         const message = error instanceof Error ? error.message : String(error);
+        if (protocol === 'anthropic') {
+          const descriptor = this.resolveAnthropicError(error, message);
+          res.raw.write(
+            `event: error\ndata: ${JSON.stringify({
+              type: 'error',
+              error: {
+                type: descriptor.type,
+                message,
+              },
+            })}\n\n`,
+          );
+          res.raw.end();
+          return;
+        }
         res.raw.write(
           `data: ${JSON.stringify({
             error: {
@@ -1439,17 +1468,61 @@ export class ProxyController {
     endpoint: string,
     error: unknown,
     overrideMessage?: string,
+    requestId: string = this.createAnthropicRequestId(),
   ): void {
     const message = overrideMessage ?? this.resolveErrorMessageText(error);
-    const status = this.resolveErrorHttpStatus(message, error);
-    this.logProxyEndpointError(endpoint, status, message, error);
-    res.status(status).send({
-      type: 'error',
-      error: {
-        type: 'api_error',
-        message,
-      },
-    });
+    const descriptor = this.resolveAnthropicError(error, message);
+    this.logProxyEndpointError(endpoint, descriptor.status, message, error);
+    res
+      .header('request-id', requestId)
+      .status(descriptor.status)
+      .send({
+        type: 'error',
+        error: {
+          type: descriptor.type,
+          message,
+        },
+        request_id: requestId,
+      });
+  }
+
+  private createAnthropicRequestId(): string {
+    return `req_${uuidv4().replace(/-/gu, '')}`;
+  }
+
+  private resolveAnthropicError(
+    error: unknown,
+    message: string,
+  ): { status: HttpStatus; type: string } {
+    if (error instanceof AnthropicRequestValidationError) {
+      return { status: HttpStatus.BAD_REQUEST, type: 'invalid_request_error' };
+    }
+
+    const resolvedStatus = this.resolveErrorHttpStatus(message, error);
+    switch (resolvedStatus) {
+      case HttpStatus.BAD_REQUEST:
+        return { status: resolvedStatus, type: 'invalid_request_error' };
+      case HttpStatus.UNAUTHORIZED:
+        return { status: resolvedStatus, type: 'authentication_error' };
+      case HttpStatus.PAYMENT_REQUIRED:
+        return { status: resolvedStatus, type: 'billing_error' };
+      case HttpStatus.FORBIDDEN:
+        return { status: resolvedStatus, type: 'permission_error' };
+      case HttpStatus.NOT_FOUND:
+        return { status: resolvedStatus, type: 'not_found_error' };
+      case HttpStatus.CONFLICT:
+        return { status: resolvedStatus, type: 'conflict_error' };
+      case HttpStatus.PAYLOAD_TOO_LARGE:
+        return { status: resolvedStatus, type: 'request_too_large' };
+      case HttpStatus.TOO_MANY_REQUESTS:
+        return { status: resolvedStatus, type: 'rate_limit_error' };
+      case HttpStatus.GATEWAY_TIMEOUT:
+        return { status: resolvedStatus, type: 'timeout_error' };
+      case HttpStatus.SERVICE_UNAVAILABLE:
+        return { status: 529 as HttpStatus, type: 'overloaded_error' };
+      default:
+        return { status: HttpStatus.INTERNAL_SERVER_ERROR, type: 'api_error' };
+    }
   }
 
   private resolveErrorHttpStatus(message: string, error?: unknown): HttpStatus {

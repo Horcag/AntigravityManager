@@ -763,20 +763,34 @@ function buildContents(
       } else if (block.type === 'tool_result') {
         const funcName = toolIdToName.get(block.tool_use_id) || block.tool_use_id;
         let mergedContent = '';
-        if (isString(block.content)) mergedContent = block.content;
-        else if (Array.isArray(block.content))
-          mergedContent = block.content
-            .filter((b: any) => b.type === 'text')
-            .map((b: any) => b.text)
-            .join('\n');
-        if (isEmpty(mergedContent.trim()))
+        const mediaParts: GeminiPart[] = [];
+        if (isString(block.content)) {
+          mergedContent = block.content;
+        } else if (Array.isArray(block.content)) {
+          const textParts: string[] = [];
+          for (const nestedBlock of block.content) {
+            if (nestedBlock.type === 'text') {
+              textParts.push(nestedBlock.text);
+            } else if (nestedBlock.type === 'image' && nestedBlock.source.type === 'base64') {
+              mediaParts.push({
+                inlineData: {
+                  mimeType: nestedBlock.source.media_type,
+                  data: nestedBlock.source.data,
+                },
+              });
+            }
+          }
+          mergedContent = textParts.join('\n');
+        }
+        if (isEmpty(mergedContent.trim())) {
           mergedContent = block.is_error
             ? 'Tool execution failed with no output.'
             : 'Command executed successfully.';
-        const part: any = {
+        }
+        const part: GeminiPart = {
           functionResponse: {
             name: funcName,
-            response: { result: mergedContent },
+            response: block.is_error ? { error: mergedContent } : { result: mergedContent },
             id: block.tool_use_id,
           },
         };
@@ -785,6 +799,7 @@ function buildContents(
           part.thought_signature = lastThoughtSignature;
         }
         parts.push(part);
+        parts.push(...mediaParts);
       } else if (block.type === 'redacted_thinking') {
         parts.push({ text: `[Redacted Thinking: ${block.data}]`, thought: true });
       }
@@ -1030,7 +1045,9 @@ function buildGenerationConfig(
   if (claudeReq.max_tokens !== undefined) {
     config.maxOutputTokens = claudeReq.max_tokens;
   }
-  config.stopSequences = ['<|user|>', '<|endoftext|>', '<|end_of_turn|>', '[DONE]', '\n\nHuman:'];
+  if (claudeReq.stop_sequences && claudeReq.stop_sequences.length > 0) {
+    config.stopSequences = [...claudeReq.stop_sequences];
+  }
   return config;
 }
 

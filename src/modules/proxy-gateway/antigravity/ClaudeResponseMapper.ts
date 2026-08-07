@@ -264,7 +264,7 @@ class NonStreamingProcessor {
     } else if (finishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
     } else if (refusal) {
-      stopReason = 'content_filter';
+      stopReason = 'refusal';
     }
 
     const usage: Usage = {

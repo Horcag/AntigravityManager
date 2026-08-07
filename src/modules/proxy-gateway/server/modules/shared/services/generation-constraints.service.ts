@@ -34,13 +34,19 @@ export class GenerationConstraintsService {
     }
 
     if (registered) {
-      generationConfig.maxOutputTokens = registered.maxOutputTokens;
+      const requestedMax = generationConfig.maxOutputTokens;
+      generationConfig.maxOutputTokens = isNumber(requestedMax)
+        ? Math.min(Math.floor(requestedMax), registered.maxOutputTokens)
+        : registered.maxOutputTokens;
       if (registered.thinkingBudget === 0) {
         delete generationConfig.thinkingConfig;
       } else {
         generationConfig.thinkingConfig = {
           includeThoughts: registered.includeThoughts,
-          thinkingBudget: registered.thinkingBudget,
+          thinkingBudget: Math.min(
+            registered.thinkingBudget,
+            Math.max(0, generationConfig.maxOutputTokens - 1),
+          ),
         };
       }
       return;

@@ -31,14 +31,16 @@ export function applyAnthropicModelVariant(
     request: {
       ...request,
       model: variant.model,
-      max_tokens: variant.maxOutputTokens,
+      max_tokens: applyAnthropicOutputLimit(request.max_tokens, variant.maxOutputTokens),
       thinking:
-        variant.thinkingBudget === 0
-          ? undefined
-          : {
-              type: 'enabled',
-              budget_tokens: variant.thinkingBudget,
-            },
+        request.thinking?.type === 'disabled'
+          ? { type: 'disabled' }
+          : variant.thinkingBudget === 0
+            ? undefined
+            : {
+                type: 'enabled',
+                budget_tokens: variant.thinkingBudget,
+              },
       tools: variant.supportsTools ? request.tools : undefined,
       tool_choice: variant.supportsTools ? request.tool_choice : undefined,
       output_config: undefined,
@@ -60,19 +62,25 @@ export function rebindAnthropicModelVariant(
     request: {
       ...applied.request,
       model: variant.model,
-      max_tokens: variant.maxOutputTokens,
+      max_tokens: applyAnthropicOutputLimit(applied.request.max_tokens, variant.maxOutputTokens),
       thinking:
-        variant.thinkingBudget === 0
-          ? undefined
-          : {
-              type: 'enabled',
-              budget_tokens: variant.thinkingBudget,
-            },
+        applied.request.thinking?.type === 'disabled'
+          ? { type: 'disabled' }
+          : variant.thinkingBudget === 0
+            ? undefined
+            : {
+                type: 'enabled',
+                budget_tokens: variant.thinkingBudget,
+              },
       tools: variant.supportsTools ? applied.request.tools : undefined,
       tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
     },
     variant,
   };
+}
+
+function applyAnthropicOutputLimit(requestedLimit: number | undefined, modelLimit: number): number {
+  return requestedLimit === undefined ? modelLimit : Math.min(requestedLimit, modelLimit);
 }
 
 export interface AppliedOpenAIModelVariant {

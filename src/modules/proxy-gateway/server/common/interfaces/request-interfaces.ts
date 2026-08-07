@@ -138,7 +138,7 @@ export interface AnthropicChatRequest {
   temperature?: number;
   top_p?: number;
   top_k?: number;
-  tool_choice?: string | { type: string; name?: string; function?: { name: string } };
+  tool_choice?: string | AnthropicToolChoice;
   presence_penalty?: number;
   frequency_penalty?: number;
   seed?: number;
@@ -146,6 +146,19 @@ export interface AnthropicChatRequest {
 
 export interface AnthropicOutputConfig {
   effort?: string;
+  format?: unknown;
+}
+
+export interface AnthropicToolChoice {
+  type: string;
+  name?: string;
+  function?: { name: string };
+  disable_parallel_tool_use?: boolean;
+}
+
+export interface AnthropicCacheControl {
+  type: string;
+  ttl?: number | '5m' | '1h';
 }
 
 export interface AnthropicTool {
@@ -153,11 +166,16 @@ export interface AnthropicTool {
   description?: string;
   input_schema?: Record<string, unknown>;
   type?: string;
+  cache_control?: AnthropicCacheControl;
+  strict?: boolean;
+  defer_loading?: boolean;
 }
 
 export interface AnthropicThinkingConfig {
   type: 'enabled' | string;
   budget_tokens?: number;
+  display?: string;
+  effort?: string;
 }
 
 export interface AnthropicMessage {
@@ -168,11 +186,17 @@ export interface AnthropicMessage {
 export interface AnthropicSystemBlock {
   type: string;
   text: string;
+  cache_control?: AnthropicCacheControl;
 }
 
 export type AnthropicContent =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
+  | {
+      type: 'thinking';
+      thinking: string;
+      signature?: string;
+      cache_control?: AnthropicCacheControl;
+    }
   | { type: 'image'; source: AnthropicImageSource }
   | {
       type: 'tool_use';
@@ -180,12 +204,14 @@ export type AnthropicContent =
       name: string;
       input: Record<string, unknown>;
       signature?: string;
+      cache_control?: AnthropicCacheControl;
     }
   | {
       type: 'tool_result';
       tool_use_id: string;
-      content: string | AnthropicContent[];
+      content?: string | AnthropicContent[];
       is_error?: boolean;
+      cache_control?: AnthropicCacheControl;
     }
   | { type: 'redacted_thinking'; data: string };
 

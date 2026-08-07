@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
+import { EventEmitter } from 'node:events';
 
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
 import { OpenAIResponsesSessionStore } from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
@@ -1430,6 +1431,7 @@ describe('ProxyController Integration', () => {
     await controller.anthropicMessages(
       {
         model: 'claude-sonnet-4-5',
+        max_tokens: 64,
         stream: false,
         messages: [{ role: 'user', content: 'hello' }],
       } as any,
@@ -1438,5 +1440,101 @@ describe('ProxyController Integration', () => {
 
     expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
     expect(reply.status).toHaveBeenCalledWith(200);
+  });
+
+  it('returns Anthropic validation errors with request identity', async () => {
+    const proxyService = { handleAnthropicMessages: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.anthropicMessages(
+      {
+        model: 'claude-opus-5',
+        max_tokens: 64,
+        messages: [{ role: 'system', content: 'invalid role' }],
+      } as any,
+      reply as any,
+    );
+
+    expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.header).toHaveBeenCalledWith('request-id', expect.stringMatching(/^req_/));
+    expect(reply.send).toHaveBeenCalledWith({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: expect.stringContaining('role'),
+      },
+      request_id: expect.stringMatching(/^req_/),
+    });
+  });
+
+  it('maps upstream quota failures to Anthropic rate-limit errors', async () => {
+    const proxyService = {
+      handleAnthropicMessages: vi
+        .fn()
+        .mockRejectedValue(new UpstreamRequestError({ message: 'quota', status: 429 })),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.anthropicMessages(
+      {
+        model: 'claude-opus-5',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      reply as any,
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(429);
+    expect(reply.send).toHaveBeenCalledWith({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'quota' },
+      request_id: expect.stringMatching(/^req_/),
+    });
+  });
+
+  it('writes post-header failures as named Anthropic SSE error events', async () => {
+    const proxyService = {
+      handleAnthropicMessages: vi
+        .fn()
+        .mockResolvedValue(throwError(() => new Error('upstream interrupted'))),
+    };
+    const controller = new ProxyController(proxyService as any);
+    const raw = new EventEmitter() as EventEmitter & {
+      end: ReturnType<typeof vi.fn>;
+      writableEnded: boolean;
+      write: ReturnType<typeof vi.fn>;
+      writeHead: ReturnType<typeof vi.fn>;
+    };
+    raw.writableEnded = false;
+    raw.writeHead = vi.fn();
+    raw.write = vi.fn();
+    raw.end = vi.fn(() => {
+      raw.writableEnded = true;
+    });
+    const reply = {
+      hijack: vi.fn(),
+      raw,
+      status: vi.fn(),
+      header: vi.fn(),
+      send: vi.fn(),
+    };
+
+    await controller.anthropicMessages(
+      {
+        model: 'claude-opus-5',
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      reply as any,
+    );
+
+    expect(raw.write).toHaveBeenCalledWith(
+      'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"upstream interrupted"}}\n\n',
+    );
+    expect(raw.end).toHaveBeenCalledOnce();
   });
 });
