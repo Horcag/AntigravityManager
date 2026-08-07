@@ -747,6 +747,129 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('validates Anthropic tool block identifiers and preserves valid tool results before upstream calls', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+    const basePayload = {
+      model: 'claude-sonnet-4-5',
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'lookup_weather', input: {} }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'tool_1', content: 'result' }],
+        },
+      ],
+    };
+
+    try {
+      for (const content of [
+        [{ type: 'tool_use', id: '', name: 'lookup_weather', input: {} }],
+        [{ type: 'tool_use', id: ' \t', name: 'lookup_weather', input: {} }],
+        [{ type: 'tool_use', id: 'tool_1', name: '', input: {} }],
+        [{ type: 'tool_use', id: 'tool_1', name: ' \n', input: {} }],
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: { model: basePayload.model, messages: [{ role: 'assistant', content }] },
+        });
+
+        expect(response.statusCode).toBe(400);
+      }
+
+      for (const toolResult of [
+        { tool_use_id: '' },
+        { tool_use_id: ' \t' },
+        { tool_use_id: 'tool_1', is_error: 'true' },
+        { tool_use_id: 'tool_1', is_error: 1 },
+        { tool_use_id: 'tool_1', is_error: null },
+        { tool_use_id: 'tool_1', is_error: [] },
+        { tool_use_id: 'tool_1', is_error: {} },
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: {
+            ...basePayload,
+            messages: [
+              basePayload.messages[0],
+              { role: 'user', content: [{ type: 'tool_result', ...toolResult }] },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+      }
+      expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+
+      for (const isError of [true, false]) {
+        const toolUseId = ' tool_1 ';
+        const toolName = ' lookup_weather ';
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/messages',
+          headers,
+          payload: {
+            model: basePayload.model,
+            messages: [
+              {
+                role: 'assistant',
+                content: [{ type: 'tool_use', id: toolUseId, name: toolName, input: {} }],
+              },
+              {
+                role: 'user',
+                content: [
+                  {
+                    type: 'tool_result',
+                    tool_use_id: toolUseId,
+                    is_error: isError,
+                    content: [
+                      { type: 'text', text: ' \t ' },
+                      {
+                        type: 'image',
+                        source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        });
+
+        expect(response.statusCode).toBe(200);
+        const [request] = proxyService.handleAnthropicMessages.mock.calls.at(-1) ?? [];
+        const mapped = transformClaudeRequestIn(request, 'project_1', 'test-agent').request
+          .contents;
+        expect(mapped[0]?.parts[0]?.functionCall).toMatchObject({ id: toolUseId, name: toolName });
+        expect(mapped[1]?.parts[0]?.functionResponse).toMatchObject({
+          id: toolUseId,
+          name: toolName,
+          response: { [isError ? 'error' : 'result']: [' \t ', { $ref: expect.any(String) }] },
+          parts: [
+            {
+              inlineData: expect.objectContaining({ mimeType: 'image/png', data: 'aGVsbG8=' }),
+            },
+          ],
+        });
+      }
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledTimes(2);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects invalid OpenAI limits, control fields, and image models before upstream calls', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };

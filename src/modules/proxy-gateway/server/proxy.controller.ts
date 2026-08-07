@@ -1327,12 +1327,19 @@ export class ProxyController {
       if (
         block.type === 'tool_use' &&
         isString(block.id) &&
+        !isEmpty(block.id.trim()) &&
         isString(block.name) &&
+        !isEmpty(block.name.trim()) &&
         isPlainObject(block.input)
       ) {
         continue;
       }
-      if (block.type === 'tool_result' && isString(block.tool_use_id)) {
+      if (
+        block.type === 'tool_result' &&
+        isString(block.tool_use_id) &&
+        !isEmpty(block.tool_use_id.trim()) &&
+        (block.is_error === undefined || isBoolean(block.is_error))
+      ) {
         this.validateAnthropicToolResultContent(block.content);
         continue;
       }
