@@ -656,6 +656,64 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('preserves tool-use arguments through the assembled Anthropic messages pipeline', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const input = {
+      type: 'MARKDOWN',
+      default: { format: 'uri', pattern: '^https://example\\.com$' },
+      examples: [{ required: ['literal'], additionalProperties: false }],
+      nested: { if: { const: 'value' }, not: { items: ['unchanged'] } },
+      values: [null, false, 0, 'text'],
+    };
+    const payload = {
+      model: 'claude-sonnet-4-5',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'inspect', input }],
+        },
+      ],
+    };
+    const payloadBeforeRequest = structuredClone(payload);
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer test-key' },
+        payload,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
+      expect(payload).toEqual(payloadBeforeRequest);
+
+      const [request] = proxyService.handleAnthropicMessages.mock.calls[0];
+      const requestBeforeTransform = structuredClone(request);
+      const firstMapped = transformClaudeRequestIn(request, 'project_1', 'test-agent');
+      const secondMapped = transformClaudeRequestIn(request, 'project_1', 'test-agent');
+      const firstArgs = firstMapped.request.contents
+        .flatMap((content) => content.parts)
+        .find((part) => part.functionCall)?.functionCall?.args;
+      const secondArgs = secondMapped.request.contents
+        .flatMap((content) => content.parts)
+        .find((part) => part.functionCall)?.functionCall?.args;
+
+      expect(firstArgs).toEqual(input);
+      expect(secondArgs).toEqual(input);
+      expect(request).toEqual(requestBeforeTransform);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('accepts empty Anthropic tool results through the assembled messages pipeline', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
     const proxyService = {
@@ -716,7 +774,12 @@ describe('ProxyController Integration', () => {
         [{ type: 'thinking', thinking: 'hidden' }],
         [{ type: 'tool_use', id: 'nested_tool', name: 'nested', input: {} }],
         [{ type: 'tool_result', tool_use_id: 'nested_tool' }],
-        [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'aGVsbG8=' } }],
+        [
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: 'aGVsbG8=' },
+          },
+        ],
         [{ type: 'search_result', content: 'not mapped' }],
       ]) {
         const response = await server.inject({

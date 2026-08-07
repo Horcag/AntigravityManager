@@ -644,7 +644,6 @@ function buildContents(
         const part: GeminiPart = {
           functionCall: { name: block.name, args: block.input, id: block.id },
         };
-        cleanJsonSchema(part);
         toolIdToName.set(block.id, block.name);
         // Explicit signatures win; otherwise replay only what was captured for THIS tool call.
         const finalSig: string | null =

@@ -65,6 +65,63 @@ describe('ClaudeRequestMapper thinking support', () => {
     expect(body.request.generationConfig?.stopSequences).toBeUndefined();
   });
 
+  it('preserves tool_use input exactly without mutating the caller request across repeated transforms', () => {
+    const toolInput = {
+      type: 'MARKDOWN',
+      default: { format: 'uri', pattern: '^https://example\\.com$' },
+      const: 'literal value',
+      examples: [{ type: 'MARKDOWN', additionalProperties: false }],
+      nested: {
+        if: { required: ['type'] },
+        not: { items: [{ format: 'email', pattern: '^admin@' }] },
+        additionalProperties: { type: 'MARKDOWN' },
+      },
+      values: [null, false, 0, 'text', { required: ['literal'], items: ['unchanged'] }],
+    };
+    const request: ClaudeRequest = {
+      model: 'gemini-3-flash',
+      max_tokens: 1024,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool_1', name: 'inspect', input: toolInput }],
+        },
+      ],
+      tools: [
+        {
+          name: 'inspect',
+          input_schema: {
+            type: 'object',
+            properties: { mode: { type: 'STRING', default: 'standard' } },
+          },
+        },
+      ],
+    };
+    const requestBeforeTransform = structuredClone(request);
+
+    const firstBody = transformClaudeRequestIn(request);
+    const secondBody = transformClaudeRequestIn(request);
+    const firstArgs = firstBody.request.contents
+      .flatMap((content) => content.parts)
+      .find((part) => part.functionCall)?.functionCall?.args;
+    const secondArgs = secondBody.request.contents
+      .flatMap((content) => content.parts)
+      .find((part) => part.functionCall)?.functionCall?.args;
+    const parameters = firstBody.request.tools?.[0]?.functionDeclarations?.[0]?.parameters;
+
+    expect(firstArgs).toBe(toolInput);
+    expect(firstArgs).toEqual(toolInput);
+    expect(secondArgs).toEqual(toolInput);
+    expect(request).toEqual(requestBeforeTransform);
+    expect(parameters).toMatchObject({
+      type: 'object',
+      properties: { mode: { type: 'string' } },
+    });
+    expect(
+      (parameters?.properties as Record<string, Record<string, unknown>>).mode?.default,
+    ).toBeUndefined();
+  });
+
   it('preserves Anthropic text and maps interleaved tool-result media inside functionResponse', () => {
     const body = transformClaudeRequestIn({
       model: 'gemini-3-flash',
@@ -74,7 +131,13 @@ describe('ClaudeRequestMapper thinking support', () => {
         {
           role: 'assistant',
           content: [
-            { type: 'tool_use', id: 'tool_1', name: 'inspect', input: {}, signature: 'tool-signature' },
+            {
+              type: 'tool_use',
+              id: 'tool_1',
+              name: 'inspect',
+              input: {},
+              signature: 'tool-signature',
+            },
           ],
         },
         {
@@ -147,7 +210,13 @@ describe('ClaudeRequestMapper thinking support', () => {
     expect(body.request.contents[1]?.parts[0]?.functionResponse).toMatchObject({
       response: { result: { $ref: 'tool_result_1_tool_1_image_0' } },
       parts: [
-        { inlineData: { mimeType: 'image/png', data: 'aGVsbG8=', displayName: 'tool_result_1_tool_1_image_0' } },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aGVsbG8=',
+            displayName: 'tool_result_1_tool_1_image_0',
+          },
+        },
       ],
     });
   });
