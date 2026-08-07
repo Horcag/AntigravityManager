@@ -1,4 +1,5 @@
 import { GeminiPart, GroundingMetadata, Usage, UsageMetadata } from './types';
+import { normalizeFunctionCallArgs } from './function-call-args';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
@@ -372,6 +373,7 @@ export class PartProcessor {
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
+      const functionArgs = normalizeFunctionCallArgs(part.functionCall);
       // Handle trailing signature logic
       if (this.state.trailingSignature) {
         chunks.push(...this.state.endBlock());
@@ -390,7 +392,9 @@ export class PartProcessor {
         chunks.push(...this.state.endBlock());
       }
 
-      chunks.push(...this.processFunctionCall(part.functionCall, signature));
+      chunks.push(
+        ...this.processFunctionCall({ ...part.functionCall, args: functionArgs }, signature),
+      );
       return chunks;
     }
 
@@ -510,7 +514,7 @@ export class PartProcessor {
   }
 
   private processFunctionCall(
-    fc: { name: string; args: any; id?: string },
+    fc: { name: string; args: Record<string, unknown>; id?: string },
     signature?: string,
   ): string[] {
     const chunks: string[] = [];

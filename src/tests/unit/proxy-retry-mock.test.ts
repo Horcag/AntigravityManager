@@ -235,6 +235,28 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(result.candidates[0].finishReason).toBe('STOP');
   });
 
+  it('rejects malformed direct function arguments before stream fallback can return a partial response', async () => {
+    const service = new TestableProxyService();
+    mockGeminiClient.generateInternal.mockResolvedValueOnce({
+      candidates: [
+        {
+          content: {
+            parts: [{ functionCall: { args: [], name: 'invalid' }, text: 'partial' }],
+          },
+        },
+      ],
+    });
+
+    await expect(
+      (service as any).generateInternalWithStreamFallback(
+        { model: 'gemini-2.5-flash' },
+        'token',
+        undefined,
+      ),
+    ).rejects.toThrow('functionCall.args');
+    expect(mockGeminiClient.streamGenerateInternal).not.toHaveBeenCalled();
+  });
+
   it('collects no-space SSE frames during the non-stream fallback', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
@@ -315,7 +337,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     );
     stream.emit('end');
 
-    await expect(resultPromise).rejects.toThrow('Empty response stream');
+    await expect(resultPromise).rejects.toThrow('functionCall.args');
   });
 
   it('preserves and deduplicates grounding metadata during fallback collection', async () => {
@@ -1962,6 +1984,35 @@ describe('ProxyService Protocol Parity Fixtures', () => {
     expect(output).toContain('"tool_calls"');
     expect(output).toContain('"content":"final answer"');
     expect(output).toContain('data: [DONE]');
+  });
+
+  it('fails a Chat Completions stream on malformed function arguments without emitting same-part text', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const observable = (service as any).processStreamResponse(stream, 'gpt-4o-mini');
+    const chunks: string[] = [];
+    const outcome = await new Promise<{ completed: boolean; error?: Error }>((resolve) => {
+      observable.subscribe({
+        next: (chunk: string) => chunks.push(chunk),
+        error: (error: unknown) =>
+          resolve({
+            completed: false,
+            error: error instanceof Error ? error : new Error(String(error)),
+          }),
+        complete: () => resolve({ completed: true }),
+      });
+      stream.emit(
+        'data',
+        Buffer.from(
+          'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":[],"name":"invalid"},"text":"partial"}]}}]}\n',
+        ),
+      );
+    });
+
+    expect(outcome.completed).toBe(false);
+    expect(outcome.error?.message).toContain('functionCall.args');
+    expect(chunks.join('')).not.toContain('partial');
+    expect(chunks.join('')).not.toContain('[DONE]');
   });
 
   it('prepends legacy Cloud Code metadata only when explicitly enabled', async () => {

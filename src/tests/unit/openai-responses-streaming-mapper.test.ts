@@ -126,6 +126,49 @@ describe('OpenAIResponsesStreamingMapper', () => {
     ).toBe('signature');
   });
 
+  it('normalizes omitted function arguments without mutating the upstream part', () => {
+    const mapper = createMapper();
+    const functionCall = { id: 'call_empty', name: 'lookup' };
+    const events = [
+      ...mapper.processPart({ functionCall: functionCall as never }),
+      ...mapper.complete(),
+    ].map(parseEvent);
+
+    expect(functionCall).not.toHaveProperty('args');
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        arguments: '{}',
+        name: 'lookup',
+        type: 'response.function_call_arguments.done',
+      }),
+    );
+  });
+
+  it.each([null, [], 'command'])('rejects malformed present function arguments: %j', (args) => {
+    const mapper = createMapper();
+
+    expect(() =>
+      mapper.processPart({ functionCall: { args, id: 'call_invalid', name: 'shell' } as never }),
+    ).toThrow('functionCall.args');
+  });
+
+  it('keeps shell argument normalization safe for untrusted runtime values', () => {
+    const mapper = createMapper();
+    const normalizeShellArguments = Reflect.get(mapper, 'normalizeShellArguments');
+
+    expect(typeof normalizeShellArguments).toBe('function');
+    if (typeof normalizeShellArguments !== 'function') {
+      throw new Error('Shell argument normalizer is unavailable');
+    }
+    const normalize = normalizeShellArguments as (
+      functionName: string,
+      args: unknown,
+    ) => Record<string, unknown>;
+    for (const args of [undefined, null, [], 'command']) {
+      expect(normalize('shell', args)).toEqual({});
+    }
+  });
+
   it('keeps usage unknown until Gemini provides at least one token counter', () => {
     const mapper = createMapper();
     mapper.setUsageMetadata({});

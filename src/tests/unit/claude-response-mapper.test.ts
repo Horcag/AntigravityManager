@@ -35,6 +35,40 @@ describe('ClaudeResponseMapper termination reasons', () => {
     expect(response.stop_reason).toBe('tool_use');
   });
 
+  it('normalizes omitted function arguments without mutating the upstream call', () => {
+    const omittedArgs = { id: 'call_empty', name: 'lookup' };
+    const response = transformResponse({
+      candidates: [
+        {
+          content: {
+            role: 'model',
+            parts: [{ functionCall: omittedArgs as never }],
+          },
+        },
+      ],
+    });
+
+    expect(omittedArgs).not.toHaveProperty('args');
+    expect(response.content).toContainEqual(
+      expect.objectContaining({ id: 'call_empty', input: {}, name: 'lookup', type: 'tool_use' }),
+    );
+  });
+
+  it('rejects malformed present function arguments before returning partial text', () => {
+    expect(() =>
+      transformResponse({
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ functionCall: { args: [], name: 'invalid' }, text: 'partial' } as never],
+            },
+          },
+        ],
+      }),
+    ).toThrow('functionCall.args');
+  });
+
   it('serializes the required non-stream stop_sequence key as null', () => {
     const response = transformResponse({
       candidates: [

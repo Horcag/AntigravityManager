@@ -462,6 +462,50 @@ describe('ProxyService Responses streaming', () => {
     expect(events.some((event) => event.type === 'response.failed')).toBe(false);
   });
 
+  it('emits omitted function arguments as an empty object and rejects present malformed arguments', async () => {
+    const validUpstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_empty","name":"lookup"}}]},"finishReason":"STOP"}]}}\n\n',
+      ),
+    ]);
+    const validEvents = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), validUpstream).pipe(
+          toArray(),
+        ),
+      )
+    ).map((event) => parseEvent(String(event)));
+    expect(validEvents).toContainEqual(
+      expect.objectContaining({
+        arguments: '{}',
+        name: 'lookup',
+        type: 'response.function_call_arguments.done',
+      }),
+    );
+
+    const invalidUpstream = Readable.from([
+      Buffer.from(
+        'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":[],"id":"call_invalid","name":"lookup"},"text":"partial"}]},"finishReason":"STOP"}]}}\n\n',
+      ),
+    ]);
+    const invalidEvents = (
+      await lastValueFrom(
+        createResponsesStream(new ProxyService({} as never, {} as never), invalidUpstream).pipe(
+          toArray(),
+        ),
+      )
+    ).map((event) => parseEvent(String(event)));
+
+    expect(invalidEvents.map((event) => event.type).slice(-2)).toEqual([
+      'error',
+      'response.failed',
+    ]);
+    expect(
+      invalidEvents.some((event) => event.type === 'response.function_call_arguments.done'),
+    ).toBe(false);
+    expect(JSON.stringify(invalidEvents)).not.toContain('partial');
+  });
+
   it.each([
     ['malformed JSON', Readable.from([Buffer.from('data: {oops\n\n')])],
     ['upstream error', Readable.from([Buffer.from('data: {"error":{"message":"nope"}}\n\n')])],

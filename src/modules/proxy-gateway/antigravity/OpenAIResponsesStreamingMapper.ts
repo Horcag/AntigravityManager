@@ -1,7 +1,9 @@
 import { SignatureContext, SignatureStore } from './SignatureStore';
+import { isPlainObject } from 'lodash-es';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 import { mapGeminiFinishReasonToOpenAI } from './gemini-finish-reason';
+import { normalizeFunctionCallArgs } from './function-call-args';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: { args: Record<string, unknown>; id?: string; name: string };
@@ -128,7 +130,11 @@ export class OpenAIResponsesStreamingMapper {
       this.streamSignature = signature;
     }
     if (part.functionCall) {
-      return this.processFunctionCall(part.functionCall, signature ?? this.streamSignature);
+      const functionArgs = normalizeFunctionCallArgs(part.functionCall);
+      return this.processFunctionCall(
+        { ...part.functionCall, args: functionArgs },
+        signature ?? this.streamSignature,
+      );
     }
     if (part.thought) {
       return [];
@@ -488,20 +494,21 @@ export class OpenAIResponsesStreamingMapper {
     };
   }
 
-  private normalizeShellArguments(
-    functionName: string,
-    args: Record<string, unknown>,
-  ): Record<string, unknown> {
-    if (!['shell', 'bash', 'local_shell'].includes(functionName) || 'command' in args) {
-      return args;
+  private normalizeShellArguments(functionName: string, args: unknown): Record<string, unknown> {
+    if (!isPlainObject(args)) {
+      return {};
+    }
+    const normalizedArgs = args as Record<string, unknown>;
+    if (!['shell', 'bash', 'local_shell'].includes(functionName) || 'command' in normalizedArgs) {
+      return normalizedArgs;
     }
     for (const alternativeKey of ['cmd', 'code', 'script', 'shell_command']) {
-      if (alternativeKey in args) {
-        const { [alternativeKey]: command, ...remainingArgs } = args;
+      if (alternativeKey in normalizedArgs) {
+        const { [alternativeKey]: command, ...remainingArgs } = normalizedArgs;
         return { ...remainingArgs, command };
       }
     }
-    return args;
+    return normalizedArgs;
   }
 
   private serialize(event: Record<string, unknown>): string {

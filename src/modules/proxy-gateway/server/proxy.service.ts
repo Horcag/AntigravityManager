@@ -52,6 +52,10 @@ import {
 } from './proxy-retry-policy';
 import { ProxyModelRoutingPolicy } from './proxy-model-routing-policy';
 import { parseImageDataUrl } from './image-data-url';
+import {
+  InvalidFunctionCallArgumentsError,
+  normalizeFunctionCallArgs,
+} from '../antigravity/function-call-args';
 
 interface StreamIdleTimer {
   reset: () => void;
@@ -428,9 +432,14 @@ export class ProxyService {
 
           const candidate = json?.candidates?.[0];
           const parts = candidate?.content?.parts;
+          const normalizedParts = Array.isArray(parts)
+            ? parts.flatMap((part) => {
+                const normalizedPart = this.normalizeGeminiPart(part);
+                return normalizedPart ? [normalizedPart] : [];
+              })
+            : [];
           const hasGrounding = state.recordGroundingMetadata(candidate?.groundingMetadata);
-          const hasUsableCandidate =
-            hasGrounding || (Array.isArray(parts) && parts.some((part) => this.isGeminiPart(part)));
+          const hasUsableCandidate = hasGrounding || normalizedParts.length > 0;
 
           if (candidate?.finishReason) {
             lastFinishReason = candidate.finishReason;
@@ -446,17 +455,18 @@ export class ProxyService {
               subscriber.next(startMsg);
             }
 
-            for (const part of Array.isArray(parts) ? parts : []) {
-              if (this.isGeminiPart(part)) {
-                const chunks = processor.process(part);
-                chunks.forEach((chunk) => subscriber.next(chunk));
-              }
+            for (const part of normalizedParts) {
+              const chunks = processor.process(part);
+              chunks.forEach((chunk) => subscriber.next(chunk));
             }
           }
 
           state.resetErrorState();
         } catch (error) {
-          if (error instanceof ToolCallIdConflictError) {
+          if (
+            error instanceof ToolCallIdConflictError ||
+            error instanceof InvalidFunctionCallArgumentsError
+          ) {
             failStream(error, true);
             return;
           }
@@ -1076,7 +1086,13 @@ export class ProxyService {
 
     const first = candidates[0];
     const parts = first?.content?.parts;
-    return Array.isArray(parts) && parts.length > 0;
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return false;
+    }
+    for (const part of parts) {
+      this.normalizeGeminiPart(part);
+    }
+    return true;
   }
 
   private getUpstreamStreamError(payload: unknown): UpstreamRequestError | null {
@@ -1191,8 +1207,9 @@ export class ProxyService {
           );
           const parts = candidate?.content?.parts;
           if (Array.isArray(parts)) {
-            for (const part of parts) {
-              if (!this.isGeminiPart(part)) {
+            for (const rawPart of parts) {
+              const part = this.normalizeGeminiPart(rawPart);
+              if (!part) {
                 continue;
               }
               if (
@@ -1216,8 +1233,12 @@ export class ProxyService {
             usageMetadata = parsed.usageMetadata;
           }
         } catch (error) {
-          if (error instanceof ToolCallIdConflictError) {
+          if (
+            error instanceof ToolCallIdConflictError ||
+            error instanceof InvalidFunctionCallArgumentsError
+          ) {
             rejectOnce(error, true);
+            return;
           }
           // Ignore malformed chunks and continue collecting valid parts.
         }
@@ -1532,9 +1553,10 @@ export class ProxyService {
       return null;
     }
 
+    const hasFunctionCall = Object.hasOwn(part, 'functionCall');
     const functionCallRecord = this.toUnknownRecord(part.functionCall);
     const functionName = isString(functionCallRecord?.name) ? functionCallRecord.name : null;
-    const functionArgs = this.toUnknownRecord(functionCallRecord?.args) ?? {};
+    const functionArgs = hasFunctionCall ? normalizeFunctionCallArgs(functionCallRecord) : null;
     const functionId = isString(functionCallRecord?.id) ? functionCallRecord.id : undefined;
     const inlineDataRecord = this.toUnknownRecord(part.inlineData);
     const inlineData =
@@ -1546,13 +1568,14 @@ export class ProxyService {
         : undefined;
 
     return {
-      functionCall: functionName
-        ? {
-            args: functionArgs,
-            id: functionId,
-            name: functionName,
-          }
-        : undefined,
+      functionCall:
+        functionName && functionArgs
+          ? {
+              args: functionArgs,
+              id: functionId,
+              name: functionName,
+            }
+          : undefined,
       inlineData,
       text: isString(part.text) ? part.text : undefined,
       thought: part.thought === true,
@@ -1839,6 +1862,19 @@ export class ProxyService {
             if (signature) {
               streamSignature = signature;
             }
+            let functionArgs: Record<string, unknown> = {};
+            if (part.functionCall) {
+              try {
+                functionArgs = normalizeFunctionCallArgs(part.functionCall);
+              } catch (error) {
+                failStream(
+                  error instanceof Error
+                    ? error
+                    : new Error('Malformed Gemini function call arguments'),
+                );
+                return;
+              }
+            }
 
             if (part.thought && part.text) {
               if (isTextVariant) {
@@ -1861,7 +1897,7 @@ export class ProxyService {
                   toolCallIdIntegrity.record(
                     part.functionCall.id,
                     part.functionCall.name,
-                    part.functionCall.args,
+                    functionArgs,
                   ) === 'replay'
                 ) {
                   continue;
@@ -1905,7 +1941,7 @@ export class ProxyService {
                       type: 'function',
                       function: {
                         name: part.functionCall.name,
-                        arguments: JSON.stringify(part.functionCall.args || {}),
+                        arguments: JSON.stringify(functionArgs),
                       },
                     },
                   ],
@@ -2779,9 +2815,6 @@ export class ProxyService {
       isString(functionCall.name) &&
       !isEmpty(functionCall.name) &&
       (!Object.hasOwn(functionCall, 'args') || isPlainObject(functionCall.args));
-    if (hasFunctionCall && !Object.hasOwn(functionCall, 'args')) {
-      functionCall.args = {};
-    }
     const inlineData = this.toUnknownRecord(part.inlineData);
     const hasInlineData =
       inlineData !== null &&
@@ -2791,5 +2824,23 @@ export class ProxyService {
       !isEmpty(inlineData.data);
 
     return hasText || hasSignature || hasFunctionCall || hasInlineData;
+  }
+
+  private normalizeGeminiPart(value: unknown): InternalGeminiPart | null {
+    const part = this.toUnknownRecord(value);
+    if (!part) {
+      return null;
+    }
+
+    const hasFunctionCall = Object.hasOwn(part, 'functionCall');
+    const functionCall = this.toUnknownRecord(part.functionCall);
+    const normalizedPart = hasFunctionCall
+      ? {
+          ...part,
+          functionCall: { ...functionCall, args: normalizeFunctionCallArgs(functionCall) },
+        }
+      : part;
+
+    return this.isGeminiPart(normalizedPart) ? normalizedPart : null;
   }
 }

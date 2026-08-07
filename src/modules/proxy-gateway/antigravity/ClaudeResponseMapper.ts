@@ -11,6 +11,7 @@ import { decodeSignature } from './signature-utils';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
+import { normalizeFunctionCallArgs } from './function-call-args';
 
 /**
  * Non-streaming response processor (Gemini -> Claude)
@@ -72,6 +73,7 @@ class NonStreamingProcessor {
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
+      const functionArgs = normalizeFunctionCallArgs(part.functionCall);
       this.flushThinking();
       this.flushText();
 
@@ -97,7 +99,7 @@ class NonStreamingProcessor {
         type: 'tool_use',
         id: toolId,
         name: fc.name,
-        input: fc.args || {},
+        input: functionArgs,
         signature: signature || undefined,
       };
 

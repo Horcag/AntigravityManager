@@ -82,6 +82,26 @@ describe('StreamingState', () => {
       expect(output).toContain('"message_stop"');
     });
 
+    it('normalizes omitted function arguments without mutating the streamed part', () => {
+      const processor = new PartProcessor(state);
+      const functionCall = { id: 'call_empty', name: 'lookup' };
+      const output = processor.process({ functionCall: functionCall as never }).join('');
+
+      expect(functionCall).not.toHaveProperty('args');
+      expect(output).toContain('"partial_json":"{}"');
+    });
+
+    it('rejects malformed present arguments before a same-part text payload is emitted', () => {
+      const processor = new PartProcessor(state);
+
+      expect(() =>
+        processor.process({
+          functionCall: { args: [], name: 'invalid' },
+          text: 'partial',
+        } as never),
+      ).toThrow('functionCall.args');
+    });
+
     it.each([
       ['sToP', 'end_turn'],
       ['mAx_ToKeNs', 'max_tokens'],
