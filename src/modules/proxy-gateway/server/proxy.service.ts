@@ -1994,7 +1994,9 @@ export class ProxyService {
       const toolCalls = choice?.message?.tool_calls ?? [];
       // Legacy text completions have no tool-call channel, so they never claim tool_calls.
       const emitsToolCalls = streamOptions.variant !== 'text' && toolCalls.length > 0;
-      const finishReason = emitsToolCalls ? 'tool_calls' : (choice?.finish_reason ?? 'stop');
+      const finishReason = emitsToolCalls
+        ? 'tool_calls'
+        : this.normalizeSyntheticOpenAIFinishReason(choice?.finish_reason, streamOptions.variant);
       const content =
         choice?.message && isString(choice.message.content) ? choice.message.content : '';
       const chunkSize = 80;
@@ -2073,6 +2075,25 @@ export class ProxyService {
 
       sendDone();
     });
+  }
+
+  private normalizeSyntheticOpenAIFinishReason(
+    finishReason: string | null | undefined,
+    variant: OpenAIStreamOptions['variant'],
+  ): string | null {
+    if (variant !== 'text') {
+      return finishReason ?? 'stop';
+    }
+    if (finishReason === undefined) {
+      return 'stop';
+    }
+    if (finishReason === null) {
+      return null;
+    }
+    if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'content_filter') {
+      return finishReason;
+    }
+    return 'stop';
   }
 
   private createSyntheticResponsesStream(

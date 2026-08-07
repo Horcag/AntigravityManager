@@ -1254,6 +1254,35 @@ describe('ProxyController Integration', () => {
     }
   });
 
+  it('lists every exact configured routing alias without advertising wildcard mappings', () => {
+    vi.mocked(getServerConfig).mockReturnValue({
+      custom_mapping: {
+        'custom-exact': 'gemini-3-flash',
+        'custom-*': 'gemini-3-flash',
+        duplicate: 'gemini-3-flash',
+      },
+      anthropic_mapping: {
+        'anthropic-exact': 'claude-sonnet-4-6-thinking',
+        duplicate: 'claude-sonnet-4-6-thinking',
+        'anthropic-*': 'claude-sonnet-4-6-thinking',
+      },
+    } as never);
+    const controller = new ProxyController({ handleChatCompletions: vi.fn() } as any);
+    const listReply = createReplyMock();
+    const modelReply = createReplyMock();
+
+    controller.listModels(listReply as any);
+    controller.getModel('anthropic-exact', modelReply as any);
+
+    const ids = listReply.send.mock.calls[0][0].data.map((model: { id: string }) => model.id);
+    expect(ids).toEqual(expect.arrayContaining(['custom-exact', 'anthropic-exact', 'duplicate']));
+    expect(ids).not.toEqual(expect.arrayContaining(['custom-*', 'anthropic-*']));
+    expect(ids.filter((id: string) => id === 'duplicate')).toHaveLength(1);
+    expect(modelReply.send).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'anthropic-exact', object: 'model' }),
+    );
+  });
+
   it('routes Claude OpenAI requests to protocol parity path', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({ ok: true }),
@@ -1380,6 +1409,32 @@ describe('ProxyController Integration', () => {
       }),
     );
   });
+
+  it.each(['tool_calls', 'function_call'])(
+    'normalizes legacy completion finish reason %s',
+    async (finishReason) => {
+      const proxyService = {
+        handleChatCompletions: vi.fn().mockResolvedValue({
+          id: 'chatcmpl_legacy_finish',
+          created: 1700000000,
+          model: 'gpt-4o',
+          choices: [
+            {
+              index: 0,
+              finish_reason: finishReason,
+              message: { role: 'assistant', content: 'legacy output' },
+            },
+          ],
+        }),
+      };
+      const controller = new ProxyController(proxyService as any);
+      const reply = createReplyMock();
+
+      await controller.completions({ model: 'gpt-4o', prompt: 'hi' }, reply as any);
+
+      expect(reply.send.mock.calls[0][0].choices[0].finish_reason).toBe('stop');
+    },
+  );
 
   it('supports OpenAI responses compatibility endpoint with normalized input', async () => {
     const proxyService = {
@@ -3415,6 +3470,14 @@ describe('ProxyController Integration', () => {
         ['/v1/responses', responsesBase, 'reasoning', { effort: 'high' }],
         ['/v1/responses', responsesBase, 'truncation', 'auto'],
         ['/v1/responses', responsesBase, 'max_tool_calls', 2],
+        ['/v1/responses', responsesBase, 'include', ['reasoning.encrypted_content']],
+        ['/v1/responses', responsesBase, 'service_tier', 'priority'],
+        ['/v1/responses', responsesBase, 'prompt_cache_key', 'cache-key'],
+        ['/v1/responses', responsesBase, 'prompt_cache_retention', '24h'],
+        ['/v1/responses', responsesBase, 'safety_identifier', 'safety-id'],
+        ['/v1/responses', responsesBase, 'conversation', 'conv_123'],
+        ['/v1/responses', responsesBase, 'prompt', { id: 'pmpt_123' }],
+        ['/v1/responses', responsesBase, 'top_logprobs', 2],
       ] as Array<[string, Record<string, unknown>, string, unknown]>) {
         const response = await server.inject({
           method: 'POST',
@@ -3432,6 +3495,33 @@ describe('ProxyController Integration', () => {
           },
         });
       }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('rejects Responses user before an upstream call', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() };
+    const app = await createHttpApp(proxyService);
+
+    try {
+      const response = await app
+        .getHttpAdapter()
+        .getInstance()
+        .inject({
+          method: 'POST',
+          url: '/v1/responses',
+          headers: { authorization: 'Bearer test-key' },
+          payload: { model: 'gpt-4o', input: 'hi', user: 'end-user-42' },
+        });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toMatchObject({
+        param: 'user',
+        code: 'unsupported_parameter',
+      });
       expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
     } finally {
       await app.close();

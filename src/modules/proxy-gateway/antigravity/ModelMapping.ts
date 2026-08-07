@@ -200,16 +200,26 @@ export function getAllDynamicModels(
 export function getOpenAICompatibleModels(
   customMapping: Record<string, string> = {},
   dynamicModelIds?: Iterable<string>,
+  anthropicMapping: Record<string, string> = {},
 ): string[] {
+  const configuredExactAliases = new Set(
+    [...Object.keys(customMapping), ...Object.keys(anthropicMapping)].filter(
+      (modelId) => !isEmpty(modelId.trim()) && !modelId.includes('*'),
+    ),
+  );
   const modelIds = new Set([
     ...getAllDynamicModels(customMapping, dynamicModelIds),
     ...Object.keys(CLAUDE_TO_GEMINI),
     ...Object.keys(GEMINI_MODEL_ALIASES),
+    ...configuredExactAliases,
   ]);
 
   return [...modelIds]
     .filter(
-      (id) => id !== INTERNAL_BACKGROUND_TASK_MODEL && !shouldHideNonChatModelFromOpenAIList(id),
+      (id) =>
+        !id.includes('*') &&
+        (configuredExactAliases.has(id) ||
+          (id !== INTERNAL_BACKGROUND_TASK_MODEL && !shouldHideNonChatModelFromOpenAIList(id))),
     )
     .sort();
 }

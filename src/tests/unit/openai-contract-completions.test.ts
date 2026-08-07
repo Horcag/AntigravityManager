@@ -894,24 +894,61 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
     ]);
   });
 
-  it('never claims tool_calls on the legacy synthetic text stream', async () => {
+  it.each(['tool_calls', 'function_call'])(
+    'normalizes legacy synthetic text stream finish reason %s',
+    async (finishReason) => {
+      const service = createService();
+      const response = {
+        id: 'chatcmpl-synthetic-legacy',
+        object: 'chat.completion',
+        created: 1700000000,
+        model: 'gpt-4o-mini',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'legacy body',
+              tool_calls: [
+                { id: 'call_a', type: 'function', function: { name: 'alpha', arguments: '{}' } },
+              ],
+            },
+            finish_reason: finishReason,
+          },
+        ],
+      };
+
+      const outcome = await collectStream(
+        invokePrivate<Observable<string>>(service, 'createSyntheticOpenAIStream', response, {
+          variant: 'text',
+          includeUsage: false,
+        }),
+      );
+
+      const raw = outcome.chunks.join('');
+      expect(raw).not.toContain('tool_calls');
+      expect(raw).not.toContain('chat.completion.chunk');
+      const payloads = parseSseData(outcome.chunks).filter(
+        (event): event is Record<string, unknown> => event !== '[DONE]',
+      );
+      expect(payloads.every((payload) => payload.object === 'text_completion')).toBe(true);
+      expect(payloads.at(-1)?.choices).toEqual([
+        { text: 'legacy body', index: 0, logprobs: null, finish_reason: 'stop' },
+      ]);
+    },
+  );
+
+  it('defaults an absent legacy synthetic text stream finish reason to stop', async () => {
     const service = createService();
     const response = {
-      id: 'chatcmpl-synthetic-legacy',
+      id: 'chatcmpl-synthetic-legacy-missing-finish-reason',
       object: 'chat.completion',
       created: 1700000000,
       model: 'gpt-4o-mini',
       choices: [
         {
           index: 0,
-          message: {
-            role: 'assistant',
-            content: 'legacy body',
-            tool_calls: [
-              { id: 'call_a', type: 'function', function: { name: 'alpha', arguments: '{}' } },
-            ],
-          },
-          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'legacy body' },
         },
       ],
     };
@@ -922,14 +959,10 @@ describe('OpenAI Chat and legacy Completions contracts', () => {
         includeUsage: false,
       }),
     );
-
-    const raw = outcome.chunks.join('');
-    expect(raw).not.toContain('tool_calls');
-    expect(raw).not.toContain('chat.completion.chunk');
     const payloads = parseSseData(outcome.chunks).filter(
       (event): event is Record<string, unknown> => event !== '[DONE]',
     );
-    expect(payloads.every((payload) => payload.object === 'text_completion')).toBe(true);
+
     expect(payloads.at(-1)?.choices).toEqual([
       { text: 'legacy body', index: 0, logprobs: null, finish_reason: 'stop' },
     ]);

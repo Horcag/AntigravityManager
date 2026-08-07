@@ -67,6 +67,25 @@ describe('ProxyModelRoutingPolicy', () => {
     expect(models).toEqual(expect.arrayContaining(getSupportedModels()));
   });
 
+  it('excludes wildcard mappings from the public OpenAI-compatible model list', () => {
+    const models = getOpenAICompatibleModels(
+      {
+        'custom-exact': 'gemini-3-flash',
+        'custom-*': 'gemini-3-flash',
+      },
+      ['dynamic-*', 'dynamic-exact'],
+      {
+        'anthropic-exact': 'claude-sonnet-4-6-thinking',
+        'anthropic-*': 'claude-sonnet-4-6-thinking',
+      },
+    );
+
+    expect(models).toEqual(
+      expect.arrayContaining(['custom-exact', 'anthropic-exact', 'dynamic-exact']),
+    );
+    expect(models).not.toEqual(expect.arrayContaining(['custom-*', 'anthropic-*', 'dynamic-*']));
+  });
+
   it('lists and routes every declared OpenAI endpoint default to a supported target', () => {
     const models = getOpenAICompatibleModels();
     const policy = new ProxyModelRoutingPolicy();

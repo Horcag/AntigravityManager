@@ -121,6 +121,15 @@ interface OpenAIResponsesRequest {
   truncation?: unknown;
   max_tool_calls?: unknown;
   metadata?: unknown;
+  user?: unknown;
+  include?: unknown;
+  service_tier?: unknown;
+  prompt_cache_key?: unknown;
+  prompt_cache_retention?: unknown;
+  safety_identifier?: unknown;
+  conversation?: unknown;
+  prompt?: unknown;
+  top_logprobs?: unknown;
 }
 
 interface ImageOptionInput {
@@ -241,23 +250,14 @@ export class ProxyController {
   @Post('responses')
   async responses(
     @Body()
-    body: {
-      model?: string;
-      instructions?: string;
-      input?: unknown;
-      tools?: OpenAIChatRequest['tools'];
-      tool_choice?: OpenAIChatRequest['tool_choice'];
-      max_output_tokens?: number;
-      temperature?: number;
-      top_p?: number;
-      stream?: boolean;
-    },
+    body: OpenAIResponsesRequest,
     @Res() res: FastifyReply,
   ) {
     this.requireJsonObject(body);
     this.requireNonEmptyString(body.model, 'model');
     this.validateResponsesInput(body.input);
     this.validateTools(body.tools, body.tool_choice);
+    this.validateUnsupportedIdentityOptions(body);
     this.validateResponsesOptions(body);
     const request = this.buildResponsesChatRequest(body);
     const configuration = this.createResponsesConfiguration(body);
@@ -603,6 +603,7 @@ export class ProxyController {
     return getOpenAICompatibleModels(
       config?.custom_mapping ?? {},
       this.accountLeaseService?.getAllCollectedModels(),
+      config?.anthropic_mapping ?? {},
     ).map((id) => ({
       id,
       object: 'model' as const,
@@ -1018,6 +1019,14 @@ export class ProxyController {
       'reasoning',
       'truncation',
       'max_tool_calls',
+      'include',
+      'service_tier',
+      'prompt_cache_key',
+      'prompt_cache_retention',
+      'safety_identifier',
+      'conversation',
+      'prompt',
+      'top_logprobs',
     ]);
   }
 
@@ -1564,7 +1573,7 @@ export class ProxyController {
           text,
           index: choice?.index ?? 0,
           logprobs: null,
-          finish_reason: choice?.finish_reason ?? null,
+          finish_reason: this.normalizeLegacyTextCompletionFinishReason(choice?.finish_reason),
         },
       ],
     };
@@ -1574,6 +1583,18 @@ export class ProxyController {
       payload.usage = response.usage;
     }
     return payload;
+  }
+
+  private normalizeLegacyTextCompletionFinishReason(
+    finishReason: string | null | undefined,
+  ): 'stop' | 'length' | 'content_filter' | null {
+    if (finishReason === null || finishReason === undefined) {
+      return null;
+    }
+    if (finishReason === 'stop' || finishReason === 'length' || finishReason === 'content_filter') {
+      return finishReason;
+    }
+    return 'stop';
   }
 
   private toResponsesResponse(
