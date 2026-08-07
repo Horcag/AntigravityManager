@@ -1,21 +1,13 @@
 import {
   applyEdits,
-  createScanner,
-  findNodeAtLocation,
   modify,
   parse,
-  parseTree,
   type FormattingOptions,
   type JSONPath,
   type ParseError,
-  type Node,
-  SyntaxKind,
 } from 'jsonc-parser';
 import { isEqual } from 'lodash-es';
-import {
-  canonicalizeOpenCodeModelId,
-  OPEN_CODE_MODEL_ALIASES,
-} from './opencode-model-normalization';
+import { canonicalizeOpenCodeModelId } from './opencode-model-normalization';
 
 export const OPEN_CODE_PROVIDER_ID = 'antigravity-manager';
 export const OPEN_CODE_API_KEY_PLACEHOLDER = '__ANTIGRAVITY_MANAGER_OPENCODE_KEY__';
@@ -111,26 +103,35 @@ const MODEL_CATALOG: Record<string, OpenCodeModelDefinition> = {
     reasoning: true,
     variants: CLAUDE_VARIANTS,
   },
-  'gemini-3.1-pro': {
-    name: 'Gemini 3.1 Pro',
+  'gemini-3.1-pro-low': {
+    name: 'Gemini 3.1 Pro (Low)',
     limit: { context: 1048576, output: 65535 },
     modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
     reasoning: true,
-    variants: {
-      low: buildThinkingVariant(1001, true),
-      high: buildThinkingVariant(10001, true),
-    },
   },
-  'gemini-3.5-flash': {
-    name: 'Gemini 3.5 Flash',
+  'gemini-3.1-pro-high': {
+    name: 'Gemini 3.1 Pro (High)',
+    limit: { context: 1048576, output: 65535 },
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+    reasoning: true,
+  },
+  'gemini-3.5-flash-low': {
+    name: 'Gemini 3.5 Flash (Low)',
     limit: { context: 1048576, output: 65536 },
     modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
     reasoning: true,
-    variants: {
-      low: buildThinkingVariant(1000, true),
-      medium: buildThinkingVariant(4000, true),
-      high: buildThinkingVariant(10000, true),
-    },
+  },
+  'gemini-3.5-flash-medium': {
+    name: 'Gemini 3.5 Flash (Medium)',
+    limit: { context: 1048576, output: 65536 },
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+    reasoning: true,
+  },
+  'gemini-3.5-flash-high': {
+    name: 'Gemini 3.5 Flash (High)',
+    limit: { context: 1048576, output: 65536 },
+    modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+    reasoning: true,
   },
   'gemini-3.1-flash-lite': {
     name: 'Gemini 3.1 Flash Lite',
@@ -318,122 +319,6 @@ function normalizeModelInputs(models: OpenCodeModelInput[]): OpenCodeModelInput[
   return [...normalized.values()];
 }
 
-function getJsoncNode(source: string, path: JSONPath): Node | undefined {
-  const errors: ParseError[] = [];
-  const tree = parseTree(source, errors, {
-    allowTrailingComma: true,
-    disallowComments: false,
-  });
-  if (!tree || errors.length > 0) {
-    throw new Error('OpenCode configuration is not a valid JSONC object');
-  }
-  return findNodeAtLocation(tree, path);
-}
-
-function renameJsoncProperty(source: string, path: JSONPath, nextName: string): string {
-  const valueNode = getJsoncNode(source, path);
-  const keyNode = valueNode?.parent?.children?.[0];
-  if (!keyNode || keyNode.type !== 'string') {
-    return source;
-  }
-  return `${source.slice(0, keyNode.offset)}${JSON.stringify(nextName)}${source.slice(
-    keyNode.offset + keyNode.length,
-  )}`;
-}
-
-function extractJsoncComments(source: string, node: Node | undefined): string[] {
-  if (!node) {
-    return [];
-  }
-
-  const raw = source.slice(node.offset, node.offset + node.length);
-  const scanner = createScanner(raw, false);
-  const comments: string[] = [];
-  let token = scanner.scan();
-  while (token !== SyntaxKind.EOF) {
-    if (token === SyntaxKind.LineCommentTrivia || token === SyntaxKind.BlockCommentTrivia) {
-      comments.push(
-        raw.slice(scanner.getTokenOffset(), scanner.getTokenOffset() + scanner.getTokenLength()),
-      );
-    }
-    token = scanner.scan();
-  }
-  return comments;
-}
-
-function appendMissingCommentsToObject(
-  source: string,
-  path: JSONPath,
-  comments: string[],
-  formattingOptions: FormattingOptions,
-): string {
-  const missingComments = comments.filter((comment) => !source.includes(comment));
-  if (missingComments.length === 0) {
-    return source;
-  }
-
-  const objectNode = getJsoncNode(source, path);
-  if (!objectNode || objectNode.type !== 'object') {
-    return source;
-  }
-
-  const closingOffset = objectNode.offset + objectNode.length - 1;
-  const lineStart = source.lastIndexOf(formattingOptions.eol ?? '\n', closingOffset - 1);
-  const insertionOffset =
-    lineStart >= 0 ? lineStart + (formattingOptions.eol ?? '\n').length : closingOffset;
-  const closingIndent = source.slice(insertionOffset, closingOffset);
-  const indentUnit = formattingOptions.insertSpaces
-    ? ' '.repeat(formattingOptions.tabSize ?? 2)
-    : '\t';
-  const commentIndent = `${closingIndent}${indentUnit}`;
-  const eol = formattingOptions.eol ?? '\n';
-  const formattedComments = missingComments
-    .map((comment) =>
-      comment
-        .trim()
-        .split(/\r?\n/)
-        .map((line) => `${commentIndent}${line.trimStart()}`)
-        .join(eol),
-    )
-    .join(eol);
-
-  return `${source.slice(0, insertionOffset)}${formattedComments}${eol}${source.slice(
-    insertionOffset,
-  )}`;
-}
-
-function migrateGeminiAliasModels(source: string, formattingOptions: FormattingOptions): string {
-  let updated = source;
-  for (const [alias, canonical] of Object.entries(OPEN_CODE_MODEL_ALIASES)) {
-    const aliasPath = [...PROVIDER_PATH, 'models', alias];
-    const canonicalPath = [...PROVIDER_PATH, 'models', canonical];
-    const root = validateJsoncObject(updated);
-    const aliasValue = getPathValue(root, aliasPath);
-    if (aliasValue === undefined) {
-      continue;
-    }
-
-    const canonicalValue = getPathValue(root, canonicalPath);
-    if (canonicalValue === undefined) {
-      updated = renameJsoncProperty(updated, aliasPath, canonical);
-      continue;
-    }
-
-    const aliasNode = getJsoncNode(updated, aliasPath)?.parent;
-    const comments = extractJsoncComments(updated, aliasNode);
-    if (isUnknownRecord(aliasValue) && isUnknownRecord(canonicalValue)) {
-      for (const [key, value] of Object.entries(aliasValue)) {
-        if (!Object.prototype.hasOwnProperty.call(canonicalValue, key)) {
-          updated = setJsoncValue(updated, [...canonicalPath, key], value, formattingOptions);
-        }
-      }
-    }
-    updated = setJsoncValue(updated, aliasPath, undefined, formattingOptions);
-    updated = appendMissingCommentsToObject(updated, canonicalPath, comments, formattingOptions);
-  }
-  return updated;
-}
-
 function removeJsoncObjectIfEmpty(
   source: string,
   path: JSONPath,
@@ -512,8 +397,6 @@ export function updateOpenCodeConfigJsonc(
     formattingOptions,
   );
   updated = setJsoncValue(updated, API_KEY_PATH, input.apiKey, formattingOptions);
-  updated = migrateGeminiAliasModels(updated, formattingOptions);
-
   const models = normalizeModelInputs(
     input.models ?? Object.keys(MODEL_CATALOG).map((id) => ({ id })),
   );

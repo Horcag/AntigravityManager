@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AccountLeaseLimitPolicy } from '@/modules/proxy-gateway/server/modules/account-lease/policies/account-lease-limit-policy';
-import { RateLimitReason, RateLimitTrackerService } from '@/modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
+import {
+  RateLimitReason,
+  RateLimitTrackerService,
+} from '@/modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
 
 function createPolicy() {
   const logger = {
@@ -97,7 +100,7 @@ describe('AccountLeaseLimitPolicy', () => {
     expect(policy.isRateLimited('acc-1', 'gemini-3.1-flash-lite')).toBe(false);
   });
 
-  it('clears only recovered model families during partial quota recovery', () => {
+  it('clears only exact recovered models during partial quota recovery', () => {
     const { policy } = createPolicy();
     const resetTime = new Date(Date.now() + 60_000).toISOString();
     const tracker = policy.getRateLimitTracker();
@@ -115,6 +118,11 @@ describe('AccountLeaseLimitPolicy', () => {
     );
 
     policy.clearRecoveredQuotaLocks('acc-1', ['gemini-3.1-pro'], false);
+
+    expect(tracker.isRateLimited('acc-1', 'gemini-3.1-pro-high')).toBe(true);
+    expect(tracker.isRateLimited('acc-1', 'gemini-3.1-flash-lite')).toBe(true);
+
+    policy.clearRecoveredQuotaLocks('acc-1', ['models/gemini-3.1-pro-high'], false);
 
     expect(tracker.isRateLimited('acc-1', 'gemini-3.1-pro-high')).toBe(false);
     expect(tracker.isRateLimited('acc-1', 'gemini-3.1-flash-lite')).toBe(true);

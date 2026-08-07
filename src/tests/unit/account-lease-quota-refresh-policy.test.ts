@@ -167,11 +167,14 @@ describe('AccountLeaseQuotaRefreshPolicy', () => {
     );
   });
 
-  it('treats a recovered canonical model as recovery for its requested alias', async () => {
+  it('treats a provider-forwarded model as recovery for its requested id', async () => {
     const tokenCache = new Map([['acc-1', createToken()]]);
     const { clearRecoveredQuotaLocks, policy, setLockoutUntilIso, upstream } =
       createPolicy(tokenCache);
     vi.mocked(upstream.fetchQuota).mockResolvedValue({
+      model_forwarding_rules: {
+        'gemini-3.1-pro-high': 'gemini-3.1-pro',
+      },
       models: {
         'models/gemini-3.1-pro': {
           percentage: 18,

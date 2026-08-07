@@ -41,6 +41,9 @@ import {
   Eye,
   EyeOff,
   ImageIcon,
+  Plus,
+  RefreshCw,
+  Trash2,
 } from 'lucide-react';
 import {
   Dialog,
@@ -52,6 +55,33 @@ import {
 } from '@/components/ui/dialog';
 
 type ProxyProtocol = 'openai' | 'anthropic';
+
+interface ModelRouteDiagnostic {
+  alias: string;
+  target: string;
+  enabled: boolean;
+  source: string;
+  wildcard: boolean;
+  target_status: 'known' | 'unknown_model' | 'catalog_unavailable';
+  accounts: Array<{
+    accountId: string;
+    exact: boolean;
+    resolvedModel: string;
+    status: 'unknown' | 'available' | 'unavailable';
+  }>;
+}
+
+interface ModelRouteDiagnosticsResponse {
+  checked_at: string;
+  canonical_models: string[];
+  data: ModelRouteDiagnostic[];
+  recent_failures: Array<{
+    accountId: string;
+    modelId: string;
+    reason: string;
+    detectedAt: number;
+  }>;
+}
 
 function getExampleModelIcon(modelId: string): ReactNode {
   const normalizedId = modelId.toLowerCase();
@@ -68,35 +98,6 @@ function getExampleModelIcon(modelId: string): ReactNode {
     return <Zap size={14} />;
   }
   return <Cpu size={14} />;
-}
-
-const ANTHROPIC_ROUTE_OPTIONS = [
-  'claude-sonnet-4-6-thinking',
-  'claude-opus-4-6-thinking',
-  'gemini-3-flash',
-  'gemini-3.1-pro-low',
-  'gemini-3.1-pro-high',
-] as const;
-
-const DEFAULT_ANTHROPIC_MAPPING: Record<string, string> = {
-  'claude-sonnet-4-6-20260219': 'claude-sonnet-4-6-thinking',
-  'claude-sonnet-4-5-20250929': 'claude-sonnet-4-6-thinking',
-  'claude-opus-4-6-20260201': 'claude-opus-4-6-thinking',
-  opus: 'claude-opus-4-6-thinking',
-};
-
-function resolveAnthropicMappingValue(
-  anthropicMapping: Record<string, string>,
-  keys: string[],
-  fallback: string,
-): string {
-  for (const key of keys) {
-    const value = anthropicMapping[key];
-    if (value) {
-      return value;
-    }
-  }
-  return fallback;
 }
 
 function ProxyPage() {
@@ -186,7 +187,7 @@ function ProxyPage() {
 
   // ===== Usage Examples State =====
   const [selectedProtocol, setSelectedProtocol] = useState<ProxyProtocol>('openai');
-  const [activeModelTab, setActiveModelTab] = useState('gemini-3.1-pro-high');
+  const [activeModelTab, setActiveModelTab] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
   const exampleModels = useMemo(() => buildProxyExampleModels(cloudAccounts), [cloudAccounts]);
   const visibleExampleModels = useMemo(
@@ -198,22 +199,94 @@ function ProxyPage() {
   );
   const effectiveModelId = visibleExampleModels.some((model) => model.id === activeModelTab)
     ? activeModelTab
-    : (visibleExampleModels[0]?.id ?? activeModelTab);
+    : (visibleExampleModels[0]?.id ?? 'MODEL_ID');
 
   // Computed values for examples
   const apiKey = proxyConfig?.api_key || 'YOUR_API_KEY';
   const baseUrl = `http://localhost:${proxyConfig?.port || 8045}`;
+  const modelRouteDiagnostics = useQuery<ModelRouteDiagnosticsResponse>({
+    queryKey: [
+      'gateway',
+      'model-routes',
+      baseUrl,
+      proxyConfig?.api_key,
+      proxyConfig?.model_aliases,
+    ],
+    enabled: Boolean(proxyConfig?.enabled && proxyConfig.api_key),
+    retry: false,
+    staleTime: 5_000,
+    queryFn: async () => {
+      const response = await fetch(`${baseUrl}/v1/model-routes`, {
+        headers: { Authorization: `Bearer ${proxyConfig?.api_key ?? ''}` },
+      });
+      if (!response.ok) {
+        throw new Error(`Route diagnostics failed with HTTP ${response.status}`);
+      }
+      return (await response.json()) as ModelRouteDiagnosticsResponse;
+    },
+  });
+  const modelAliasTargets = useMemo(() => {
+    const targetIds = new Set(modelRouteDiagnostics.data?.canonical_models ?? []);
+    for (const route of proxyConfig?.model_aliases ?? []) {
+      if (route.target.trim()) {
+        targetIds.add(route.target.trim());
+      }
+    }
+    if (targetIds.size === 0) {
+      for (const model of exampleModels) {
+        targetIds.add(model.id);
+      }
+    }
+    return [...targetIds].sort((left, right) => left.localeCompare(right));
+  }, [exampleModels, modelRouteDiagnostics.data?.canonical_models, proxyConfig?.model_aliases]);
 
-  const updateAnthropicMapping = (mappingPatch: Record<string, string>) => {
+  const updateModelAlias = (
+    index: number,
+    patch: Partial<ProxyConfig['model_aliases'][number]>,
+  ) => {
+    if (!proxyConfig) {
+      return;
+    }
+    const modelAliases = proxyConfig.model_aliases.map((route, routeIndex) =>
+      routeIndex === index ? { ...route, ...patch } : route,
+    );
+    const nextConfig = { ...proxyConfig, model_aliases: modelAliases };
+    if (modelAliases.every((route) => route.alias.trim() && route.target.trim())) {
+      updateProxyConfig(nextConfig);
+    } else {
+      setProxyConfig(nextConfig);
+    }
+  };
+
+  const addModelAlias = () => {
+    if (!proxyConfig || modelAliasTargets.length === 0) {
+      return;
+    }
+    const usedAliases = new Set(proxyConfig.model_aliases.map((route) => route.alias));
+    let aliasIndex = proxyConfig.model_aliases.length + 1;
+    while (usedAliases.has(`my-model-${aliasIndex}`)) {
+      aliasIndex += 1;
+    }
+    updateProxyConfig({
+      ...proxyConfig,
+      model_aliases: [
+        ...proxyConfig.model_aliases,
+        {
+          alias: `my-model-${aliasIndex}`,
+          target: modelAliasTargets[0],
+          enabled: true,
+        },
+      ],
+    });
+  };
+
+  const removeModelAlias = (index: number) => {
     if (!proxyConfig) {
       return;
     }
     updateProxyConfig({
       ...proxyConfig,
-      anthropic_mapping: {
-        ...proxyConfig.anthropic_mapping,
-        ...mappingPatch,
-      },
+      model_aliases: proxyConfig.model_aliases.filter((_, routeIndex) => routeIndex !== index),
     });
   };
 
@@ -541,96 +614,143 @@ print(response.choices[0].message.content)`;
           <CardTitle>{t('proxy.mapping.title')}</CardTitle>
           <CardDescription>{t('proxy.mapping.description')}</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {/* Sonnet 4.6 Card */}
-            <div className="flex flex-col rounded-lg border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-blue-100/50 p-4 dark:border-blue-800/50 dark:from-blue-950/30 dark:to-blue-900/20">
-              <div className="mb-2 flex items-center gap-2">
-                <div className="h-2 w-2 animate-pulse rounded-full bg-blue-500"></div>
-                <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
-                  Claude Sonnet 4.6 (Thinking)
-                </h3>
-              </div>
-              <p className="mb-3 text-xs text-gray-600 dark:text-gray-400">
-                {t('proxy.mapping.maps_to')}
-              </p>
-              <Select
-                value={resolveAnthropicMappingValue(
-                  proxyConfig.anthropic_mapping,
-                  ['claude-sonnet-4-6-20260219', 'claude-sonnet-4-5-20250929'],
-                  'claude-sonnet-4-6-thinking',
-                )}
-                onValueChange={(value) =>
-                  updateAnthropicMapping({
-                    'claude-sonnet-4-6-20260219': value,
-                    'claude-sonnet-4-5-20250929': value,
+        <CardContent className="space-y-4">
+          {proxyConfig.model_aliases.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-6 text-center text-sm text-gray-500">
+              {t('proxy.mapping.empty')}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {proxyConfig.model_aliases.map((route, index) => {
+                const diagnostic = modelRouteDiagnostics.data?.data.find(
+                  (item) => item.alias.toLowerCase() === route.alias.toLowerCase(),
+                );
+                const availableAccounts =
+                  diagnostic?.accounts.filter((account) => account.status === 'available').length ??
+                  0;
+                return (
+                  <div key={`${route.alias}-${index}`} className="rounded-lg border p-4">
+                    <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
+                      <div className="space-y-2">
+                        <Label>{t('proxy.mapping.alias')}</Label>
+                        <Input
+                          value={route.alias}
+                          placeholder="my-model"
+                          onChange={(event) =>
+                            updateModelAlias(index, { alias: event.target.value })
+                          }
+                          onBlur={() => {
+                            if (route.alias.trim() && route.target.trim()) {
+                              updateProxyConfig(proxyConfig);
+                            }
+                          }}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>{t('proxy.mapping.target')}</Label>
+                        <Select
+                          value={route.target}
+                          onValueChange={(target) => updateModelAlias(index, { target })}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {modelAliasTargets.map((target) => (
+                              <SelectItem key={target} value={target}>
+                                {target}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="flex h-10 items-center gap-2">
+                        <Switch
+                          checked={route.enabled}
+                          onCheckedChange={(enabled) => updateModelAlias(index, { enabled })}
+                        />
+                        <span className="text-xs text-gray-500">
+                          {route.enabled ? t('proxy.mapping.enabled') : t('proxy.mapping.disabled')}
+                        </span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={t('proxy.mapping.remove')}
+                        onClick={() => removeModelAlias(index)}
+                      >
+                        <Trash2 size={16} />
+                      </Button>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <span>
+                        {diagnostic
+                          ? t(`proxy.mapping.status_${diagnostic.target_status}`)
+                          : t('proxy.mapping.status_unchecked')}
+                      </span>
+                      {diagnostic ? (
+                        <span>
+                          · {t('proxy.mapping.available_accounts', { count: availableAccounts })}
+                        </span>
+                      ) : null}
+                      {diagnostic?.wildcard ? <span>· {t('proxy.mapping.wildcard')}</span> : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-gray-500">
+              {modelRouteDiagnostics.data?.checked_at
+                ? t('proxy.mapping.checked_at', {
+                    time: new Date(modelRouteDiagnostics.data.checked_at).toLocaleTimeString(),
+                  })
+                : t('proxy.mapping.not_checked')}
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!proxyConfig.enabled || modelRouteDiagnostics.isFetching}
+                onClick={() => modelRouteDiagnostics.refetch()}
+              >
+                <RefreshCw
+                  size={14}
+                  className={modelRouteDiagnostics.isFetching ? 'mr-2 animate-spin' : 'mr-2'}
+                />
+                {t('proxy.mapping.check')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={modelAliasTargets.length === 0}
+                onClick={addModelAlias}
+              >
+                <Plus size={14} className="mr-2" />
+                {t('proxy.mapping.add')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={
+                  proxyConfig.model_aliases.length === 0 &&
+                  Object.keys(proxyConfig.custom_mapping).length === 0 &&
+                  Object.keys(proxyConfig.anthropic_mapping).length === 0
+                }
+                onClick={() =>
+                  updateProxyConfig({
+                    ...proxyConfig,
+                    model_aliases: [],
+                    custom_mapping: {},
+                    anthropic_mapping: {},
                   })
                 }
               >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {ANTHROPIC_ROUTE_OPTIONS.map((option) => (
-                    <SelectItem key={option} value={option}>
-                      {option}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                {t('proxy.mapping.clear')}
+              </Button>
             </div>
-
-            {/* Opus 4.6 Card */}
-            <div className="flex flex-col rounded-lg border-2 border-purple-200 bg-gradient-to-br from-purple-50 to-purple-100/50 p-4 dark:border-purple-800/50 dark:from-purple-950/30 dark:to-purple-900/20">
-              <div className="mb-2 flex items-center gap-2">
-                <div className="h-2 w-2 animate-pulse rounded-full bg-purple-500"></div>
-                <h3 className="text-sm font-bold text-gray-900 dark:text-gray-100">
-                  Claude Opus 4.6 (Thinking)
-                </h3>
-              </div>
-              <p className="mb-3 text-xs text-gray-600 dark:text-gray-400">
-                {t('proxy.mapping.maps_to')}
-              </p>
-              <Select
-                value={resolveAnthropicMappingValue(
-                  proxyConfig.anthropic_mapping,
-                  ['claude-opus-4-6-20260201', 'opus'],
-                  'claude-opus-4-6-thinking',
-                )}
-                onValueChange={(value) =>
-                  updateAnthropicMapping({
-                    'claude-opus-4-6-20260201': value,
-                    opus: value,
-                  })
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {ANTHROPIC_ROUTE_OPTIONS.map((option) => (
-                    <SelectItem key={option} value={option}>
-                      {option}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                updateProxyConfig({
-                  ...proxyConfig,
-                  anthropic_mapping: { ...DEFAULT_ANTHROPIC_MAPPING },
-                })
-              }
-            >
-              {t('proxy.mapping.restore')}
-            </Button>
           </div>
         </CardContent>
       </Card>

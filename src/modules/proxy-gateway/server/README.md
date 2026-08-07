@@ -9,7 +9,7 @@ The `server` directory contains the core backend implementation of the Proxy Gat
 ### Core Responsibilities
 1. **Multi-Protocol LLM Gateway Translation**: Unified handling and orchestration of OpenAI (Chat, Completions, Responses, Media), Anthropic (Messages API), and Gemini (Native Generate/Stream) protocol requests.
 2. **Account Lease & Scheduling Management**: Coordination of account loading, candidate selection, rate limiting, quota tracking, sticky sessions, and parity scheduling.
-3. **Resilience & High Availability**: Cross-protocol implementation of retry backoff, circuit breaking, model routing, rate-limit tracking, and fallback degradation.
+3. **Resilience & High Availability**: Cross-protocol retry backoff, circuit breaking, explicit model routing, rate-limit tracking, and same-model account failover.
 4. **Streaming & WebSocket Transport**: Native support for Server-Sent Events (SSE) and real-time bidirectional OpenAI Responses WebSockets.
 
 ---
@@ -173,6 +173,17 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - Transport of `contents` (including inline `image/png` and `audio/wav`), `generationConfig`, `tools` declarations, `toolConfig`, `safetySettings`, and text `systemInstruction`.
 - Tool declarations (`tools`), tool configuration (`toolConfig`), and function call/response parts (`functionCall`, `functionResponse`) are transported through the adapter; cross-protocol tool IDs, signature ownership, and full tool lifecycle management remain #18.
 
+### Model Routing and Observability
+- `GET /v1/models` and `GET /v1beta/models` expose only provider-advertised capability records from current account snapshots. They neither add compatibility aliases nor hide discovered records based on model-family guesses.
+- When Google gives a capability an exact recognized display preset (for example, `Gemini 3.5 Flash (High)`), the catalog uses its stable public preset ID and resolves the physical internal ID separately for each account. This provider-backed normalization is visible in route diagnostics and response headers; it is not a user alias or a guessed family substitution.
+- New installations have no aliases. User aliases are explicit `alias -> target` rows with an enabled flag; legacy `custom_mapping` and `anthropic_mapping` entries migrate into that editable table without changing their precedence.
+- A request without an enabled alias is treated as a canonical model ID. Provider forwarding is accepted only when the selected account advertises both the forwarding rule and its target. No version, tier, image, Claude, GPT, or Gemini sibling is inferred.
+- Explicit tier IDs stay on that tier even when a conflicting reasoning-effort value is supplied. Generic registered IDs can adjust generation controls, but model identity is preserved until the selected account supplies an exact physical ID.
+- Image-generation metadata and web-search tools never reselect the model. OpenCode synchronization likewise preserves each exact provider-derived model ID and does not collapse tier IDs into a synthetic base model; pre-existing user entries remain untouched.
+- Cross-model fallback is disabled. Retries can select another healthy account only when that account proves support for the same resolved model. Unknown models return 404 `model_not_found`, unavailable capability discovery returns 503 `model_catalog_unavailable`, and known models with no current account capacity return 429 `model_capacity_exhausted`.
+- Successful OpenAI, Anthropic, and Gemini responses emit `x-antigravity-requested-model`, `x-antigravity-resolved-model`, `x-antigravity-served-model`, `x-antigravity-route-source`, and `x-antigravity-fallback-policy: none`. Standard response and stream payload `model` / `modelVersion` fields remain authoritative when the upstream reports a more specific served version.
+- Authenticated `GET /v1/model-routes` keeps aliases out of the standard model catalog while exposing configured routes, canonical targets, per-account availability, and recent model-scoped failures for the local UI.
+
 ### Explicit Provider Limitations
 - **Media & File Support**: No native Gemini File API routes (`files/*`) or remote file URI resolution exist. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
 - **CountTokens**: Returns HTTP 501 `UNIMPLEMENTED` with a Google-shaped error envelope. Local token estimation is not performed.
@@ -182,9 +193,13 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - **Client Tier & Store Parameters**: Top-level `serviceTier` and `store` fields are explicitly rejected with HTTP 501 `UNIMPLEMENTED`.
 - **Unsupported Resource Families**: All unsupported Gemini resource families (`files`, `tunedModels`, `corpora`, `cachedContents`, `batchJobs`, `operations`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`.
 - **Partial Model Resources**: Antigravity does not expose authoritative `baseModelId`, `version`, input/output limits, temperature limits, or defaults. Model list/detail responses deliberately omit those fields instead of fabricating values, so they are a compatibility subset of Google's full `Model` resource.
-- **Model Inventory Is Capability-Based**: Public model lists contain normalized IDs observed in account capability snapshots plus valid exact custom aliases. Built-in compatibility aliases (for example `gpt-4o` routed to a Gemini target) remain accepted on request paths but are not advertised as distinct models. Static image permutations are not synthesized into the catalog.
-- **Advertised Does Not Mean Verified**: Antigravity's internal quota endpoint can announce a preset before generation accepts it. A model rejected as not found is removed from the process-local catalog and may reroute to an advertised sibling. Quota exhaustion remains transient and does not make a model garbage; per-account freshness and durable negative evidence remain reliability-layer work.
-- **Slow SSE Consumers**: Disconnects, malformed events, premature closes, and a five-minute idle timeout destroy the exact upstream stream. Socket `write()` backpressure is not yet propagated to the upstream readable, so a sustained slow consumer can still cause buffering; this remains a routing/transport hardening item.
+- **Capability Freshness**: Antigravity's quota response has no authoritative observation timestamp. `checked_at` reports when diagnostics were assembled, not when Google produced the capability snapshot. A listed model is provider-advertised, not a guarantee that the next generation call will succeed.
+- **Negative Evidence Is Account-Scoped**: A 404 marks only that account-model pair unsupported; quota and rate-limit failures use expiring cooldowns. The proxy does not convert those failures into permanent global removal and never reroutes to a sibling model.
+- **Quota Identity Is Exact**: Zero-percent quota entries are excluded before selection. Recovery clears only the exact model ID or an alias linked by a Google-provided forwarding rule; similar version, tier, or family names do not share state implicitly.
+- **Request Deadline**: `request_timeout` is one end-to-end budget for upstream setup and completion across project-header retries, internal endpoint failover, account retries, backoff, and non-stream/stream fallback. It is not reset for each attempt. After a live SSE handshake, the separate five-minute idle timeout governs gaps between events. Callers cannot currently override this deadline per request.
+- **Streaming Identity**: Response headers are fixed when the SSE handshake starts and therefore name the physical model selected for the upstream request. If Google later reports a different `modelVersion`, the streamed payload is authoritative because HTTP headers cannot be rewritten after emission.
+- **Slow SSE Consumers**: Disconnects, malformed events, premature closes, and the five-minute idle timeout destroy the exact upstream stream. A full downstream socket now pauses the upstream readable until `drain`; already-buffered bytes inside Node or the operating system remain outside application control.
+- **Streaming Retry Boundary**: Once response bytes have crossed the SSE handshake, the proxy cannot transparently retry without duplicating or reordering client-visible events. A failure before live streaming starts can use a buffered non-stream response to synthesize protocol-correct SSE, but that fallback is not genuine upstream token streaming.
 
 ---
 
@@ -213,7 +228,7 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - Gemini structured output implements a subset of JSON Schema. Schemas accepted by OpenAI but rejected by Gemini remain upstream validation errors; the proxy does not weaken them silently.
 - `candidateCount>1`, response logprobs, and some penalties are declared by Gemini's generation contract but can still be model-, account-, or internal-endpoint-dependent. Such upstream rejection is not rewritten as success.
 - A stream interrupted before the final usage event has no authoritative usage total. This matches the OpenAI warning that interrupted streams may not deliver the final usage chunk.
-- Response `model` still reflects the client-requested identifier while routing aliases are being separated from physical model selection. Honest requested/resolved/served model diagnostics and opt-in cross-model fallback belong to the routing policy work, not this wire adapter.
+- Response `model` reports the physical model used for the upstream request and can be refined by an upstream `modelVersion`. The requested alias, resolved target, selected physical model, route source, and disabled fallback policy are also exposed through `x-antigravity-*` response headers; account identity is intentionally not exposed.
 - HTTP error typing for upstream quota/access/routing failures is handled by the shared retry/error layer. The Chat validator only owns deterministic client-side 400 errors.
 
 ---

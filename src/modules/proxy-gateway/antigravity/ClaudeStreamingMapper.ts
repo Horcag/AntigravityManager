@@ -55,7 +55,10 @@ export class StreamingState {
 
   private parseErrorCount: number = 0;
 
-  constructor(public readonly signatureState?: StreamingSignatureState) {}
+  constructor(
+    public readonly signatureState?: StreamingSignatureState,
+    private readonly fallbackModel: string = '',
+  ) {}
 
   public emit(eventType: string, data: any): string {
     return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -87,7 +90,7 @@ export class StreamingState {
       type: 'message',
       role: 'assistant',
       content: [],
-      model: rawJson.modelVersion || '',
+      model: rawJson.modelVersion || this.fallbackModel,
       stop_reason: null,
       stop_sequence: null,
       usage: usage,

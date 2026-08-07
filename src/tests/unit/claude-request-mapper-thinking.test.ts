@@ -32,9 +32,14 @@ describe('ClaudeRequestMapper thinking support', () => {
   );
 
   it.each(['gemini-3.1-pro-high', 'gemini-3-pro-high'])(
-    'routes high-tier Gemini Pro variant %s through gemini-pro-agent',
+    'uses an explicitly selected physical route for high-tier Gemini Pro variant %s',
     (model) => {
-      const body = transformClaudeRequestIn(createThinkingRequest(model));
+      const body = transformClaudeRequestIn(
+        createThinkingRequest(model),
+        undefined,
+        undefined,
+        'gemini-pro-agent',
+      );
 
       expect(body.model).toBe('gemini-pro-agent');
       expect(body.request.generationConfig?.thinkingConfig).toEqual({

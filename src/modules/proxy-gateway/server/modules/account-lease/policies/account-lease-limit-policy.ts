@@ -65,7 +65,7 @@ export class AccountLeaseLimitPolicy {
     recoveredModels: readonly string[],
     isAccountRecovered: boolean,
   ): void {
-    this.rateLimitTracker.clearModelFamilies(accountId, recoveredModels);
+    this.rateLimitTracker.clearModels(accountId, recoveredModels);
     if (!isAccountRecovered) {
       return;
     }

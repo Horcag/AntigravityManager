@@ -1,13 +1,17 @@
-import type { AccountLeaseAccountStore, AccountLeaseUpstream } from '../interfaces/account-lease-adapters';
+import type {
+  AccountLeaseAccountStore,
+  AccountLeaseUpstream,
+} from '../interfaces/account-lease-adapters';
 import {
   buildAccountLeaseQuotaSnapshot,
   findEarliestQuotaResetTime,
   type AccountLeaseQuotaSnapshot,
 } from './account-lease-quota-policy';
-import { type AccountLeaseTokenData, normalizeModelId } from '../interfaces/account-lease-token-types';
+import {
+  type AccountLeaseTokenData,
+  normalizeModelId,
+} from '../interfaces/account-lease-token-types';
 import { RateLimitReason } from '../../shared/services/rate-limit-tracker.service';
-import { updateDynamicForwardingRules } from '../../../../antigravity/ModelMapping';
-import { getQuotaModelFamilyId } from '@/modules/cloud-account/utils/quota-model-families';
 
 interface AccountLeaseQuotaRefreshLogger {
   warn(message: string, error?: unknown): void;
@@ -31,22 +35,24 @@ interface AccountLeaseQuotaRefreshPolicyOptions {
   logger: AccountLeaseQuotaRefreshLogger;
 }
 
-interface ModelQuotaFamilyState {
+interface ModelQuotaState {
   percentage: number;
   resetTimes: string[];
 }
 
 export type AccountLeaseQuotaRefreshOutcome = 'locked' | 'recovered' | 'unavailable';
 
-function buildModelQuotaFamilyStates(
-  snapshot: AccountLeaseQuotaSnapshot,
-): Map<string, ModelQuotaFamilyState> {
-  const states = new Map<string, ModelQuotaFamilyState>();
+function normalizeQuotaModelId(model: string): string {
+  return (normalizeModelId(model) ?? model).toLowerCase();
+}
+
+function buildModelQuotaStates(snapshot: AccountLeaseQuotaSnapshot): Map<string, ModelQuotaState> {
+  const states = new Map<string, ModelQuotaState>();
 
   for (const [model, percentage] of Object.entries(snapshot.modelQuotas)) {
-    const family = getQuotaModelFamilyId(model);
-    const current = states.get(family);
-    states.set(family, {
+    const normalizedModel = normalizeQuotaModelId(model);
+    const current = states.get(normalizedModel);
+    states.set(normalizedModel, {
       percentage: current ? Math.min(current.percentage, percentage) : percentage,
       resetTimes: current?.resetTimes ?? [],
     });
@@ -57,8 +63,8 @@ function buildModelQuotaFamilyStates(
       continue;
     }
 
-    const family = getQuotaModelFamilyId(model);
-    const state = states.get(family);
+    const normalizedModel = normalizeQuotaModelId(model);
+    const state = states.get(normalizedModel);
     if (state) {
       state.resetTimes.push(resetTime);
       continue;
@@ -66,7 +72,7 @@ function buildModelQuotaFamilyStates(
 
     // Older cached snapshots may have reset metadata without percentages.
     // Preserve their fail-closed lock behavior until a complete live snapshot replaces them.
-    states.set(family, {
+    states.set(normalizedModel, {
       percentage: 0,
       resetTimes: [resetTime],
     });
@@ -75,34 +81,33 @@ function buildModelQuotaFamilyStates(
   return states;
 }
 
-function resolveQuotaFamily(
+function resolveQuotaModel(
   model: string,
   snapshot: AccountLeaseQuotaSnapshot,
-  familyStates: ReadonlyMap<string, ModelQuotaFamilyState>,
+  modelStates: ReadonlyMap<string, ModelQuotaState>,
 ): string {
-  let candidate = normalizeModelId(model) ?? model;
+  let candidate = normalizeQuotaModelId(model);
   const visited = new Set<string>();
 
-  while (!visited.has(candidate.toLowerCase())) {
-    visited.add(candidate.toLowerCase());
-    const family = getQuotaModelFamilyId(candidate);
-    if (familyStates.has(family)) {
-      return family;
+  while (!visited.has(candidate)) {
+    visited.add(candidate);
+    if (modelStates.has(candidate)) {
+      return candidate;
     }
 
     const forwardedEntry = Object.entries(snapshot.modelForwardingRules).find(
       ([oldModel]) => oldModel.toLowerCase() === candidate.toLowerCase(),
     );
     if (!forwardedEntry) {
-      return family;
+      return candidate;
     }
-    candidate = forwardedEntry[1];
+    candidate = normalizeQuotaModelId(forwardedEntry[1]);
   }
 
-  return getQuotaModelFamilyId(candidate);
+  return candidate;
 }
 
-function findEarliestFamilyResetTime(state: ModelQuotaFamilyState): string | null {
+function findEarliestModelResetTime(state: ModelQuotaState): string | null {
   if (state.resetTimes.length === 0) {
     return null;
   }
@@ -111,12 +116,6 @@ function findEarliestFamilyResetTime(state: ModelQuotaFamilyState): string | nul
 
 export class AccountLeaseQuotaRefreshPolicy {
   constructor(private readonly options: AccountLeaseQuotaRefreshPolicyOptions) {}
-
-  applyModelForwardingRules(snapshot: AccountLeaseQuotaSnapshot): void {
-    for (const [oldModel, newModel] of Object.entries(snapshot.modelForwardingRules)) {
-      updateDynamicForwardingRules(oldModel, newModel);
-    }
-  }
 
   setPreciseLockoutFromCachedQuota(
     accountId: string,
@@ -136,12 +135,12 @@ export class AccountLeaseQuotaRefreshPolicy {
         modelResetTimes: tokenData.model_reset_times,
         modelForwardingRules: tokenData.model_forwarding_rules,
       };
-      const familyStates = buildModelQuotaFamilyStates(snapshot);
-      const familyState = familyStates.get(resolveQuotaFamily(model, snapshot, familyStates));
-      if (!familyState || familyState.percentage > 0) {
+      const modelStates = buildModelQuotaStates(snapshot);
+      const modelState = modelStates.get(resolveQuotaModel(model, snapshot, modelStates));
+      if (!modelState || modelState.percentage > 0) {
         return false;
       }
-      resetTime = findEarliestFamilyResetTime(familyState);
+      resetTime = findEarliestModelResetTime(modelState);
     } else {
       resetTime = findEarliestQuotaResetTime(tokenData.model_reset_times);
     }
@@ -181,38 +180,32 @@ export class AccountLeaseQuotaRefreshPolicy {
         model_forwarding_rules: extractedState.modelForwardingRules,
       };
       this.options.getTokenCache().set(accountId, updatedTokenData);
-      this.applyModelForwardingRules(extractedState);
 
-      const familyStates = buildModelQuotaFamilyStates(extractedState);
-      const recoveredFamilies = new Set(
-        Array.from(familyStates.entries())
-          .filter(([, state]) => state.percentage > 0)
-          .map(([family]) => family),
-      );
+      const modelStates = buildModelQuotaStates(extractedState);
       const recoveredModels = new Set(
-        Object.keys(extractedState.modelQuotas).filter((candidate) =>
-          recoveredFamilies.has(getQuotaModelFamilyId(candidate)),
-        ),
+        Array.from(modelStates.entries())
+          .filter(([, state]) => state.percentage > 0)
+          .map(([modelId]) => modelId),
       );
       for (const oldModel of Object.keys(extractedState.modelForwardingRules)) {
-        const forwardedFamily = resolveQuotaFamily(oldModel, extractedState, familyStates);
-        if (recoveredFamilies.has(forwardedFamily)) {
-          recoveredModels.add(oldModel);
+        const forwardedModel = resolveQuotaModel(oldModel, extractedState, modelStates);
+        if ((modelStates.get(forwardedModel)?.percentage ?? 0) > 0) {
+          recoveredModels.add(normalizeQuotaModelId(oldModel));
         }
       }
 
       const normalizedModel = normalizeModelId(model);
-      const requestedFamily = normalizedModel
-        ? resolveQuotaFamily(normalizedModel, extractedState, familyStates)
+      const requestedModel = normalizedModel
+        ? resolveQuotaModel(normalizedModel, extractedState, modelStates)
         : undefined;
-      const requestedState = requestedFamily ? familyStates.get(requestedFamily) : undefined;
+      const requestedState = requestedModel ? modelStates.get(requestedModel) : undefined;
       if (normalizedModel && requestedState && requestedState.percentage > 0) {
-        recoveredModels.add(normalizedModel);
+        recoveredModels.add(normalizedModel.toLowerCase());
       }
 
       const isAccountRecovered =
-        familyStates.size > 0 &&
-        Array.from(familyStates.values()).every((state) => state.percentage > 0);
+        modelStates.size > 0 &&
+        Array.from(modelStates.values()).every((state) => state.percentage > 0);
       if (recoveredModels.size > 0 || isAccountRecovered) {
         this.options.clearRecoveredQuotaLocks(
           accountId,
@@ -226,7 +219,7 @@ export class AccountLeaseQuotaRefreshPolicy {
           return 'recovered';
         }
 
-        const resetTime = findEarliestFamilyResetTime(requestedState);
+        const resetTime = findEarliestModelResetTime(requestedState);
         if (!resetTime) {
           return 'unavailable';
         }

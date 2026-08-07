@@ -29,6 +29,10 @@ function seedTokens(service: AccountLeaseService): void {
         expires_in: 3600,
         expiry_timestamp: nowSec + 3600,
         project_id: 'project-1',
+        model_quotas: { 'gemini-2.5-flash': 100 },
+        model_limits: {},
+        model_reset_times: {},
+        model_forwarding_rules: {},
       },
     ],
     [
@@ -42,6 +46,10 @@ function seedTokens(service: AccountLeaseService): void {
         expires_in: 3600,
         expiry_timestamp: nowSec + 3600,
         project_id: 'project-2',
+        model_quotas: { 'gemini-2.5-flash': 100 },
+        model_limits: {},
+        model_reset_times: {},
+        model_forwarding_rules: {},
       },
     ],
   ]);

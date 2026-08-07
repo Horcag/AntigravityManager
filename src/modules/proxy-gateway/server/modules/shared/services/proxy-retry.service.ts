@@ -53,8 +53,10 @@ export class ProxyRetryService {
   private readonly logger: ProxyRetryLogger;
 
   constructor(
-    @Inject(AccountLeaseService) private readonly accountLeaseService: ProxyRetryAccountLeaseService,
-    @Inject(ModelAvailabilityService) private readonly modelAvailabilityStore: ModelAvailabilityService,
+    @Inject(AccountLeaseService)
+    private readonly accountLeaseService: ProxyRetryAccountLeaseService,
+    @Inject(ModelAvailabilityService)
+    private readonly modelAvailabilityStore: ModelAvailabilityService,
     @Optional() logger?: ProxyRetryLogger,
   ) {
     this.logger = logger ?? new Logger(ProxyRetryService.name);
@@ -138,7 +140,7 @@ export class ProxyRetryService {
     if (error instanceof UpstreamRequestError) {
       const status = error.status;
       const isImageModel = model.toLowerCase().includes('-image');
-      if (isImageModel && status === 404) {
+      if (status === 404) {
         this.modelAvailabilityStore.mark(accountId, model, 'model_not_supported', undefined, {
           status,
           message: error.body ?? error.message,

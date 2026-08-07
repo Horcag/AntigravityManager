@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { isEmpty, isNil, isNumber, isPlainObject, isString } from 'lodash-es';
 import { AccountLeaseService } from './modules/account-lease/account-lease.service';
 import { GeminiClient } from './modules/gemini/gemini-client.service';
@@ -76,6 +76,9 @@ import {
 } from './modules/shared/services/model-variant-request.service';
 import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
 import { BaseProxyService } from '@/modules/proxy-gateway/server/common/base-proxy.service';
+import { ModelRouteError } from './common/exceptions/model-route-exception';
+import { attachUpstreamBackpressure } from './common/stream-backpressure';
+import { attachModelRouteMetadata } from './common/model-route-metadata';
 
 type OpenAIOutputProtocol = 'chat-completions' | 'responses';
 
@@ -105,17 +108,60 @@ export class ProxyService extends BaseProxyService {
     );
   }
 
+  private createNoAvailableAccountError(model: string): ModelRouteError {
+    const catalogStatus = this.accountLeaseService.getModelCatalogStatus(model);
+    if (catalogStatus === 'unknown_model') {
+      return new ModelRouteError({
+        message: `The requested model '${model}' is not present in the discovered provider catalog`,
+        status: HttpStatus.NOT_FOUND,
+        code: 'model_not_found',
+      });
+    }
+    if (catalogStatus === 'catalog_unavailable') {
+      return new ModelRouteError({
+        message: `The provider model catalog is currently unavailable while resolving '${model}'`,
+        status: HttpStatus.SERVICE_UNAVAILABLE,
+        code: 'model_catalog_unavailable',
+      });
+    }
+    return new ModelRouteError({
+      message: `No account currently has capacity for model '${model}'`,
+      status: HttpStatus.TOO_MANY_REQUESTS,
+      code: 'model_capacity_exhausted',
+    });
+  }
+
+  private attachRouteMetadata<T extends object>(
+    value: T,
+    requestedModel: string,
+    resolvedModel: string,
+    servedModel: string | undefined,
+    routeSource: string,
+  ): T {
+    return attachModelRouteMetadata(value, {
+      requestedModel,
+      resolvedModel,
+      servedModel,
+      routeSource,
+    });
+  }
+
   // --- Anthropic Handlers ---
 
   async handleAnthropicMessages(
     request: AnthropicChatRequest,
   ): Promise<AnthropicChatResponse | Observable<string>> {
-    const appliedVariantRequest = applyAnthropicModelVariant(request);
+    const route = this.modelRoutingPolicy.resolveModelRoute(request.model);
+    const appliedVariantRequest = applyAnthropicModelVariant({
+      ...request,
+      model: route.targetModel,
+    });
     const routedRequest = appliedVariantRequest.request;
     const sessionKey = this.extractAnthropicSessionKey(request);
+    const deadlineAt = this.createRequestDeadline();
 
-    const targetModel = this.resolveTargetModel(routedRequest.model);
-    const extraHeaders = this.createModelSpecificHeaders(request.model);
+    const targetModel = routedRequest.model;
+    const extraHeaders = this.createModelSpecificHeaders(targetModel);
     this.logger.log(
       `Anthropic request received: model=${request.model}, mappedModel=${targetModel}, stream=${request.stream}`,
     );
@@ -126,11 +172,17 @@ export class ProxyService extends BaseProxyService {
     const retryState = this.createTokenRetryState();
 
     for (let i = 0; i < maxRetries; i++) {
-      await this.waitBeforeRetry(i, maxRetries, 'Anthropic', retryState.graceRetryToken !== null);
+      await this.waitBeforeRetry(
+        i,
+        maxRetries,
+        'Anthropic',
+        retryState.graceRetryToken !== null,
+        deadlineAt,
+      );
 
       const token = await this.selectRetryToken(retryState, targetModel, sessionKey);
       if (!token) {
-        throw new Error('No available accounts');
+        throw this.createNoAvailableAccountError(targetModel);
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -168,11 +220,19 @@ export class ProxyService extends BaseProxyService {
             token.token.access_token,
             token.token.upstream_proxy_url,
             extraHeaders,
+            deadlineAt,
           );
           this.markUpstreamSuccess(token.id, geminiBody.model);
-          return this.processAnthropicInternalStream(
-            stream,
-            this.createSignatureState(token.id, geminiBody.model),
+          return this.attachRouteMetadata(
+            this.processAnthropicInternalStream(
+              stream,
+              this.createSignatureState(token.id, geminiBody.model),
+              geminiBody.model,
+            ),
+            request.model,
+            targetModel,
+            geminiBody.model,
+            route.source,
           );
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -180,10 +240,19 @@ export class ProxyService extends BaseProxyService {
             token.token.access_token,
             token.token.upstream_proxy_url,
             extraHeaders,
+            deadlineAt,
           );
           this.markUpstreamSuccess(token.id, geminiBody.model);
-          return this.toAnthropicChatResponse(
+          const anthropicResponse = this.toAnthropicChatResponse(
             transformResponse(response, this.createSignatureState(token.id, geminiBody.model)),
+            geminiBody.model,
+          );
+          return this.attachRouteMetadata(
+            anthropicResponse,
+            request.model,
+            targetModel,
+            anthropicResponse.model,
+            route.source,
           );
         }
       } catch (error) {
@@ -212,11 +281,19 @@ export class ProxyService extends BaseProxyService {
                 token.token.access_token,
                 token.token.upstream_proxy_url,
                 extraHeaders,
+                deadlineAt,
               );
               this.markUpstreamSuccess(token.id, fallbackBody.model);
-              return this.processAnthropicInternalStream(
-                stream,
-                this.createSignatureState(token.id, fallbackBody.model),
+              return this.attachRouteMetadata(
+                this.processAnthropicInternalStream(
+                  stream,
+                  this.createSignatureState(token.id, fallbackBody.model),
+                  fallbackBody.model,
+                ),
+                request.model,
+                targetModel,
+                fallbackBody.model,
+                route.source,
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -224,97 +301,38 @@ export class ProxyService extends BaseProxyService {
                 token.token.access_token,
                 token.token.upstream_proxy_url,
                 extraHeaders,
+                deadlineAt,
               );
               this.markUpstreamSuccess(token.id, fallbackBody.model);
-              return this.toAnthropicChatResponse(
+              const anthropicResponse = this.toAnthropicChatResponse(
                 transformResponse(
                   response,
                   this.createSignatureState(token.id, fallbackBody.model),
                 ),
+                fallbackBody.model,
+              );
+              return this.attachRouteMetadata(
+                anthropicResponse,
+                request.model,
+                targetModel,
+                anthropicResponse.model,
+                route.source,
               );
             }
           } catch (fallbackErr) {
             lastError = fallbackErr;
           }
+        } else {
+          lastError = error;
         }
 
-        // Registered families must exhaust account rotation for their exact tier before
-        // the lease policy may rebind to another registered tier with a full parameter tuple.
-        if (
-          !appliedVariantRequest.variant &&
-          error instanceof Error &&
-          this.isQuotaExhaustedError(error.message)
-        ) {
-          this.logger.warn(
-            `Anthropic request hit quota exhaustion on mapped model, retrying with fallback model gemini-3-flash: ${error.message}`,
-          );
-          try {
-            const downgradedVariant = applyAnthropicModelVariant({
-              ...request,
-              model: 'gemini-3-flash',
-              output_config: {
-                effort: 'high',
-              },
-            });
-            const downgradedRequest = this.toClaudeRequest(downgradedVariant.request, sessionKey);
-            const requestUserAgent = await resolveRequestUserAgent();
-            const downgradedBody = transformClaudeRequestIn(
-              downgradedRequest,
-              token.token.project_id ?? '',
-              requestUserAgent,
-              downgradedVariant.request.model,
-              { accountId: token.id, store: this.signatureStore },
-            );
-            this.applyInternalGenerationConstraints(
-              downgradedBody,
-              downgradedVariant.request.model,
-              token.id,
-              downgradedVariant.variant ?? undefined,
-            );
-            if (request.stream) {
-              const stream = await this.geminiClient.streamGenerateInternal(
-                downgradedBody,
-                token.token.access_token,
-                token.token.upstream_proxy_url,
-                extraHeaders,
-              );
-              this.markUpstreamSuccess(token.id, downgradedBody.model);
-              return this.processAnthropicInternalStream(
-                stream,
-                this.createSignatureState(token.id, downgradedBody.model),
-              );
-            } else {
-              const response = await this.generateInternalWithStreamFallback(
-                downgradedBody,
-                token.token.access_token,
-                token.token.upstream_proxy_url,
-                extraHeaders,
-              );
-              this.markUpstreamSuccess(token.id, downgradedBody.model);
-              const transformed = this.toAnthropicChatResponse(
-                transformResponse(
-                  response,
-                  this.createSignatureState(token.id, downgradedBody.model),
-                ),
-              );
-              return {
-                ...transformed,
-                model: request.model,
-              };
-            }
-          } catch (downgradeErr) {
-            lastError = downgradeErr;
-          }
-        }
-
-        lastError = error;
         if (
           !appliedVariantRequest.variant &&
           (await this.prepareGraceRetry(retryState, token, lastError, 'Anthropic'))
         ) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, accountTargetModel, error);
+        await this.applyUpstreamPenalty(token.id, accountTargetModel, lastError);
       }
     }
     throw lastError || new Error('Request failed after retries');
@@ -323,158 +341,162 @@ export class ProxyService extends BaseProxyService {
   private processAnthropicInternalStream(
     upstreamStream: NodeJS.ReadableStream,
     signatureState: StreamingSignatureState,
+    fallbackModel: string,
   ): Observable<string> {
-    return new Observable<string>((subscriber) => {
-      const decoder = new TextDecoder();
-      let buffer = '';
+    return attachUpstreamBackpressure(
+      new Observable<string>((subscriber) => {
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-      const state = new StreamingState(signatureState);
-      const processor = new PartProcessor(state);
+        const state = new StreamingState(signatureState, fallbackModel);
+        const processor = new PartProcessor(state);
 
-      let lastFinishReason: string | undefined;
-      let lastUsageMetadata: UsageMetadata | undefined;
+        let lastFinishReason: string | undefined;
+        let lastUsageMetadata: UsageMetadata | undefined;
 
-      let receivedResponse = false;
-      let cleanedUp = false;
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
-        state
-          .emitTerminalError('timeout_error', 'The upstream stopped producing streaming data.')
-          .forEach((chunk) => subscriber.next(chunk));
-        cleanup(false);
-        subscriber.complete();
-      });
+        let receivedResponse = false;
+        let cleanedUp = false;
+        const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Claude-SSE', () => {
+          state
+            .emitTerminalError('timeout_error', 'The upstream stopped producing streaming data.')
+            .forEach((chunk) => subscriber.next(chunk));
+          cleanup(false);
+          subscriber.complete();
+        });
 
-      const cleanup = (destroy: boolean): void => {
-        if (cleanedUp) {
-          return;
-        }
-        cleanedUp = true;
-        idleTimer.clear();
-        upstreamStream.removeListener('data', onData);
-        upstreamStream.removeListener('end', onEnd);
-        upstreamStream.removeListener('error', onError);
-        if (destroy) {
-          idleTimer.dispose();
-        }
-      };
-
-      const onData = (chunk: Buffer): void => {
-        idleTimer.reset();
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) continue;
-          const dataStr = trimmed.slice(6);
-
-          const decoded = decodeInternalSseData(dataStr);
-          if (decoded.kind === 'ignored') {
-            continue;
+        const cleanup = (destroy: boolean): void => {
+          if (cleanedUp) {
+            return;
           }
-          if (decoded.kind === 'invalid') {
-            this.logger.error('Stream parse error: invalid v1internal SSE payload');
-            const errorChunks = state.handleParseError(dataStr);
-            errorChunks.forEach((c) => subscriber.next(c));
-            if (errorChunks.some((event) => event.startsWith('event: error'))) {
-              cleanup(true);
-              subscriber.complete();
-              return;
-            }
-            continue;
+          cleanedUp = true;
+          idleTimer.clear();
+          upstreamStream.removeListener('data', onData);
+          upstreamStream.removeListener('end', onEnd);
+          upstreamStream.removeListener('error', onError);
+          if (destroy) {
+            idleTimer.dispose();
           }
+        };
 
-          try {
-            const response = decoded.response;
-            receivedResponse = true;
+        const onData = (chunk: Buffer): void => {
+          idleTimer.reset();
+          buffer += decoder.decode(chunk, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
 
-            const startMsg = state.emitMessageStart(response);
-            if (startMsg) subscriber.next(startMsg);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+            const dataStr = trimmed.slice(6);
 
-            const candidate = response.candidates?.[0];
-            const parts = candidate?.content?.parts;
-
-            if (candidate?.finishReason) {
-              lastFinishReason = candidate.finishReason;
+            const decoded = decodeInternalSseData(dataStr);
+            if (decoded.kind === 'ignored') {
+              continue;
             }
-            if (response.usageMetadata) {
-              lastUsageMetadata = response.usageMetadata;
+            if (decoded.kind === 'invalid') {
+              this.logger.error('Stream parse error: invalid v1internal SSE payload');
+              const errorChunks = state.handleParseError(dataStr);
+              errorChunks.forEach((c) => subscriber.next(c));
+              if (errorChunks.some((event) => event.startsWith('event: error'))) {
+                cleanup(true);
+                subscriber.complete();
+                return;
+              }
+              continue;
             }
 
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                if (this.isGeminiPart(part)) {
-                  const chunks = processor.process(part);
-                  chunks.forEach((c) => subscriber.next(c));
+            try {
+              const response = decoded.response;
+              receivedResponse = true;
+
+              const startMsg = state.emitMessageStart(response);
+              if (startMsg) subscriber.next(startMsg);
+
+              const candidate = response.candidates?.[0];
+              const parts = candidate?.content?.parts;
+
+              if (candidate?.finishReason) {
+                lastFinishReason = candidate.finishReason;
+              }
+              if (response.usageMetadata) {
+                lastUsageMetadata = response.usageMetadata;
+              }
+
+              if (Array.isArray(parts)) {
+                for (const part of parts) {
+                  if (this.isGeminiPart(part)) {
+                    const chunks = processor.process(part);
+                    chunks.forEach((c) => subscriber.next(c));
+                  }
                 }
               }
-            }
 
-            // Reset error state on successful parse
-            state.resetErrorState();
-          } catch (e) {
-            if (
-              e instanceof ToolCallIdConflictError ||
-              e instanceof InvalidFunctionCallArgumentsError
-            ) {
-              state
-                .emitTerminalError('api_error', e.message)
-                .forEach((chunk) => subscriber.next(chunk));
-              cleanup(true);
-              subscriber.complete();
-              return;
-            }
-            this.logger.error('Stream parse error', e);
-            const errorChunks = state.handleParseError(dataStr);
-            errorChunks.forEach((c) => subscriber.next(c));
-            if (errorChunks.some((event) => event.startsWith('event: error'))) {
-              cleanup(true);
-              subscriber.complete();
-              return;
+              // Reset error state on successful parse
+              state.resetErrorState();
+            } catch (e) {
+              if (
+                e instanceof ToolCallIdConflictError ||
+                e instanceof InvalidFunctionCallArgumentsError
+              ) {
+                state
+                  .emitTerminalError('api_error', e.message)
+                  .forEach((chunk) => subscriber.next(chunk));
+                cleanup(true);
+                subscriber.complete();
+                return;
+              }
+              this.logger.error('Stream parse error', e);
+              const errorChunks = state.handleParseError(dataStr);
+              errorChunks.forEach((c) => subscriber.next(c));
+              if (errorChunks.some((event) => event.startsWith('event: error'))) {
+                cleanup(true);
+                subscriber.complete();
+                return;
+              }
             }
           }
-        }
-      };
+        };
 
-      const onEnd = (): void => {
-        if (!receivedResponse) {
-          this.logger.warn('Empty response stream detected');
+        const onEnd = (): void => {
+          if (!receivedResponse) {
+            this.logger.warn('Empty response stream detected');
+            cleanup(false);
+            subscriber.error(new Error('Empty response stream'));
+            return;
+          }
+
+          const finishChunks = state.emitFinish(lastFinishReason, lastUsageMetadata);
+          finishChunks.forEach((c) => subscriber.next(c));
           cleanup(false);
-          subscriber.error(new Error('Empty response stream'));
-          return;
-        }
+          subscriber.complete();
+        };
 
-        const finishChunks = state.emitFinish(lastFinishReason, lastUsageMetadata);
-        finishChunks.forEach((c) => subscriber.next(c));
-        cleanup(false);
-        subscriber.complete();
-      };
+        const onError = (err: unknown): void => {
+          const cleanError = err instanceof Error ? err : new Error(String(err));
+          const { type } = classifyStreamError(cleanError);
 
-      const onError = (err: unknown): void => {
-        const cleanError = err instanceof Error ? err : new Error(String(err));
-        const { type } = classifyStreamError(cleanError);
+          this.logger.error(`Stream error: ${type} - ${cleanError.message}`);
+          state
+            .emitTerminalError(
+              type === 'timeout_error' ? 'timeout_error' : 'api_error',
+              cleanError.message,
+            )
+            .forEach((chunk) => subscriber.next(chunk));
+          cleanup(false);
+          subscriber.complete();
+        };
 
-        this.logger.error(`Stream error: ${type} - ${cleanError.message}`);
-        state
-          .emitTerminalError(
-            type === 'timeout_error' ? 'timeout_error' : 'api_error',
-            cleanError.message,
-          )
-          .forEach((chunk) => subscriber.next(chunk));
-        cleanup(false);
-        subscriber.complete();
-      };
+        upstreamStream.on('data', onData);
+        upstreamStream.on('end', onEnd);
+        upstreamStream.on('error', onError);
+        idleTimer.reset();
 
-      upstreamStream.on('data', onData);
-      upstreamStream.on('end', onEnd);
-      upstreamStream.on('error', onError);
-      idleTimer.reset();
-
-      return () => {
-        cleanup(true);
-      };
-    });
+        return () => {
+          cleanup(true);
+        };
+      }),
+      upstreamStream,
+    );
   }
 
   // --- OpenAI / Universal Handlers ---
@@ -483,7 +505,9 @@ export class ProxyService extends BaseProxyService {
     request: GeminiRequest,
   ): Promise<GeminiResponse> {
     const normalizedModel = this.normalizeGeminiModel(model);
-    const targetModel = this.resolveTargetModel(normalizedModel);
+    const deadlineAt = this.createRequestDeadline();
+    const route = this.modelRoutingPolicy.resolveModelRoute(normalizedModel);
+    const targetModel = route.targetModel;
     const extraHeaders = this.createModelSpecificHeaders(normalizedModel);
     this.logger.log(
       `Gemini generate request received: model=${normalizedModel}, mappedModel=${targetModel}`,
@@ -494,11 +518,17 @@ export class ProxyService extends BaseProxyService {
     const retryState = this.createTokenRetryState();
 
     for (let i = 0; i < maxRetries; i++) {
-      await this.waitBeforeRetry(i, maxRetries, 'Gemini', retryState.graceRetryToken !== null);
+      await this.waitBeforeRetry(
+        i,
+        maxRetries,
+        'Gemini',
+        retryState.graceRetryToken !== null,
+        deadlineAt,
+      );
 
       const token = await this.selectRetryToken(retryState, targetModel);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw this.createNoAvailableAccountError(targetModel);
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -521,10 +551,23 @@ export class ProxyService extends BaseProxyService {
           token.token.access_token,
           token.token.upstream_proxy_url,
           extraHeaders,
+          deadlineAt,
         );
 
         this.markUpstreamSuccess(token.id, effectiveTargetModel);
-        return this.normalizeGeminiGenerateResponse(response);
+        const normalizedResponse = this.normalizeGeminiGenerateResponse({
+          ...response,
+          modelVersion: response.modelVersion ?? effectiveTargetModel,
+        });
+        return this.attachRouteMetadata(
+          normalizedResponse,
+          model,
+          targetModel,
+          isString(normalizedResponse.modelVersion)
+            ? normalizedResponse.modelVersion
+            : effectiveTargetModel,
+          route.source,
+        );
       } catch (err) {
         if (err instanceof Error && this.isProjectContextError(err.message)) {
           this.logger.warn(
@@ -545,9 +588,22 @@ export class ProxyService extends BaseProxyService {
               token.token.access_token,
               token.token.upstream_proxy_url,
               extraHeaders,
+              deadlineAt,
             );
             this.markUpstreamSuccess(token.id, effectiveTargetModel);
-            return this.normalizeGeminiGenerateResponse(response);
+            const normalizedResponse = this.normalizeGeminiGenerateResponse({
+              ...response,
+              modelVersion: response.modelVersion ?? effectiveTargetModel,
+            });
+            return this.attachRouteMetadata(
+              normalizedResponse,
+              model,
+              targetModel,
+              isString(normalizedResponse.modelVersion)
+                ? normalizedResponse.modelVersion
+                : effectiveTargetModel,
+              route.source,
+            );
           } catch (fallbackErr) {
             lastError = fallbackErr;
           }
@@ -570,7 +626,9 @@ export class ProxyService extends BaseProxyService {
     request: GeminiRequest,
   ): Promise<Observable<string>> {
     const normalizedModel = this.normalizeGeminiModel(model);
-    const targetModel = this.resolveTargetModel(normalizedModel);
+    const deadlineAt = this.createRequestDeadline();
+    const route = this.modelRoutingPolicy.resolveModelRoute(normalizedModel);
+    const targetModel = route.targetModel;
     const extraHeaders = this.createModelSpecificHeaders(normalizedModel);
     this.logger.log(
       `Gemini stream request received: model=${normalizedModel}, mappedModel=${targetModel}`,
@@ -586,11 +644,12 @@ export class ProxyService extends BaseProxyService {
         maxRetries,
         'Gemini stream',
         retryState.graceRetryToken !== null,
+        deadlineAt,
       );
 
       const token = await this.selectRetryToken(retryState, targetModel);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw this.createNoAvailableAccountError(targetModel);
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -613,9 +672,16 @@ export class ProxyService extends BaseProxyService {
           token.token.access_token,
           token.token.upstream_proxy_url,
           extraHeaders,
+          deadlineAt,
         );
         this.markUpstreamSuccess(token.id, effectiveTargetModel);
-        return this.passthroughSseStream(stream);
+        return this.attachRouteMetadata(
+          this.passthroughSseStream(stream),
+          model,
+          targetModel,
+          effectiveTargetModel,
+          route.source,
+        );
       } catch (err) {
         if (err instanceof Error && this.isProjectContextError(err.message)) {
           this.logger.warn(
@@ -636,9 +702,16 @@ export class ProxyService extends BaseProxyService {
               token.token.access_token,
               token.token.upstream_proxy_url,
               extraHeaders,
+              deadlineAt,
             );
             this.markUpstreamSuccess(token.id, effectiveTargetModel);
-            return this.passthroughSseStream(stream);
+            return this.attachRouteMetadata(
+              this.passthroughSseStream(stream),
+              model,
+              targetModel,
+              effectiveTargetModel,
+              route.source,
+            );
           } catch (fallbackErr) {
             lastError = fallbackErr;
           }
@@ -700,13 +773,20 @@ export class ProxyService extends BaseProxyService {
     request: OpenAIChatRequest,
     outputProtocol: OpenAIOutputProtocol = 'chat-completions',
   ): Promise<OpenAIChatResponse | Observable<string>> {
-    const appliedVariantRequest = applyOpenAIModelVariant(request);
+    const route = this.modelRoutingPolicy.resolveModelRoute(request.model);
+    const appliedVariantRequest = applyOpenAIModelVariant({
+      ...request,
+      model: route.targetModel,
+    });
     const routedRequest = appliedVariantRequest.request;
     const sessionKey = this.extractOpenAISessionKey(request);
     const clientToolNames = this.extractOpenAIToolNames(routedRequest.tools);
+    const deadlineAt = this.createRequestDeadline();
 
-    const targetModel = this.resolveTargetModel(routedRequest.model);
-    const extraHeaders = this.createModelSpecificHeaders(request.model);
+    const targetModel = routedRequest.model;
+    const attachRoute = <T extends object>(value: T, servedModel: string | undefined): T =>
+      this.attachRouteMetadata(value, request.model, targetModel, servedModel, route.source);
+    const extraHeaders = this.createModelSpecificHeaders(targetModel);
     this.logger.log(
       `OpenAI-compatible request received: model=${request.model}, mappedModel=${targetModel}, stream=${request.stream}`,
     );
@@ -722,12 +802,13 @@ export class ProxyService extends BaseProxyService {
         maxRetries,
         'OpenAI-compatible',
         retryState.graceRetryToken !== null,
+        deadlineAt,
       );
 
       // 1. Get Token
       const token = await this.selectRetryToken(retryState, targetModel, sessionKey);
       if (!token) {
-        throw new Error('No available accounts (all exhausted or rate limited)');
+        throw this.createNoAvailableAccountError(targetModel);
       }
       const effectiveTargetModel = this.accountLeaseService.resolveDynamicModelForAccount(
         token.id,
@@ -768,15 +849,19 @@ export class ProxyService extends BaseProxyService {
               token.token.access_token,
               token.token.upstream_proxy_url,
               extraHeaders,
+              deadlineAt,
             );
             this.markUpstreamSuccess(token.id, geminiBody.model);
-            return this.createOpenAIProtocolStream(
-              stream,
-              request.model,
-              outputProtocol,
-              clientToolNames,
-              this.createSignatureState(token.id, geminiBody.model),
-              this.createOpenAIStreamContract(request),
+            return attachRoute(
+              this.createOpenAIProtocolStream(
+                stream,
+                geminiBody.model,
+                outputProtocol,
+                clientToolNames,
+                this.createSignatureState(token.id, geminiBody.model),
+                this.createOpenAIStreamContract(request),
+              ),
+              geminiBody.model,
             );
           } catch (streamError) {
             this.logger.warn(
@@ -790,6 +875,7 @@ export class ProxyService extends BaseProxyService {
               token.token.access_token,
               token.token.upstream_proxy_url,
               extraHeaders,
+              deadlineAt,
             );
             this.markUpstreamSuccess(token.id, geminiBody.model);
             this.logger.log(
@@ -797,18 +883,20 @@ export class ProxyService extends BaseProxyService {
             );
             const openaiResponse = this.convertGeminiToOpenAIResponse(
               response,
-              request.model,
+              isString(response.modelVersion) ? response.modelVersion : geminiBody.model,
               clientToolNames,
               this.createSignatureState(token.id, geminiBody.model),
               this.resolveOpenAIServiceTier(request.service_tier),
               request.top_logprobs,
             );
-            return outputProtocol === 'responses'
-              ? this.createSyntheticResponsesStream(openaiResponse, clientToolNames)
-              : this.createSyntheticOpenAIStream(
-                  openaiResponse,
-                  this.createOpenAIStreamContract(request),
-                );
+            const syntheticStream =
+              outputProtocol === 'responses'
+                ? this.createSyntheticResponsesStream(openaiResponse, clientToolNames)
+                : this.createSyntheticOpenAIStream(
+                    openaiResponse,
+                    this.createOpenAIStreamContract(request),
+                  );
+            return attachRoute(syntheticStream, openaiResponse.model);
           }
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -816,19 +904,21 @@ export class ProxyService extends BaseProxyService {
             token.token.access_token,
             token.token.upstream_proxy_url,
             extraHeaders,
+            deadlineAt,
           );
           this.markUpstreamSuccess(token.id, geminiBody.model);
           this.logger.log(
             `Upstream response snippet (non-stream): ${safeStringifyPacket(response).substring(0, 500)}`,
           );
-          return this.convertGeminiToOpenAIResponse(
+          const openaiResponse = this.convertGeminiToOpenAIResponse(
             response,
-            request.model,
+            isString(response.modelVersion) ? response.modelVersion : geminiBody.model,
             clientToolNames,
             this.createSignatureState(token.id, geminiBody.model),
             this.resolveOpenAIServiceTier(request.service_tier),
             request.top_logprobs,
           );
+          return attachRoute(openaiResponse, openaiResponse.model);
         }
       } catch (err) {
         if (err instanceof Error && this.isProjectContextError(err.message)) {
@@ -857,15 +947,19 @@ export class ProxyService extends BaseProxyService {
                 token.token.access_token,
                 token.token.upstream_proxy_url,
                 extraHeaders,
+                deadlineAt,
               );
               this.markUpstreamSuccess(token.id, fallbackBody.model);
-              return this.createOpenAIProtocolStream(
-                stream,
-                request.model,
-                outputProtocol,
-                clientToolNames,
-                this.createSignatureState(token.id, fallbackBody.model),
-                this.createOpenAIStreamContract(request),
+              return attachRoute(
+                this.createOpenAIProtocolStream(
+                  stream,
+                  fallbackBody.model,
+                  outputProtocol,
+                  clientToolNames,
+                  this.createSignatureState(token.id, fallbackBody.model),
+                  this.createOpenAIStreamContract(request),
+                ),
+                fallbackBody.model,
               );
             }
 
@@ -874,16 +968,18 @@ export class ProxyService extends BaseProxyService {
               token.token.access_token,
               token.token.upstream_proxy_url,
               extraHeaders,
+              deadlineAt,
             );
             this.markUpstreamSuccess(token.id, fallbackBody.model);
-            return this.convertGeminiToOpenAIResponse(
+            const openaiResponse = this.convertGeminiToOpenAIResponse(
               response,
-              request.model,
+              isString(response.modelVersion) ? response.modelVersion : fallbackBody.model,
               clientToolNames,
               this.createSignatureState(token.id, fallbackBody.model),
               this.resolveOpenAIServiceTier(request.service_tier),
               request.top_logprobs,
             );
+            return attachRoute(openaiResponse, openaiResponse.model);
           } catch (fallbackErr) {
             lastError = fallbackErr;
           }
@@ -946,167 +1042,184 @@ export class ProxyService extends BaseProxyService {
     clientToolNames?: ReadonlySet<string>,
     signatureState?: StreamingSignatureState,
   ): Observable<string> {
-    return new Observable<string>((subscriber) => {
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let settled = false;
-      const mapper = new OpenAIResponsesStreamingMapper({
-        clientToolNames,
-        model,
-        responseId: `resp_${uuidv4()}`,
-        signatureState,
-      });
-      let heartbeatTimer: NodeJS.Timeout | undefined;
-      let idleTimer: { clear(): void; dispose(): void; reset(): void };
+    return attachUpstreamBackpressure(
+      new Observable<string>((subscriber) => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let settled = false;
+        const mapper = new OpenAIResponsesStreamingMapper({
+          clientToolNames,
+          model,
+          responseId: `resp_${uuidv4()}`,
+          signatureState,
+        });
+        let heartbeatTimer: NodeJS.Timeout | undefined;
+        let idleTimer: { clear(): void; dispose(): void; reset(): void };
+        let started = false;
 
-      const clearHeartbeat = (): void => {
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = undefined;
-        }
-      };
+        const ensureStarted = (): void => {
+          if (started) {
+            return;
+          }
+          started = true;
+          subscriber.next(mapper.createResponseCreatedEvent());
+          subscriber.next(mapper.createResponseInProgressEvent());
+        };
 
-      const complete = (finishReason?: string): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        idleTimer.clear();
-        clearHeartbeat();
-        for (const event of mapper.complete(finishReason)) {
-          subscriber.next(event);
-        }
-        subscriber.complete();
-      };
+        const clearHeartbeat = (): void => {
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+          }
+        };
 
-      const fail = (error: unknown): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        idleTimer.clear();
-        clearHeartbeat();
-        for (const event of mapper.fail(error)) {
-          subscriber.next(event);
-        }
-        subscriber.complete();
-      };
+        const complete = (finishReason?: string): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          ensureStarted();
+          idleTimer.clear();
+          clearHeartbeat();
+          for (const event of mapper.complete(finishReason)) {
+            subscriber.next(event);
+          }
+          subscriber.complete();
+        };
 
-      const processLine = (line: string): void => {
-        if (settled) {
-          return;
-        }
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) {
-          return;
-        }
+        const fail = (error: unknown): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          ensureStarted();
+          idleTimer.clear();
+          clearHeartbeat();
+          for (const event of mapper.fail(error)) {
+            subscriber.next(event);
+          }
+          subscriber.complete();
+        };
 
-        const dataString = trimmed.slice(6);
-        try {
-          const decoded = decodeInternalSseData(dataString);
-          if (decoded.kind !== 'response') {
+        const processLine = (line: string): void => {
+          if (settled) {
+            return;
+          }
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) {
             return;
           }
 
-          const responsePayload = decoded.response;
-          const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
-          if (usageMetadata) {
-            mapper.setUsage(
-              toOpenAIResponsesUsage(toOpenAIUsageFromGeminiUsageMetadata(usageMetadata)),
-            );
-          }
-          const candidates = responsePayload.candidates;
-          if (!Array.isArray(candidates)) {
-            return;
-          }
+          const dataString = trimmed.slice(6);
+          try {
+            const decoded = decodeInternalSseData(dataString);
+            if (decoded.kind !== 'response') {
+              return;
+            }
 
-          const candidate = this.toUnknownRecord(candidates[0]);
-          const content = this.toUnknownRecord(candidate?.content);
-          const parts = content?.parts;
-          if (Array.isArray(parts)) {
-            for (const part of parts) {
-              const normalizedPart = this.toResponsesStreamPart(part);
-              if (!normalizedPart) {
-                continue;
+            const responsePayload = decoded.response;
+            if (isString(responsePayload.modelVersion) && responsePayload.modelVersion.trim()) {
+              mapper.setModel(responsePayload.modelVersion);
+            }
+            ensureStarted();
+            const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
+            if (usageMetadata) {
+              mapper.setUsage(
+                toOpenAIResponsesUsage(toOpenAIUsageFromGeminiUsageMetadata(usageMetadata)),
+              );
+            }
+            const candidates = responsePayload.candidates;
+            if (!Array.isArray(candidates)) {
+              return;
+            }
+
+            const candidate = this.toUnknownRecord(candidates[0]);
+            const content = this.toUnknownRecord(candidate?.content);
+            const parts = content?.parts;
+            if (Array.isArray(parts)) {
+              for (const part of parts) {
+                const normalizedPart = this.toResponsesStreamPart(part);
+                if (!normalizedPart) {
+                  continue;
+                }
+                for (const event of mapper.processPart(normalizedPart)) {
+                  subscriber.next(event);
+                }
               }
-              for (const event of mapper.processPart(normalizedPart)) {
+            }
+
+            const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
+            if (grounding) {
+              for (const event of mapper.processGrounding(grounding)) {
                 subscriber.next(event);
               }
             }
-          }
 
-          const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
-          if (grounding) {
-            for (const event of mapper.processGrounding(grounding)) {
-              subscriber.next(event);
+            if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
+              complete(candidate.finishReason);
             }
+          } catch (error) {
+            if (
+              error instanceof ToolCallIdConflictError ||
+              error instanceof InvalidFunctionCallArgumentsError
+            ) {
+              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+              fail(error);
+            }
+            // Ignore malformed upstream keepalive/data lines that are not contract failures.
           }
+        };
 
-          if (isString(candidate?.finishReason) && candidate.finishReason.length > 0) {
-            complete(candidate.finishReason);
+        heartbeatTimer = setInterval(() => {
+          if (!settled) {
+            subscriber.next(': ping\n\n');
           }
-        } catch (error) {
-          if (
-            error instanceof ToolCallIdConflictError ||
-            error instanceof InvalidFunctionCallArgumentsError
-          ) {
-            (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-            fail(error);
-          }
-          // Ignore malformed upstream keepalive/data lines that are not contract failures.
-        }
-      };
-
-      subscriber.next(mapper.createResponseCreatedEvent());
-      subscriber.next(mapper.createResponseInProgressEvent());
-      heartbeatTimer = setInterval(() => {
-        if (!settled) {
-          subscriber.next(': ping\n\n');
-        }
-      }, 15_000);
-      idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-Responses-SSE', () =>
-        fail(new Error('OpenAI Responses upstream stream idle timeout')),
-      );
-      idleTimer.reset();
-
-      upstreamStream.on('data', (chunk: Buffer) => {
-        if (settled) {
-          return;
-        }
+        }, 15_000);
+        idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-Responses-SSE', () =>
+          fail(new Error('OpenAI Responses upstream stream idle timeout')),
+        );
         idleTimer.reset();
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          processLine(line);
-        }
-      });
 
-      upstreamStream.on('end', () => {
-        if (settled) {
-          return;
-        }
-        buffer += decoder.decode();
-        if (buffer.trim().length > 0) {
-          processLine(buffer);
-        }
-        if (!settled) {
-          fail(new Error('upstream stream ended without a finish reason'));
-        }
-      });
+        upstreamStream.on('data', (chunk: Buffer) => {
+          if (settled) {
+            return;
+          }
+          idleTimer.reset();
+          buffer += decoder.decode(chunk, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            processLine(line);
+          }
+        });
 
-      upstreamStream.on('error', (error: unknown) => {
-        const cleanError =
-          error instanceof Error ? new Error(error.message) : new Error(String(error));
-        this.logger.error(`OpenAI Responses stream error: ${cleanError.message}`);
-        fail(cleanError);
-      });
+        upstreamStream.on('end', () => {
+          if (settled) {
+            return;
+          }
+          buffer += decoder.decode();
+          if (buffer.trim().length > 0) {
+            processLine(buffer);
+          }
+          if (!settled) {
+            fail(new Error('upstream stream ended without a finish reason'));
+          }
+        });
 
-      return () => {
-        clearHeartbeat();
-        idleTimer.dispose();
-      };
-    });
+        upstreamStream.on('error', (error: unknown) => {
+          const cleanError =
+            error instanceof Error ? new Error(error.message) : new Error(String(error));
+          this.logger.error(`OpenAI Responses stream error: ${cleanError.message}`);
+          fail(cleanError);
+        });
+
+        return () => {
+          clearHeartbeat();
+          idleTimer.dispose();
+        };
+      }),
+      upstreamStream,
+    );
   }
 
   private toResponsesStreamPart(value: unknown): GeminiResponsesStreamPart | null {
@@ -1237,402 +1350,419 @@ export class ProxyService extends BaseProxyService {
     signatureState?: StreamingSignatureState,
     streamContract: OpenAIStreamContract = { expectedChoices: 1, includeUsage: false },
   ): Observable<string> {
-    return new Observable<string>((subscriber) => {
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let hasEmittedChunk = false;
-      let settled = false;
-      let lastUsage: OpenAIUsage | undefined;
-      const observedChoiceIndexes = new Set<number>();
-      const roleEmittedIndexes = new Set<number>();
-      const finishedChoiceIndexes = new Set<number>();
-      const toolCallIndexes = new Map<number, number>();
-      const emittedToolCallCounts = new Map<number, number>();
-      const latestResponseSignatures = new Map<number, string>();
-      const toolCallIntegrityByChoice = new Map<number, ToolCallIdIntegrityTracker>();
-      let heartbeatTimer: NodeJS.Timeout | undefined;
+    return attachUpstreamBackpressure(
+      new Observable<string>((subscriber) => {
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let hasEmittedChunk = false;
+        let settled = false;
+        let servedModel = model;
+        let lastUsage: OpenAIUsage | undefined;
+        const observedChoiceIndexes = new Set<number>();
+        const roleEmittedIndexes = new Set<number>();
+        const finishedChoiceIndexes = new Set<number>();
+        const toolCallIndexes = new Map<number, number>();
+        const emittedToolCallCounts = new Map<number, number>();
+        const latestResponseSignatures = new Map<number, string>();
+        const toolCallIntegrityByChoice = new Map<number, ToolCallIdIntegrityTracker>();
+        let heartbeatTimer: NodeJS.Timeout | undefined;
 
-      const streamId = `chatcmpl-${uuidv4()}`;
-      const created = Math.floor(Date.now() / 1000);
-      if (this.shouldEmitCloudCodeMeta()) {
-        subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
-      }
-
-      const pushChunk = (payload: Record<string, unknown>): void => {
-        if (settled) {
-          return;
-        }
-        hasEmittedChunk = true;
-        subscriber.next(`data: ${JSON.stringify(payload)}\n\n`);
-      };
-
-      const withOptionalUsage = (payload: Record<string, unknown>): Record<string, unknown> => {
-        const withTier = streamContract.serviceTier
-          ? { ...payload, service_tier: streamContract.serviceTier }
-          : payload;
-        return streamContract.includeUsage ? { ...withTier, usage: null } : withTier;
-      };
-
-      const emitRoleIfNeeded = (choiceIndex: number): void => {
-        observedChoiceIndexes.add(choiceIndex);
-        if (roleEmittedIndexes.has(choiceIndex)) {
-          return;
-        }
-        roleEmittedIndexes.add(choiceIndex);
-        pushChunk(
-          withOptionalUsage({
-            id: streamId,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [
-              {
-                index: choiceIndex,
-                delta: { role: 'assistant', content: '' },
-                finish_reason: null,
-              },
-            ],
-          }),
-        );
-      };
-
-      const requiredChoiceCount = (): number =>
-        Math.max(streamContract.expectedChoices, observedChoiceIndexes.size);
-
-      const clearHeartbeat = (): void => {
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = undefined;
-        }
-      };
-
-      const finalizeSuccess = (): void => {
-        if (settled) {
-          return;
-        }
-        idleTimer.clear();
-        clearHeartbeat();
-        if (streamContract.includeUsage) {
-          pushChunk({
-            id: streamId,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [],
-            usage: lastUsage ?? null,
-            ...(streamContract.serviceTier ? { service_tier: streamContract.serviceTier } : {}),
-          });
-        }
-        subscriber.next('data: [DONE]\n\n');
-        settled = true;
-        subscriber.complete();
-      };
-
-      const failStream = (error: Error): void => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        idleTimer.clear();
-        clearHeartbeat();
-        subscriber.error(error);
-      };
-
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
-        failStream(new Error('OpenAI-compatible upstream stream idle timeout'));
-      });
-
-      idleTimer.reset();
-      heartbeatTimer = setInterval(() => {
-        if (!settled) {
-          subscriber.next(': ping\n\n');
-        }
-      }, 15_000);
-
-      const processLine = (line: string): void => {
-        if (settled) {
-          return;
-        }
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) {
-          return;
+        const streamId = `chatcmpl-${uuidv4()}`;
+        const created = Math.floor(Date.now() / 1000);
+        if (this.shouldEmitCloudCodeMeta()) {
+          subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
         }
 
-        try {
-          const decoded = decodeInternalSseData(trimmed.slice(6));
-          if (decoded.kind !== 'response') {
+        const pushChunk = (payload: Record<string, unknown>): void => {
+          if (settled) {
+            return;
+          }
+          hasEmittedChunk = true;
+          subscriber.next(`data: ${JSON.stringify(payload)}\n\n`);
+        };
+
+        const withOptionalUsage = (payload: Record<string, unknown>): Record<string, unknown> => {
+          const withTier = streamContract.serviceTier
+            ? { ...payload, service_tier: streamContract.serviceTier }
+            : payload;
+          return streamContract.includeUsage ? { ...withTier, usage: null } : withTier;
+        };
+
+        const emitRoleIfNeeded = (choiceIndex: number): void => {
+          observedChoiceIndexes.add(choiceIndex);
+          if (roleEmittedIndexes.has(choiceIndex)) {
+            return;
+          }
+          roleEmittedIndexes.add(choiceIndex);
+          pushChunk(
+            withOptionalUsage({
+              id: streamId,
+              object: 'chat.completion.chunk',
+              created,
+              model: servedModel,
+              choices: [
+                {
+                  index: choiceIndex,
+                  delta: { role: 'assistant', content: '' },
+                  finish_reason: null,
+                },
+              ],
+            }),
+          );
+        };
+
+        const requiredChoiceCount = (): number =>
+          Math.max(streamContract.expectedChoices, observedChoiceIndexes.size);
+
+        const clearHeartbeat = (): void => {
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = undefined;
+          }
+        };
+
+        const finalizeSuccess = (): void => {
+          if (settled) {
+            return;
+          }
+          idleTimer.clear();
+          clearHeartbeat();
+          if (streamContract.includeUsage) {
+            pushChunk({
+              id: streamId,
+              object: 'chat.completion.chunk',
+              created,
+              model: servedModel,
+              choices: [],
+              usage: lastUsage ?? null,
+              ...(streamContract.serviceTier ? { service_tier: streamContract.serviceTier } : {}),
+            });
+          }
+          subscriber.next('data: [DONE]\n\n');
+          settled = true;
+          subscriber.complete();
+        };
+
+        const failStream = (error: Error): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          idleTimer.clear();
+          clearHeartbeat();
+          subscriber.error(error);
+        };
+
+        const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
+          failStream(new Error('OpenAI-compatible upstream stream idle timeout'));
+        });
+
+        idleTimer.reset();
+        heartbeatTimer = setInterval(() => {
+          if (!settled) {
+            subscriber.next(': ping\n\n');
+          }
+        }, 15_000);
+
+        const processLine = (line: string): void => {
+          if (settled) {
+            return;
+          }
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) {
             return;
           }
 
-          const responsePayload = decoded.response;
-          const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
-          if (usageMetadata) {
-            lastUsage = toOpenAIUsageFromGeminiUsageMetadata(usageMetadata);
-          }
-
-          const candidates = Array.isArray(responsePayload.candidates)
-            ? responsePayload.candidates
-            : [];
-          for (const [fallbackCandidateIndex, candidateValue] of candidates.entries()) {
-            const candidate = this.toUnknownRecord(candidateValue);
-            if (!candidate) {
-              continue;
+          try {
+            const decoded = decodeInternalSseData(trimmed.slice(6));
+            if (decoded.kind !== 'response') {
+              return;
             }
-            const candidateIndex = isNumber(candidate.index)
-              ? candidate.index
-              : fallbackCandidateIndex;
-            emitRoleIfNeeded(candidateIndex);
 
-            const content = this.toUnknownRecord(candidate.content);
-            const parts = Array.isArray(content?.parts) ? content.parts : [];
-            let reasoningContent = '';
-            let responseContent = '';
+            const responsePayload = decoded.response;
+            if (isString(responsePayload.modelVersion) && responsePayload.modelVersion.trim()) {
+              servedModel = responsePayload.modelVersion.trim();
+            }
+            const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
+            if (usageMetadata) {
+              lastUsage = toOpenAIUsageFromGeminiUsageMetadata(usageMetadata);
+            }
 
-            for (const partValue of parts) {
-              const part = this.toUnknownRecord(partValue);
-              if (!part) {
+            const candidates = Array.isArray(responsePayload.candidates)
+              ? responsePayload.candidates
+              : [];
+            for (const [fallbackCandidateIndex, candidateValue] of candidates.entries()) {
+              const candidate = this.toUnknownRecord(candidateValue);
+              if (!candidate) {
                 continue;
               }
+              const candidateIndex = isNumber(candidate.index)
+                ? candidate.index
+                : fallbackCandidateIndex;
+              emitRoleIfNeeded(candidateIndex);
 
-              if (isString(part.text)) {
-                const cleanText = part.text
-                  .replaceAll('<think>\n', '')
-                  .replaceAll('<think>', '')
-                  .replaceAll('\n</think>', '')
-                  .replaceAll('</think>', '');
-                if (part.thought === true) {
-                  reasoningContent += cleanText;
-                } else {
-                  responseContent += cleanText;
+              const content = this.toUnknownRecord(candidate.content);
+              const parts = Array.isArray(content?.parts) ? content.parts : [];
+              let reasoningContent = '';
+              let responseContent = '';
+
+              for (const partValue of parts) {
+                const part = this.toUnknownRecord(partValue);
+                if (!part) {
+                  continue;
                 }
-              }
 
-              const rawSignature = isString(part.thoughtSignature)
-                ? part.thoughtSignature
-                : isString(part.thought_signature)
-                  ? part.thought_signature
-                  : undefined;
-              const signature = decodeSignature(rawSignature);
-              if (signature) {
-                latestResponseSignatures.set(candidateIndex, signature);
-              }
+                if (isString(part.text)) {
+                  const cleanText = part.text
+                    .replaceAll('<think>\n', '')
+                    .replaceAll('<think>', '')
+                    .replaceAll('\n</think>', '')
+                    .replaceAll('</think>', '');
+                  if (part.thought === true) {
+                    reasoningContent += cleanText;
+                  } else {
+                    responseContent += cleanText;
+                  }
+                }
 
-              const functionCall = this.toUnknownRecord(part.functionCall);
-              if (functionCall && isString(functionCall.name)) {
-                const rawArguments = normalizeFunctionCallArgs(functionCall);
-                const explicitToolCallId = isString(functionCall.id) ? functionCall.id : undefined;
-                const integrityTracker =
-                  toolCallIntegrityByChoice.get(candidateIndex) ?? new ToolCallIdIntegrityTracker();
-                toolCallIntegrityByChoice.set(candidateIndex, integrityTracker);
-                const integrity = integrityTracker.record(
-                  explicitToolCallId,
-                  functionCall.name,
-                  rawArguments,
-                );
-                if (integrity === 'replay') {
-                  const replaySignature = signature ?? latestResponseSignatures.get(candidateIndex);
-                  if (replaySignature && signatureState && explicitToolCallId) {
+                const rawSignature = isString(part.thoughtSignature)
+                  ? part.thoughtSignature
+                  : isString(part.thought_signature)
+                    ? part.thought_signature
+                    : undefined;
+                const signature = decodeSignature(rawSignature);
+                if (signature) {
+                  latestResponseSignatures.set(candidateIndex, signature);
+                }
+
+                const functionCall = this.toUnknownRecord(part.functionCall);
+                if (functionCall && isString(functionCall.name)) {
+                  const rawArguments = normalizeFunctionCallArgs(functionCall);
+                  const explicitToolCallId = isString(functionCall.id)
+                    ? functionCall.id
+                    : undefined;
+                  const integrityTracker =
+                    toolCallIntegrityByChoice.get(candidateIndex) ??
+                    new ToolCallIdIntegrityTracker();
+                  toolCallIntegrityByChoice.set(candidateIndex, integrityTracker);
+                  const integrity = integrityTracker.record(
+                    explicitToolCallId,
+                    functionCall.name,
+                    rawArguments,
+                  );
+                  if (integrity === 'replay') {
+                    const replaySignature =
+                      signature ?? latestResponseSignatures.get(candidateIndex);
+                    if (replaySignature && signatureState && explicitToolCallId) {
+                      signatureState.store.store(
+                        {
+                          accountId: signatureState.accountId,
+                          model: signatureState.model,
+                          toolCallId: explicitToolCallId,
+                        },
+                        replaySignature,
+                      );
+                    }
+                    continue;
+                  }
+
+                  const splitName = splitNamespaceToolName(functionCall.name);
+                  const functionName = clientToolNames
+                    ? resolveShellToolName(splitName.name, clientToolNames)
+                    : splitName.name;
+                  const functionArguments = isCustomToolCall(functionName)
+                    ? toCustomToolArguments(
+                        functionName,
+                        optimizeApplyPatch(extractCustomToolInput(functionName, rawArguments))
+                          .input,
+                      )
+                    : rawArguments;
+                  const clientToolCallId = explicitToolCallId ?? `${functionName}-${uuidv4()}`;
+                  const capturedSignature =
+                    signature ?? latestResponseSignatures.get(candidateIndex);
+                  if (capturedSignature && signatureState) {
                     signatureState.store.store(
                       {
                         accountId: signatureState.accountId,
                         model: signatureState.model,
-                        toolCallId: explicitToolCallId,
+                        toolCallId: clientToolCallId,
                       },
-                      replaySignature,
+                      capturedSignature,
                     );
                   }
-                  continue;
-                }
-
-                const splitName = splitNamespaceToolName(functionCall.name);
-                const functionName = clientToolNames
-                  ? resolveShellToolName(splitName.name, clientToolNames)
-                  : splitName.name;
-                const functionArguments = isCustomToolCall(functionName)
-                  ? toCustomToolArguments(
-                      functionName,
-                      optimizeApplyPatch(extractCustomToolInput(functionName, rawArguments)).input,
-                    )
-                  : rawArguments;
-                const clientToolCallId = explicitToolCallId ?? `${functionName}-${uuidv4()}`;
-                const capturedSignature = signature ?? latestResponseSignatures.get(candidateIndex);
-                if (capturedSignature && signatureState) {
-                  signatureState.store.store(
-                    {
-                      accountId: signatureState.accountId,
-                      model: signatureState.model,
-                      toolCallId: clientToolCallId,
-                    },
-                    capturedSignature,
+                  const toolCallIndex = toolCallIndexes.get(candidateIndex) ?? 0;
+                  pushChunk(
+                    withOptionalUsage({
+                      id: streamId,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model: servedModel,
+                      choices: [
+                        {
+                          index: candidateIndex,
+                          delta: {
+                            tool_calls: [
+                              {
+                                index: toolCallIndex,
+                                id: clientToolCallId,
+                                type: 'function',
+                                function: {
+                                  name: functionName,
+                                  arguments: JSON.stringify(functionArguments),
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
+                    }),
+                  );
+                  toolCallIndexes.set(candidateIndex, toolCallIndex + 1);
+                  emittedToolCallCounts.set(
+                    candidateIndex,
+                    (emittedToolCallCounts.get(candidateIndex) ?? 0) + 1,
                   );
                 }
-                const toolCallIndex = toolCallIndexes.get(candidateIndex) ?? 0;
+
+                const inlineData = this.toUnknownRecord(part.inlineData);
+                if (inlineData) {
+                  const mimeType = isString(inlineData.mimeType)
+                    ? inlineData.mimeType
+                    : 'image/jpeg';
+                  const data = isString(inlineData.data) ? inlineData.data : '';
+                  responseContent += `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
+                }
+              }
+
+              if (reasoningContent) {
                 pushChunk(
                   withOptionalUsage({
                     id: streamId,
                     object: 'chat.completion.chunk',
                     created,
-                    model,
+                    model: servedModel,
                     choices: [
                       {
                         index: candidateIndex,
-                        delta: {
-                          tool_calls: [
-                            {
-                              index: toolCallIndex,
-                              id: clientToolCallId,
-                              type: 'function',
-                              function: {
-                                name: functionName,
-                                arguments: JSON.stringify(functionArguments),
-                              },
-                            },
-                          ],
-                        },
+                        delta: { content: null, reasoning_content: reasoningContent },
                         finish_reason: null,
                       },
                     ],
                   }),
                 );
-                toolCallIndexes.set(candidateIndex, toolCallIndex + 1);
-                emittedToolCallCounts.set(
-                  candidateIndex,
-                  (emittedToolCallCounts.get(candidateIndex) ?? 0) + 1,
+              }
+
+              if (responseContent) {
+                pushChunk(
+                  withOptionalUsage({
+                    id: streamId,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model: servedModel,
+                    choices: [
+                      {
+                        index: candidateIndex,
+                        delta: { content: responseContent },
+                        finish_reason: null,
+                      },
+                    ],
+                  }),
                 );
               }
 
-              const inlineData = this.toUnknownRecord(part.inlineData);
-              if (inlineData) {
-                const mimeType = isString(inlineData.mimeType) ? inlineData.mimeType : 'image/jpeg';
-                const data = isString(inlineData.data) ? inlineData.data : '';
-                responseContent += `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
+              if (isString(candidate.finishReason) && !finishedChoiceIndexes.has(candidateIndex)) {
+                pushChunk(
+                  withOptionalUsage({
+                    id: streamId,
+                    object: 'chat.completion.chunk',
+                    created,
+                    model: servedModel,
+                    choices: [
+                      {
+                        index: candidateIndex,
+                        delta: {},
+                        finish_reason:
+                          (emittedToolCallCounts.get(candidateIndex) ?? 0) > 0
+                            ? 'tool_calls'
+                            : this.mapGeminiFinishReasonToOpenAIFinishReason(
+                                candidate.finishReason,
+                              ),
+                      },
+                    ],
+                  }),
+                );
+                finishedChoiceIndexes.add(candidateIndex);
               }
             }
 
-            if (reasoningContent) {
-              pushChunk(
-                withOptionalUsage({
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [
-                    {
-                      index: candidateIndex,
-                      delta: { content: null, reasoning_content: reasoningContent },
-                      finish_reason: null,
-                    },
-                  ],
-                }),
-              );
+            if (
+              finishedChoiceIndexes.size >= requiredChoiceCount() &&
+              (!streamContract.includeUsage || lastUsage !== undefined)
+            ) {
+              finalizeSuccess();
             }
-
-            if (responseContent) {
-              pushChunk(
-                withOptionalUsage({
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [
-                    {
-                      index: candidateIndex,
-                      delta: { content: responseContent },
-                      finish_reason: null,
-                    },
-                  ],
-                }),
-              );
-            }
-
-            if (isString(candidate.finishReason) && !finishedChoiceIndexes.has(candidateIndex)) {
-              pushChunk(
-                withOptionalUsage({
-                  id: streamId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [
-                    {
-                      index: candidateIndex,
-                      delta: {},
-                      finish_reason:
-                        (emittedToolCallCounts.get(candidateIndex) ?? 0) > 0
-                          ? 'tool_calls'
-                          : this.mapGeminiFinishReasonToOpenAIFinishReason(candidate.finishReason),
-                    },
-                  ],
-                }),
-              );
-              finishedChoiceIndexes.add(candidateIndex);
+          } catch (error) {
+            if (
+              error instanceof ToolCallIdConflictError ||
+              error instanceof InvalidFunctionCallArgumentsError
+            ) {
+              failStream(error);
             }
           }
+        };
 
-          if (
-            finishedChoiceIndexes.size >= requiredChoiceCount() &&
-            (!streamContract.includeUsage || lastUsage !== undefined)
-          ) {
-            finalizeSuccess();
-          }
-        } catch (error) {
-          if (
-            error instanceof ToolCallIdConflictError ||
-            error instanceof InvalidFunctionCallArgumentsError
-          ) {
-            failStream(error);
-          }
-        }
-      };
-
-      upstreamStream.on('data', (chunk: Buffer) => {
-        if (settled) {
-          return;
-        }
-        idleTimer.reset();
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          processLine(line);
+        upstreamStream.on('data', (chunk: Buffer) => {
           if (settled) {
             return;
           }
-        }
-      });
+          idleTimer.reset();
+          buffer += decoder.decode(chunk, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            processLine(line);
+            if (settled) {
+              return;
+            }
+          }
+        });
 
-      upstreamStream.on('end', () => {
-        if (settled) {
-          return;
-        }
-        idleTimer.clear();
-        buffer += decoder.decode();
-        if (buffer.trim()) {
-          processLine(buffer);
-        }
-        if (settled) {
-          return;
-        }
-        if (finishedChoiceIndexes.size >= requiredChoiceCount()) {
-          finalizeSuccess();
-          return;
-        }
-        const message = hasEmittedChunk
-          ? `OpenAI-compatible upstream stream ended before ${requiredChoiceCount()} choice(s) finished`
-          : 'Empty OpenAI-compatible upstream response stream';
-        failStream(new Error(message));
-      });
+        upstreamStream.on('end', () => {
+          if (settled) {
+            return;
+          }
+          idleTimer.clear();
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            processLine(buffer);
+          }
+          if (settled) {
+            return;
+          }
+          if (finishedChoiceIndexes.size >= requiredChoiceCount()) {
+            finalizeSuccess();
+            return;
+          }
+          const message = hasEmittedChunk
+            ? `OpenAI-compatible upstream stream ended before ${requiredChoiceCount()} choice(s) finished`
+            : 'Empty OpenAI-compatible upstream response stream';
+          failStream(new Error(message));
+        });
 
-      upstreamStream.on('error', (err: unknown) => {
-        const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
-        this.logger.error(`OpenAI-compatible stream error: ${cleanError.message}`);
-        failStream(cleanError);
-      });
+        upstreamStream.on('error', (err: unknown) => {
+          const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
+          this.logger.error(`OpenAI-compatible stream error: ${cleanError.message}`);
+          failStream(cleanError);
+        });
 
-      return () => {
-        clearHeartbeat();
-        idleTimer.dispose();
-      };
-    });
+        return () => {
+          clearHeartbeat();
+          idleTimer.dispose();
+        };
+      }),
+      upstreamStream,
+    );
   }
 
   private createSyntheticOpenAIStream(
@@ -1864,12 +1994,15 @@ export class ProxyService extends BaseProxyService {
     };
   }
 
-  private toAnthropicChatResponse(response: ClaudeResponse): AnthropicChatResponse {
+  private toAnthropicChatResponse(
+    response: ClaudeResponse,
+    fallbackModel: string,
+  ): AnthropicChatResponse {
     return {
       id: response.id,
       type: response.type,
       role: response.role,
-      model: response.model,
+      model: response.model || fallbackModel,
       content:
         response.content.length === 0 && response.refusal
           ? [{ type: 'text', text: response.refusal }]

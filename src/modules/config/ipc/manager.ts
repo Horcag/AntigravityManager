@@ -3,6 +3,7 @@ import fs from 'fs';
 import { AppConfig, DEFAULT_APP_CONFIG } from '@/modules/config/types';
 import { getAgentDir } from '@/shared/platform/paths';
 import { logger } from '@/shared/logging/logger';
+import { migrateLegacyModelAliases } from '@/modules/config/model-alias-migration';
 
 const CONFIG_FILENAME = 'gui_config.json';
 
@@ -53,6 +54,8 @@ export class ConfigManager {
         };
       }
 
+      merged.proxy = migrateLegacyModelAliases(merged.proxy);
+
       // Handle Anthropic Mapping Map vs Object
       // In JSON it's object
 
@@ -71,13 +74,17 @@ export class ConfigManager {
 
   static async saveConfig(config: AppConfig): Promise<void> {
     const configPath = this.getConfigPath();
-    const content = JSON.stringify(config, null, 2);
+    const migratedConfig = {
+      ...config,
+      proxy: migrateLegacyModelAliases(config.proxy),
+    };
+    const content = JSON.stringify(migratedConfig, null, 2);
 
     this.saveQueue = this.saveQueue
       .catch(() => undefined)
       .then(async () => {
         await fs.promises.writeFile(configPath, content, 'utf-8');
-        this.cachedConfig = config;
+        this.cachedConfig = migratedConfig;
         logger.info(`Config: Saved to ${configPath}`);
       })
       .catch((e) => {

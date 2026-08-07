@@ -375,6 +375,12 @@ describe('GoogleAPIService fetchQuota fallback policy', () => {
                 resetTime: '2026-05-05T00:00:00Z',
               },
             },
+            'provider-experimental-1': {
+              quotaInfo: {
+                remainingFraction: 0.25,
+                resetTime: '2026-05-06T00:00:00Z',
+              },
+            },
           },
         }),
       })
@@ -407,6 +413,10 @@ describe('GoogleAPIService fetchQuota fallback policy', () => {
         'gemini-2.5-flash': {
           percentage: 42,
           resetTime: '2026-05-05T00:00:00Z',
+        },
+        'provider-experimental-1': {
+          percentage: 25,
+          resetTime: '2026-05-06T00:00:00Z',
         },
       },
     });

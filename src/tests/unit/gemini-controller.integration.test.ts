@@ -8,6 +8,8 @@ import { GeminiController } from '../../modules/proxy-gateway/server/modules/gem
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
+import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
+import { attachModelRouteMetadata } from '../../modules/proxy-gateway/server/common/model-route-metadata';
 
 describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
   let app: NestFastifyApplication;
@@ -75,6 +77,61 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     expect(body.models).not.toContainEqual(
       expect.objectContaining({ name: 'models/claude-opus-4-6-thinking' }),
     );
+  });
+
+  it('returns native Gemini model route identity headers', async () => {
+    mockProxyService.handleGeminiGenerateContent.mockResolvedValueOnce(
+      attachModelRouteMetadata(
+        { candidates: [], modelVersion: 'gemini-3-flash-001' },
+        {
+          requestedModel: 'models/my-fast',
+          resolvedModel: 'gemini-3-flash',
+          servedModel: 'gemini-3-flash-001',
+          routeSource: 'configured',
+        },
+      ),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/my-fast:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-antigravity-requested-model']).toBe('models/my-fast');
+    expect(res.headers['x-antigravity-resolved-model']).toBe('gemini-3-flash');
+    expect(res.headers['x-antigravity-served-model']).toBe('gemini-3-flash-001');
+    expect(res.headers['x-antigravity-fallback-policy']).toBe('none');
+  });
+
+  it('returns a Google-shaped unknown model error', async () => {
+    mockProxyService.handleGeminiGenerateContent.mockRejectedValueOnce(
+      new ModelRouteError({
+        message: "Unknown model 'not-a-model'",
+        status: 404,
+        code: 'model_not_found',
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/not-a-model:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: {
+        code: 404,
+        message: "Unknown model 'not-a-model'",
+        status: 'NOT_FOUND',
+      },
+    });
   });
 
   it('GET /v1beta/models/:model returns model detail or 404', async () => {

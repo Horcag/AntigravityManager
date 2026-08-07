@@ -47,7 +47,6 @@ function createStore(accounts: CloudAccount[]): AccountLeaseAccountStore {
 
 function createTokenCache(store: AccountLeaseAccountStore) {
   const tokenCache = new Map<string, AccountLeaseTokenData>();
-  const applyQuotaSnapshot = vi.fn();
   const logger = {
     error: vi.fn(),
     log: vi.fn(),
@@ -55,12 +54,10 @@ function createTokenCache(store: AccountLeaseAccountStore) {
   const cache = new AccountLeaseTokenCache({
     accountStore: store,
     getTokenCache: () => tokenCache,
-    applyQuotaSnapshot,
     logger,
   });
 
   return {
-    applyQuotaSnapshot,
     cache,
     logger,
     tokenCache,
@@ -70,7 +67,7 @@ function createTokenCache(store: AccountLeaseAccountStore) {
 describe('AccountLeaseTokenCache', () => {
   it('loads cloud accounts into normalized account lease token state', async () => {
     const store = createStore([createAccount()]);
-    const { applyQuotaSnapshot, cache, tokenCache } = createTokenCache(store);
+    const { cache, tokenCache } = createTokenCache(store);
 
     const count = await cache.loadAccounts();
 
@@ -94,13 +91,6 @@ describe('AccountLeaseTokenCache', () => {
       }),
     );
     expect(tokenCache.get('acc-1')?.session_id).toMatch(/^-\d+$/);
-    expect(applyQuotaSnapshot).toHaveBeenCalledWith(
-      expect.objectContaining({
-        modelForwardingRules: {
-          'gemini-old': 'gemini-new',
-        },
-      }),
-    );
   });
 
   it('returns zero and logs when account storage loading fails', async () => {

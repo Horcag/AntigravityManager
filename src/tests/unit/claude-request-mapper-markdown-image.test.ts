@@ -33,7 +33,7 @@ describe('ClaudeRequestMapper Markdown image compatibility', () => {
   });
 
   it.each(['gemini-3-flash-image', 'gemini-3.1-flash-image', 'gemini-3.1-flash-image-16x9'])(
-    'keeps Flash image requests on the verified Gemini 3.1 Flash image model for %s',
+    'preserves the explicitly selected Flash image model identity for %s',
     (model) => {
       const request: ClaudeRequest = {
         model,
@@ -47,7 +47,7 @@ describe('ClaudeRequestMapper Markdown image compatibility', () => {
 
       const body = transformClaudeRequestIn(request);
 
-      expect(body.model).toBe('gemini-3.1-flash-image');
+      expect(body.model).toBe(model);
       expect(body.request.generationConfig?.imageConfig).toEqual({
         aspectRatio: model.endsWith('-16x9') ? '16:9' : '1:1',
       });

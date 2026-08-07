@@ -137,7 +137,7 @@ describe('OpenAI request contract', () => {
     );
   });
 
-  it('rejects controls that a known target model cannot execute', () => {
+  it('does not reject controls based on stale hard-coded capability guesses', () => {
     expect(() =>
       normalizeOpenAIChatRequest({
         model: 'gemini-2.5-flash',
@@ -149,7 +149,7 @@ describe('OpenAI request contract', () => {
           },
         ],
       }),
-    ).toThrowError(expect.objectContaining({ param: 'tools', code: 'unsupported_parameter' }));
+    ).not.toThrow();
 
     expect(() =>
       normalizeOpenAIChatRequest({
@@ -157,9 +157,7 @@ describe('OpenAI request contract', () => {
         messages: [{ role: 'user', content: 'think' }],
         reasoning_effort: 'high',
       }),
-    ).toThrowError(
-      expect.objectContaining({ param: 'reasoning_effort', code: 'unsupported_parameter' }),
-    );
+    ).not.toThrow();
   });
 
   it('accepts inline images but rejects silently downgraded remote image URLs', () => {

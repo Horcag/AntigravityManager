@@ -57,7 +57,6 @@ import {
   MODEL_LIST_CREATED_AT,
   MODEL_LIST_OWNER,
 } from '../antigravity/ModelMapping';
-import { getServerConfig } from '../../../server/server-config';
 import { AccountLeaseService } from './modules/account-lease/account-lease.service';
 import { UpstreamRequestError } from './common/exceptions/upstream-request-exception';
 import {
@@ -85,6 +84,19 @@ import {
   mapOpenAIImageStream,
 } from './modules/openai/media/openai-media-streaming';
 import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
+import { ModelRoutingService } from './modules/shared/services/model-routing.service';
+import { ModelAvailabilityService } from './modules/shared/services/model-availability.service';
+import { ModelRouteError } from './common/exceptions/model-route-exception';
+import {
+  inheritUpstreamBackpressure,
+  pauseObservableUpstream,
+  resumeObservableUpstream,
+} from './common/stream-backpressure';
+import {
+  createModelRouteHeaders,
+  getModelRouteMetadata,
+  type ModelRouteMetadata,
+} from './common/model-route-metadata';
 
 export const IMAGE_QUOTA_REFRESH = Symbol('IMAGE_QUOTA_REFRESH');
 export type ImageQuotaRefresh = () => Promise<void>;
@@ -110,15 +122,19 @@ export class ProxyController {
     @Optional()
     @Inject(IMAGE_QUOTA_REFRESH)
     private readonly imageQuotaRefresh?: ImageQuotaRefresh,
+    @Optional()
+    @Inject(ModelRoutingService)
+    private readonly modelRoutingService?: ModelRoutingService,
+    @Optional()
+    @Inject(ModelAvailabilityService)
+    private readonly modelAvailabilityService?: ModelAvailabilityService,
   ) {}
 
   @Get('models')
   listModels(@Res() res: FastifyReply) {
     try {
-      const config = getServerConfig();
-      const customMapping = config?.custom_mapping ?? {};
       const modelIds = getOpenAICompatibleModels(
-        customMapping,
+        {},
         this.accountLeaseService?.getAllCollectedModels(),
       );
 
@@ -145,6 +161,24 @@ export class ProxyController {
     }
   }
 
+  @Get('model-routes')
+  listModelRoutes(@Res() res: FastifyReply) {
+    const routes = this.modelRoutingService?.getConfiguredRoutes() ?? [];
+    const canonicalModels = [...(this.accountLeaseService?.getAllCollectedModels() ?? [])];
+    res.status(HttpStatus.OK).send({
+      object: 'model_route_list',
+      checked_at: new Date().toISOString(),
+      canonical_models: canonicalModels.sort((left, right) => left.localeCompare(right)),
+      data: routes.map((route) => ({
+        ...route,
+        target_status:
+          this.accountLeaseService?.getModelCatalogStatus(route.target) ?? 'catalog_unavailable',
+        accounts: this.accountLeaseService?.getModelRouteAvailability(route.target) ?? [],
+      })),
+      recent_failures: this.modelAvailabilityService?.getSnapshot() ?? [],
+    });
+  }
+
   @Post('chat/completions')
   async chatCompletions(@Body() body: OpenAIChatRequest, @Res() res: FastifyReply) {
     await this.respondOpenAIChatCompletions(body, res);
@@ -155,12 +189,19 @@ export class ProxyController {
     try {
       const { request } = normalizeOpenAICompletionRequest(body);
       const result = await this.proxyService.handleChatCompletions(request);
+      const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
       if (request.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, this.toLegacyTextCompletionsStream(result));
+        this.writeSseResponse(
+          res,
+          this.toLegacyTextCompletionsStream(result),
+          'openai',
+          routeHeaders,
+        );
         return;
       }
 
       const response = result as OpenAIChatResponse;
+      this.applyResponseHeaders(res, routeHeaders);
       res.status(HttpStatus.OK).send(this.toLegacyTextCompletionsResponse(response));
     } catch (error) {
       this.sendOpenAIErrorResponse(res, '/v1/completions', error);
@@ -183,14 +224,21 @@ export class ProxyController {
         return;
       }
       const result = await this.proxyService.handleChatCompletions(prepared.request, 'responses');
+      const routeHeaders = this.getModelRouteResponseHeaders(result, prepared.request.model);
       if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, this.cacheResponsesStream(result, prepared.session));
+        this.writeSseResponse(
+          res,
+          this.cacheResponsesStream(result, prepared.session),
+          'openai',
+          routeHeaders,
+        );
         return;
       }
 
       const response = result as OpenAIChatResponse;
       const responsesResponse = toOpenAIResponsesResponse(response, prepared.responseContext);
       this.saveResponsesSession(responsesResponse, prepared.session);
+      this.applyResponseHeaders(res, routeHeaders);
       res.status(HttpStatus.OK).send(responsesResponse);
     } catch (error) {
       this.sendOpenAIErrorResponse(res, '/v1/responses', error);
@@ -334,11 +382,20 @@ export class ProxyController {
           body.model,
           request,
         );
-        this.writeSseResponse(res, mapGeminiAudioTranscriptionStream(upstreamStream));
+        this.writeSseResponse(
+          res,
+          inheritUpstreamBackpressure(
+            upstreamStream,
+            mapGeminiAudioTranscriptionStream(upstreamStream),
+          ),
+          'openai',
+          this.getModelRouteResponseHeaders(upstreamStream, body.model),
+        );
         return;
       }
 
       const result = await this.proxyService.handleGeminiGenerateContent(body.model, request);
+      this.applyResponseHeaders(res, this.getModelRouteResponseHeaders(result, body.model));
       const transcript =
         result.candidates?.[0]?.content?.parts
           ?.map((part) => part.text ?? '')
@@ -360,11 +417,13 @@ export class ProxyController {
     try {
       const request = normalizeOpenAIChatRequest(body);
       const result = await this.proxyService.handleChatCompletions(request);
+      const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
 
       if (request.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result);
+        this.writeSseResponse(res, result, 'openai', routeHeaders);
         return;
       } else {
+        this.applyResponseHeaders(res, routeHeaders);
         res.status(HttpStatus.OK).send(result);
       }
     } catch (error) {
@@ -378,11 +437,16 @@ export class ProxyController {
     try {
       const request = normalizeAnthropicMessagesRequest(body);
       const result = await this.proxyService.handleAnthropicMessages(request);
+      const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
 
       if (request.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result, 'anthropic', { 'request-id': requestId });
+        this.writeSseResponse(res, result, 'anthropic', {
+          ...routeHeaders,
+          'request-id': requestId,
+        });
         return;
       } else {
+        this.applyResponseHeaders(res, routeHeaders);
         res.header('request-id', requestId).status(HttpStatus.OK).send(result);
       }
     } catch (error) {
@@ -407,7 +471,10 @@ export class ProxyController {
   }
 
   private toLegacyTextCompletionsStream(stream: Observable<unknown>): Observable<string> {
-    return stream.pipe(map((chunk) => this.toLegacyTextCompletionsSseChunk(chunk)));
+    return inheritUpstreamBackpressure(
+      stream,
+      stream.pipe(map((chunk) => this.toLegacyTextCompletionsSseChunk(chunk))),
+    );
   }
 
   private toLegacyTextCompletionsSseChunk(chunk: unknown): string {
@@ -531,18 +598,21 @@ export class ProxyController {
     stream: Observable<unknown>,
     session: OpenAIResponsesSession,
   ): Observable<unknown> {
-    return new Observable<unknown>((subscriber) => {
-      const subscription = stream.subscribe({
-        next: (event) => {
-          this.saveResponsesSession(this.extractCompletedResponsesEvent(event), session);
-          subscriber.next(event);
-        },
-        error: (error: unknown) => subscriber.error(error),
-        complete: () => subscriber.complete(),
-      });
+    return inheritUpstreamBackpressure(
+      stream,
+      new Observable<unknown>((subscriber) => {
+        const subscription = stream.subscribe({
+          next: (event) => {
+            this.saveResponsesSession(this.extractCompletedResponsesEvent(event), session);
+            subscriber.next(event);
+          },
+          error: (error: unknown) => subscriber.error(error),
+          complete: () => subscriber.complete(),
+        });
 
-      return () => subscription.unsubscribe();
-    });
+        return () => subscription.unsubscribe();
+      }),
+    );
   }
 
   private extractCompletedResponsesEvent(event: unknown): unknown | null {
@@ -1025,6 +1095,33 @@ export class ProxyController {
     return isString(value) ? value : null;
   }
 
+  private getModelRouteResponseHeaders(
+    result: unknown,
+    requestedModel: string | undefined,
+  ): Record<string, string> {
+    let metadata = getModelRouteMetadata(result);
+    if (!metadata && requestedModel && this.modelRoutingService) {
+      const route = this.modelRoutingService.resolveModelRoute(requestedModel);
+      const responseRecord = isObjectLike(result) ? (result as Record<string, unknown>) : undefined;
+      metadata = {
+        requestedModel,
+        resolvedModel: route.targetModel,
+        servedModel:
+          this.asString(responseRecord?.model) ??
+          this.asString(responseRecord?.modelVersion) ??
+          undefined,
+        routeSource: route.source,
+      } satisfies ModelRouteMetadata;
+    }
+    return createModelRouteHeaders(metadata);
+  }
+
+  private applyResponseHeaders(res: FastifyReply, headers: Record<string, string>): void {
+    for (const [name, value] of Object.entries(headers)) {
+      res.header(name, value);
+    }
+  }
+
   private isObservableLike(value: unknown): value is Observable<unknown> {
     return isObjectLike(value) && isFunction((value as { subscribe?: unknown }).subscribe);
   }
@@ -1057,18 +1154,46 @@ export class ProxyController {
       ...responseHeaders,
     });
 
-    const subscription = stream.subscribe({
+    let waitingForDrain = false;
+    let subscription: { unsubscribe(): void } | undefined;
+    const clearDrainListener = (): void => {
+      if (!waitingForDrain) {
+        return;
+      }
+      waitingForDrain = false;
+      res.raw.removeListener('drain', onDrain);
+    };
+    const onDrain = (): void => {
+      waitingForDrain = false;
+      resumeObservableUpstream(stream);
+    };
+    const onClose = (): void => {
+      clearDrainListener();
+      subscription?.unsubscribe();
+    };
+    const cleanupResponseListeners = (): void => {
+      clearDrainListener();
+      res.raw.removeListener('close', onClose);
+    };
+
+    res.raw.on('close', onClose);
+    subscription = stream.subscribe({
       next: (chunk) => {
         if (res.raw.writableEnded) {
           return;
         }
         const payload = isString(chunk) ? chunk : String(chunk ?? '');
-        res.raw.write(payload);
+        if (!res.raw.write(payload) && !waitingForDrain) {
+          waitingForDrain = true;
+          pauseObservableUpstream(stream);
+          res.raw.once('drain', onDrain);
+        }
       },
       error: (error) => {
         if (res.raw.writableEnded) {
           return;
         }
+        cleanupResponseListeners();
         const message = error instanceof Error ? error.message : String(error);
         if (protocol === 'anthropic') {
           const descriptor = this.resolveAnthropicError(error, message);
@@ -1095,14 +1220,11 @@ export class ProxyController {
         res.raw.end();
       },
       complete: () => {
+        cleanupResponseListeners();
         if (!res.raw.writableEnded) {
           res.raw.end();
         }
       },
-    });
-
-    res.raw.on('close', () => {
-      subscription.unsubscribe();
     });
   }
 
@@ -1115,19 +1237,23 @@ export class ProxyController {
   ): Promise<void> {
     try {
       const result = await this.proxyService.handleChatCompletions(request);
+      const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
       if (this.isObservableLike(result)) {
         if (body.stream) {
-          const stream = mapOpenAIImageStream(result, {
-            partialImages: body.partial_images ?? 0,
-            path,
-            quality: body.quality,
-            size: body.size,
-          }).pipe(
-            tap({
-              complete: () => this.scheduleImageQuotaRefresh(),
-            }),
+          const stream = inheritUpstreamBackpressure(
+            result,
+            mapOpenAIImageStream(result, {
+              partialImages: body.partial_images ?? 0,
+              path,
+              quality: body.quality,
+              size: body.size,
+            }).pipe(
+              tap({
+                complete: () => this.scheduleImageQuotaRefresh(),
+              }),
+            ),
           );
-          this.writeSseResponse(res, stream);
+          this.writeSseResponse(res, stream, 'openai', routeHeaders);
           return;
         }
         this.logProxyEndpointError(
@@ -1170,7 +1296,7 @@ export class ProxyController {
           },
         ],
       };
-      this.sendOpenAIImageSuccess(response, path, body, res);
+      this.sendOpenAIImageSuccess(response, path, body, res, routeHeaders);
     } catch (error) {
       let message = error instanceof Error ? error.message : 'Internal Server Error';
       let resolvedError = error;
@@ -1193,7 +1319,13 @@ export class ProxyController {
                 },
               ],
             };
-            this.sendOpenAIImageSuccess(response, path, body, res);
+            this.sendOpenAIImageSuccess(
+              response,
+              path,
+              body,
+              res,
+              this.getModelRouteResponseHeaders(geminiResult, request.model),
+            );
             return;
           }
           message = 'Upstream did not return inline image data';
@@ -1216,10 +1348,12 @@ export class ProxyController {
     path: '/v1/images/generations' | '/v1/images/edits',
     body: ImageMonitoringRequest,
     res: FastifyReply,
+    routeHeaders: Record<string, string> = {},
   ): void {
     this.logImageMonitoringSummary('response', summarizeImageResponse(response));
     this.scheduleImageQuotaRefresh();
     if (!body.stream) {
+      this.applyResponseHeaders(res, routeHeaders);
       res.status(HttpStatus.OK).send(response);
       return;
     }
@@ -1238,7 +1372,12 @@ export class ProxyController {
       quality: body.quality ?? 'auto',
       size: body.size ?? 'auto',
     };
-    this.writeSseResponse(res, of(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`));
+    this.writeSseResponse(
+      res,
+      of(`event: ${type}\ndata: ${JSON.stringify(event)}\n\n`),
+      'openai',
+      routeHeaders,
+    );
   }
 
   private resolveImageOutputFormat(mimeType: string): string {
@@ -1436,6 +1575,24 @@ export class ProxyController {
           message,
           type: error.type,
           param: error.param,
+          code: error.code,
+        },
+      });
+      return;
+    }
+    if (error instanceof ModelRouteError) {
+      const status = error.status ?? HttpStatus.INTERNAL_SERVER_ERROR;
+      this.logProxyEndpointError(endpoint, status as HttpStatus, message, error);
+      res.status(status).send({
+        error: {
+          message,
+          type:
+            status === HttpStatus.NOT_FOUND
+              ? 'invalid_request_error'
+              : status === HttpStatus.TOO_MANY_REQUESTS
+                ? 'rate_limit_error'
+                : 'server_error',
+          param: 'model',
           code: error.code,
         },
       });

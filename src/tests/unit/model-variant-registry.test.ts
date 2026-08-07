@@ -114,7 +114,7 @@ describe('resolveModelVariant', () => {
     ]);
   });
 
-  it('applies fixed and tier-aware alias policies', () => {
+  it('keeps explicit tier ids fixed while generic ids remain tier-aware', () => {
     expect(
       [
         resolveModelVariant({
@@ -150,14 +150,14 @@ describe('resolveModelVariant', () => {
       },
       {
         canonicalModel: 'gemini-3.1-pro',
-        model: 'gemini-3.1-pro-low',
-        tier: 'low',
-        thinkingBudget: 1001,
+        model: 'gemini-pro-agent',
+        tier: 'high',
+        thinkingBudget: 10001,
       },
     ]);
   });
 
-  it('resolves registered non-variant models with their exact request policy', () => {
+  it('does not infer policies for unregistered models', () => {
     expect([
       resolveModelVariant({
         model: 'gemini-2.5-flash-thinking',
@@ -172,16 +172,7 @@ describe('resolveModelVariant', () => {
         budgetTokens: 1000,
       }),
     ]).toEqual([
-      {
-        canonicalModel: 'gemini-3.1-flash-lite',
-        model: 'gemini-3.1-flash-lite',
-        tier: 'high',
-        thinkingBudget: 0,
-        maxOutputTokens: 16384,
-        includeThoughts: false,
-        preserveClientBudget: false,
-        supportsTools: false,
-      },
+      null,
       {
         canonicalModel: 'claude-opus-4-6-thinking',
         model: 'claude-opus-4-6-thinking',

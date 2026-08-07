@@ -55,6 +55,22 @@ describe('ModelAvailabilityService', () => {
     ]);
   });
 
+  it('does not clear a sibling image model when one image model succeeds', () => {
+    const store = new ModelAvailabilityService();
+
+    store.mark('acc-1', 'gemini-3-pro-image', 'model_not_supported');
+    store.mark('acc-1', 'gemini-3.1-flash-image', 'model_forbidden');
+
+    expect(store.clearModel('acc-1', 'gemini-3-pro-image')).toBe(true);
+    expect(store.getSnapshot()).toEqual([
+      expect.objectContaining({
+        accountId: 'acc-1',
+        modelId: 'gemini-3.1-flash-image',
+        reason: 'model_forbidden',
+      }),
+    ]);
+  });
+
   it('persists live status details and restores them after restart', () => {
     const durableState = createPersistence();
     const firstStore = new ModelAvailabilityService(durableState.persistence);
@@ -99,5 +115,22 @@ describe('ModelAvailabilityService', () => {
 
     expect(store.getSnapshot()).toEqual([]);
     expect(durableState.read()).toEqual([]);
+  });
+
+  it('reports only active account-model failures as unavailable', () => {
+    const store = new ModelAvailabilityService();
+    const now = Date.now();
+
+    store.mark('acc-active', 'gemini-3-flash', 'rate_limited', now + 60_000);
+    store.mark('acc-expired', 'gemini-3-flash', 'rate_limited', now - 1);
+
+    expect(store.isUnavailable('acc-active', 'models/gemini-3-flash', now)).toBe(true);
+    expect(store.isUnavailable('acc-expired', 'gemini-3-flash', now)).toBe(false);
+    expect(store.getSnapshot()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ accountId: 'acc-active', modelId: 'gemini-3-flash' }),
+        expect.objectContaining({ accountId: 'acc-expired', modelId: 'gemini-3-flash' }),
+      ]),
+    );
   });
 });

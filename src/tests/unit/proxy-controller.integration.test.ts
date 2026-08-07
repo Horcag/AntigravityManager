@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { EventEmitter } from 'node:events';
 
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
 import { OpenAIResponsesSessionStore } from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
+import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
+import {
+  attachUpstreamBackpressure,
+  pauseObservableUpstream,
+  resumeObservableUpstream,
+} from '../../modules/proxy-gateway/server/common/stream-backpressure';
+import { attachModelRouteMetadata } from '../../modules/proxy-gateway/server/common/model-route-metadata';
 
 const generatedPng = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -229,10 +236,68 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
     const payload = reply.send.mock.calls[0][0];
     const ids = payload.data.map((model: { id: string }) => model.id);
-    expect(ids).toEqual(['gemini-3-flash', 'gemini-3.5-flash-low', 'gemini-imagecraft-chat']);
-    expect(ids).not.toContain('gemini-3-pro-image');
+    expect(ids).toEqual([
+      'gemini-3-flash',
+      'gemini-3-pro-image',
+      'gemini-3.5-flash-low',
+      'gemini-imagecraft-chat',
+    ]);
     expect(ids).not.toContain('gpt-4o');
     expect(ids).not.toContain('claude-opus-4-6-thinking');
+  });
+
+  it('reports configured routes separately from the standard model list', () => {
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash'])),
+      getModelCatalogStatus: vi.fn(() => 'known'),
+      getModelRouteAvailability: vi.fn(() => [
+        {
+          accountId: 'acc-1',
+          exact: true,
+          resolvedModel: 'gemini-3-flash',
+          status: 'available',
+        },
+      ]),
+    };
+    const routingService = {
+      getConfiguredRoutes: vi.fn(() => [
+        {
+          alias: 'my-fast',
+          target: 'gemini-3-flash',
+          enabled: true,
+          source: 'configured',
+          wildcard: false,
+        },
+      ]),
+    };
+    const availabilityService = {
+      getSnapshot: vi.fn(() => []),
+    };
+    const controller = new ProxyController(
+      {} as any,
+      accountLeaseService as any,
+      undefined,
+      routingService as any,
+      availabilityService as any,
+    );
+    const reply = createReplyMock();
+
+    controller.listModelRoutes(reply as any);
+
+    expect(reply.status).toHaveBeenCalledWith(200);
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object: 'model_route_list',
+        canonical_models: ['gemini-3-flash'],
+        data: [
+          expect.objectContaining({
+            alias: 'my-fast',
+            target: 'gemini-3-flash',
+            target_status: 'known',
+          }),
+        ],
+      }),
+    );
   });
 
   it('routes Claude OpenAI requests to protocol parity path', async () => {
@@ -279,6 +344,96 @@ describe('ProxyController Integration', () => {
     expect(reply.header).toHaveBeenCalledWith('Cache-Control', 'no-cache');
     expect(reply.header).toHaveBeenCalledWith('Connection', 'keep-alive');
     expect(reply.send).toHaveBeenCalledWith(stream);
+  });
+
+  it('returns requested, resolved, and served model identity headers', async () => {
+    const response = attachModelRouteMetadata(
+      {
+        id: 'chatcmpl-route',
+        object: 'chat.completion',
+        created: 1_700_000_000,
+        model: 'gemini-3-flash-001',
+        choices: [],
+      },
+      {
+        requestedModel: 'my-fast',
+        resolvedModel: 'gemini-3-flash',
+        servedModel: 'gemini-3-flash-001',
+        routeSource: 'configured',
+      },
+    );
+    const controller = new ProxyController({
+      handleChatCompletions: vi.fn().mockResolvedValue(response),
+    } as any);
+    const reply = createReplyMock();
+
+    await controller.chatCompletions(
+      {
+        model: 'my-fast',
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any,
+      reply as any,
+    );
+
+    expect(reply.header).toHaveBeenCalledWith('x-antigravity-requested-model', 'my-fast');
+    expect(reply.header).toHaveBeenCalledWith('x-antigravity-resolved-model', 'gemini-3-flash');
+    expect(reply.header).toHaveBeenCalledWith('x-antigravity-served-model', 'gemini-3-flash-001');
+    expect(reply.header).toHaveBeenCalledWith('x-antigravity-fallback-policy', 'none');
+  });
+
+  it('pauses and resumes the exact upstream stream on socket backpressure', async () => {
+    const source = new Subject<string>();
+    const upstream = { pause: vi.fn(), resume: vi.fn() };
+    const stream = attachModelRouteMetadata(attachUpstreamBackpressure(source, upstream as any), {
+      requestedModel: 'my-fast',
+      resolvedModel: 'gemini-3-flash',
+      servedModel: 'gemini-3-flash',
+      routeSource: 'configured',
+    });
+    const controller = new ProxyController({
+      handleChatCompletions: vi.fn().mockResolvedValue(stream),
+    } as any);
+    const raw = new EventEmitter() as EventEmitter & {
+      end: ReturnType<typeof vi.fn>;
+      writableEnded: boolean;
+      write: ReturnType<typeof vi.fn>;
+      writeHead: ReturnType<typeof vi.fn>;
+    };
+    raw.end = vi.fn();
+    raw.writableEnded = false;
+    raw.write = vi.fn().mockReturnValue(false);
+    raw.writeHead = vi.fn();
+    const reply = {
+      raw,
+      hijack: vi.fn(),
+      header: vi.fn(),
+      send: vi.fn(),
+      status: vi.fn(),
+    };
+
+    await controller.chatCompletions(
+      {
+        model: 'my-fast',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any,
+      reply as any,
+    );
+    source.next('data: {"ok":true}\n\n');
+
+    expect(upstream.pause).toHaveBeenCalledOnce();
+    expect(raw.writeHead).toHaveBeenCalledWith(
+      200,
+      expect.objectContaining({
+        'x-antigravity-served-model': 'gemini-3-flash',
+      }),
+    );
+
+    raw.emit('drain');
+    expect(upstream.resume).toHaveBeenCalledOnce();
+
+    raw.emit('close');
+    expect(source.observed).toBe(false);
   });
 
   it('supports OpenAI completions compatibility endpoint', async () => {
@@ -380,32 +535,36 @@ describe('ProxyController Integration', () => {
   });
 
   it('converts Chat SSE chunks into legacy text_completion chunks', async () => {
-    const chatStream = of(
-      `data: ${JSON.stringify({
-        id: 'chatcmpl-stream',
-        object: 'chat.completion.chunk',
-        created: 1700000000,
-        model: 'gemini-3-flash',
-        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-        usage: null,
-      })}\n\n`,
-      `data: ${JSON.stringify({
-        id: 'chatcmpl-stream',
-        object: 'chat.completion.chunk',
-        created: 1700000000,
-        model: 'gemini-3-flash',
-        choices: [{ index: 0, delta: { content: 'hello' }, finish_reason: 'stop' }],
-        usage: null,
-      })}\n\n`,
-      `data: ${JSON.stringify({
-        id: 'chatcmpl-stream',
-        object: 'chat.completion.chunk',
-        created: 1700000000,
-        model: 'gemini-3-flash',
-        choices: [],
-        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
-      })}\n\n`,
-      'data: [DONE]\n\n',
+    const upstream = { pause: vi.fn(), resume: vi.fn() };
+    const chatStream = attachUpstreamBackpressure(
+      of(
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-stream',
+          object: 'chat.completion.chunk',
+          created: 1700000000,
+          model: 'gemini-3-flash',
+          choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+          usage: null,
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-stream',
+          object: 'chat.completion.chunk',
+          created: 1700000000,
+          model: 'gemini-3-flash',
+          choices: [{ index: 0, delta: { content: 'hello' }, finish_reason: 'stop' }],
+          usage: null,
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-stream',
+          object: 'chat.completion.chunk',
+          created: 1700000000,
+          model: 'gemini-3-flash',
+          choices: [],
+          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+        })}\n\n`,
+        'data: [DONE]\n\n',
+      ),
+      upstream as any,
     );
     const proxyService = { handleChatCompletions: vi.fn().mockResolvedValue(chatStream) };
     const controller = new ProxyController(proxyService as any);
@@ -422,6 +581,10 @@ describe('ProxyController Integration', () => {
     );
 
     const convertedStream = reply.send.mock.calls[0][0];
+    pauseObservableUpstream(convertedStream);
+    resumeObservableUpstream(convertedStream);
+    expect(upstream.pause).toHaveBeenCalledOnce();
+    expect(upstream.resume).toHaveBeenCalledOnce();
     const chunks: string[] = [];
     await new Promise<void>((resolve, reject) => {
       convertedStream.subscribe({
@@ -1492,6 +1655,37 @@ describe('ProxyController Integration', () => {
       type: 'error',
       error: { type: 'rate_limit_error', message: 'quota' },
       request_id: expect.stringMatching(/^req_/),
+    });
+  });
+
+  it('returns a model-specific OpenAI 404 instead of a generic account error', async () => {
+    const controller = new ProxyController({
+      handleChatCompletions: vi.fn().mockRejectedValue(
+        new ModelRouteError({
+          message: "Unknown model 'not-a-model'",
+          status: 404,
+          code: 'model_not_found',
+        }),
+      ),
+    } as any);
+    const reply = createReplyMock();
+
+    await controller.chatCompletions(
+      {
+        model: 'not-a-model',
+        messages: [{ role: 'user', content: 'hello' }],
+      } as any,
+      reply as any,
+    );
+
+    expect(reply.status).toHaveBeenCalledWith(404);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: "Unknown model 'not-a-model'",
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found',
+      },
     });
   });
 

@@ -94,7 +94,7 @@ describe('OpenCode JSONC config editing', () => {
     expect(updated).not.toContain('\r\n');
   });
 
-  it('renames a lone Gemini alias to its canonical key without losing comments', () => {
+  it('preserves an exact Gemini tier id and its comments', () => {
     const aliasSource = [
       '{',
       '  "provider": {',
@@ -117,13 +117,13 @@ describe('OpenCode JSONC config editing', () => {
       models: [{ id: 'gemini-3.1-pro-high' }],
     });
 
-    expect(updated).toContain('"gemini-3.1-pro"');
-    expect(updated).not.toContain('"gemini-3.1-pro-high"');
+    expect(updated).toContain('"gemini-3.1-pro-high"');
+    expect(updated).not.toContain('"gemini-3.1-pro"');
     expect(updated).toContain('// alias-owned comment');
     expect(updated).toContain('"custom": true');
   });
 
-  it('merges an alias into an existing canonical model while retaining its comments', () => {
+  it('does not merge distinct exact Gemini model ids', () => {
     const mergedSource = [
       '{',
       '  "provider": {',
@@ -145,12 +145,13 @@ describe('OpenCode JSONC config editing', () => {
     const updated = updateOpenCodeConfigJsonc(mergedSource, {
       apiKey: 'dedicated-key',
       baseUrl: 'http://127.0.0.1:8045',
-      models: [{ id: 'gemini-3.1-pro' }],
+      models: [{ id: 'gemini-3.1-pro-low' }],
     });
 
-    expect(updated).not.toContain('"gemini-3.1-pro-low"');
+    expect(updated).toContain('"gemini-3.1-pro-low"');
     expect(updated).toContain('// retain this alias comment');
     expect(updated).toContain('"custom": "canonical"');
+    expect(updated).toContain('"custom": "alias"');
     expect(updated).toContain('"aliasOnly": true');
   });
 

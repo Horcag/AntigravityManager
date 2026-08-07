@@ -18,7 +18,7 @@ function createWebSearchRequest(model: string): ClaudeRequest {
 
 describe('ClaudeRequestMapper web-search model compatibility', () => {
   it.each(['gemini-pro-agent', 'gemini-3.5-flash-high', 'agent-pro'])(
-    'keeps allowlisted model %s when web search is enabled',
+    'keeps explicitly selected model %s when web search is enabled',
     (model) => {
       const body = transformClaudeRequestIn(createWebSearchRequest(model));
 
@@ -27,10 +27,10 @@ describe('ClaudeRequestMapper web-search model compatibility', () => {
     },
   );
 
-  it('falls back to Gemini Flash for a model outside the web-search allowlist', () => {
+  it('keeps an unknown model for the upstream to validate', () => {
     const body = transformClaudeRequestIn(createWebSearchRequest('custom-model'));
 
-    expect(body.model).toBe('gemini-3-flash');
+    expect(body.model).toBe('custom-model');
     expect(body.request.tools).toContainEqual({ googleSearch: {} });
   });
 });

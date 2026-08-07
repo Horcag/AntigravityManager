@@ -14,9 +14,10 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   // For now just save
   const previous = ConfigManager.getCachedConfig() ?? ConfigManager.loadConfig();
   await ConfigManager.saveConfig(config);
-  setServerConfig(config.proxy);
-  logger.setErrorReportingEnabled(config.error_reporting_enabled);
-  if (previous.auto_startup !== config.auto_startup) {
-    syncAutoStart(config);
+  const savedConfig = ConfigManager.getCachedConfig() ?? config;
+  setServerConfig(savedConfig.proxy);
+  logger.setErrorReportingEnabled(savedConfig.error_reporting_enabled);
+  if (previous.auto_startup !== savedConfig.auto_startup) {
+    syncAutoStart(savedConfig);
   }
 }

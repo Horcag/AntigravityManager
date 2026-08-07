@@ -30,7 +30,7 @@ export function applyAnthropicModelVariant(
   return {
     request: {
       ...request,
-      model: variant.model,
+      model: request.model,
       max_tokens: applyAnthropicOutputLimit(request.max_tokens, variant.maxOutputTokens),
       thinking:
         request.thinking?.type === 'disabled'
@@ -105,7 +105,7 @@ export function applyOpenAIModelVariant(request: OpenAIChatRequest): AppliedOpen
   return {
     request: {
       ...request,
-      model: variant.model,
+      model: request.model,
       ...applyOpenAIOutputLimit(request, variant.maxOutputTokens),
       thinking: thinkingDisabled
         ? { type: 'disabled' }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CloudQuotaModelInfo } from '@/modules/cloud-account/types';
 import {
-  FALLBACK_PROXY_EXAMPLE_MODELS,
   buildProxyExampleModels,
   isImageProxyExampleModel,
 } from '@/modules/proxy-gateway/components/proxy-example-models';
@@ -37,12 +36,25 @@ describe('proxy example models', () => {
     expect(models).toEqual([
       { id: 'vendor-preview', name: 'Vendor Preview' },
       { id: 'gemini-3-flash', name: 'gemini-3-flash' },
-      ...FALLBACK_PROXY_EXAMPLE_MODELS.filter((model) => model.id !== 'gemini-3-flash'),
     ]);
   });
 
-  it('uses the complete fallback list when no account quota is available', () => {
-    expect(buildProxyExampleModels([])).toEqual(FALLBACK_PROXY_EXAMPLE_MODELS);
+  it('does not invent example models when provider quota is unavailable', () => {
+    expect(buildProxyExampleModels([])).toEqual([]);
+  });
+
+  it('uses the same public display preset ids as the API catalog', () => {
+    expect(
+      buildProxyExampleModels([
+        {
+          quota: {
+            models: {
+              'gemini-3-flash-agent': quota('Gemini 3.5 Flash (High)'),
+            },
+          },
+        },
+      ]),
+    ).toEqual([{ id: 'gemini-3.5-flash-high', name: 'Gemini 3.5 Flash (High)' }]);
   });
 
   it('detects image variants without depending on a fixed suffix', () => {

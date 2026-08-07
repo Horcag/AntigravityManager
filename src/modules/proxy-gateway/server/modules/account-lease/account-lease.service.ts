@@ -15,12 +15,16 @@ import { AccountLeaseHydrationPolicy } from './policies/account-lease-hydration-
 import { AccountLeaseFulfillmentPolicy } from './policies/account-lease-fulfillment-policy';
 import { AccountLeaseSelectionPolicy } from './policies/account-lease-selection-policy';
 import { AccountLeaseModelPolicy } from './policies/account-lease-model-policy';
-import { type AccountLeaseTokenData, normalizeModelId } from './interfaces/account-lease-token-types';
+import {
+  type AccountLeaseTokenData,
+  normalizeModelId,
+} from './interfaces/account-lease-token-types';
 import {
   AccountLeaseLimitPolicy,
   type AccountLeaseUpstreamErrorParams,
 } from './policies/account-lease-limit-policy';
 import { AccountLeaseConfigPolicy } from './policies/account-lease-config-policy';
+import { ModelAvailabilityService } from '../shared/services/model-availability.service';
 
 interface GetNextTokenOptions {
   sessionKey?: string;
@@ -30,6 +34,13 @@ interface GetNextTokenOptions {
 
 type TokenData = AccountLeaseTokenData;
 type TokenEntry = [string, TokenData];
+export type ModelCatalogStatus = 'known' | 'unknown_model' | 'catalog_unavailable';
+export interface ModelRouteAccountAvailability {
+  accountId: string;
+  exact: boolean;
+  resolvedModel: string;
+  status: 'unknown' | 'available' | 'unavailable';
+}
 
 @Injectable()
 export class AccountLeaseService implements OnModuleInit {
@@ -51,6 +62,7 @@ export class AccountLeaseService implements OnModuleInit {
   private readonly rateLimitTracker: RateLimitTrackerService;
   private readonly accountStore: AccountLeaseAccountStore;
   private readonly upstream: AccountLeaseUpstream;
+  private readonly modelAvailabilityStore?: ModelAvailabilityService;
 
   constructor(
     @Inject(RateLimitTrackerService)
@@ -61,10 +73,14 @@ export class AccountLeaseService implements OnModuleInit {
     @Optional()
     @Inject(ACCOUNT_LEASE_UPSTREAM)
     upstream: AccountLeaseUpstream = googleAccountLeaseUpstreamAdapter,
+    @Optional()
+    @Inject(ModelAvailabilityService)
+    modelAvailabilityStore?: ModelAvailabilityService,
   ) {
     this.rateLimitTracker = rateLimitTracker;
     this.accountStore = accountStore;
     this.upstream = upstream;
+    this.modelAvailabilityStore = modelAvailabilityStore;
 
     this.quotaRefreshPolicy = new AccountLeaseQuotaRefreshPolicy({
       accountStore: this.accountStore,
@@ -79,7 +95,6 @@ export class AccountLeaseService implements OnModuleInit {
     this.tokenCache = new AccountLeaseTokenCache({
       accountStore: this.accountStore,
       getTokenCache: () => this.tokens,
-      applyQuotaSnapshot: (snapshot) => this.quotaRefreshPolicy.applyModelForwardingRules(snapshot),
       logger: this.logger,
     });
     this.hydrationPolicy = new AccountLeaseHydrationPolicy({
@@ -225,14 +240,12 @@ export class AccountLeaseService implements OnModuleInit {
       const filteredAccountPool = modelCapableAccountPool.filter(
         ([accountId]) => !excludedAccountIds.has(accountId),
       );
-      const candidateAccountPool =
-        filteredAccountPool.length > 0 ? filteredAccountPool : modelCapableAccountPool;
-
       if (filteredAccountPool.length === 0 && excludedAccountIds.size > 0) {
-        this.logger.warn(
-          'Exclusion filter removed all accounts; retrying with the full account pool',
-        );
+        this.logger.warn('Exclusion filter removed all accounts; retry pool is exhausted');
+        return null;
       }
+
+      const candidateAccountPool = filteredAccountPool;
 
       if (candidateAccountPool.length === 0) {
         this.logger.warn('No eligible account found after exclusion filtering');
@@ -269,8 +282,19 @@ export class AccountLeaseService implements OnModuleInit {
 
     const exact: TokenEntry[] = [];
     const compatible: TokenEntry[] = [];
-    const unknown: TokenEntry[] = [];
     for (const entry of allTokens) {
+      const resolvedModel = this.modelPolicy.resolveDynamicModelForAccount(entry[0], model);
+      const quotaPercentage = this.modelPolicy.getModelQuotaPercentageForAccount(
+        entry[0],
+        resolvedModel,
+      );
+      if (
+        (quotaPercentage !== undefined && quotaPercentage <= 0) ||
+        this.modelAvailabilityStore?.isUnavailable(entry[0], model) ||
+        this.modelAvailabilityStore?.isUnavailable(entry[0], resolvedModel)
+      ) {
+        continue;
+      }
       const exactAvailability = this.modelPolicy.getExactModelAvailabilityForAccount(
         entry[0],
         model,
@@ -283,19 +307,10 @@ export class AccountLeaseService implements OnModuleInit {
       const availability = this.modelPolicy.getModelAvailabilityForAccount(entry[0], model);
       if (availability === 'available') {
         compatible.push(entry);
-      } else if (availability === 'unknown') {
-        unknown.push(entry);
       }
     }
 
-    if (exact.length > 0) {
-      return exact;
-    }
-    if (compatible.length > 0) {
-      return compatible;
-    }
-
-    return unknown;
+    return [...exact, ...compatible];
   }
 
   public resetSelectionState(): void {
@@ -391,20 +406,50 @@ export class AccountLeaseService implements OnModuleInit {
     return this.modelPolicy.getAllCollectedModels();
   }
 
+  getModelCatalogStatus(model: string): ModelCatalogStatus {
+    let hasCapabilityMetadata = false;
+    for (const accountId of this.tokens.keys()) {
+      const availability = this.modelPolicy.getModelAvailabilityForAccount(accountId, model);
+      if (availability === 'available') {
+        return 'known';
+      }
+      if (availability === 'unavailable') {
+        hasCapabilityMetadata = true;
+      }
+    }
+    return hasCapabilityMetadata ? 'unknown_model' : 'catalog_unavailable';
+  }
+
+  getModelRouteAvailability(model: string): ModelRouteAccountAvailability[] {
+    return [...this.tokens.keys()].map((accountId) => {
+      const resolvedModel = this.modelPolicy.resolveDynamicModelForAccount(accountId, model);
+      const status = this.modelPolicy.getModelAvailabilityForAccount(accountId, model);
+      const quotaPercentage = this.modelPolicy.getModelQuotaPercentageForAccount(
+        accountId,
+        resolvedModel,
+      );
+      return {
+        accountId,
+        exact:
+          this.modelPolicy.getExactModelAvailabilityForAccount(accountId, model) === 'available',
+        resolvedModel,
+        status:
+          status === 'available' &&
+          ((quotaPercentage !== undefined && quotaPercentage <= 0) ||
+            this.modelAvailabilityStore?.isUnavailable(accountId, model) ||
+            this.modelAvailabilityStore?.isUnavailable(accountId, resolvedModel))
+            ? 'unavailable'
+            : status,
+      };
+    });
+  }
+
   private getAvailableModelsFromToken(tokenData: TokenData): Set<string> {
     return this.modelPolicy.getAvailableModelsFromToken(tokenData);
   }
 
-  private buildDynamicModelCandidates(modelName: string): string[] | null {
-    return this.modelPolicy.buildDynamicModelCandidates(modelName);
-  }
-
   resolveDynamicModelForAccount(accountId: string, mappedModel: string): string {
     return this.modelPolicy.resolveDynamicModelForAccount(accountId, mappedModel);
-  }
-
-  markModelUnrequestable(modelId: string): void {
-    this.modelPolicy.markModelUnrequestable(modelId);
   }
 
   getModelOutputLimitForAccount(accountId: string, modelName: string): number | undefined {

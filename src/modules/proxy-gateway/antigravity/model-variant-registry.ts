@@ -90,7 +90,7 @@ const MODEL_VARIANT_FAMILIES: ModelVariantFamily[] = [
     canonicalModel: 'gemini-3.5-flash',
     variants: GEMINI_35_FLASH_VARIANTS,
     aliases: {
-      'gemini-3.5-flash-high': 'tier',
+      'gemini-3.5-flash-high': 'high',
       'gemini-3.5-flash-medium': 'medium',
       'gemini-3.5-flash-low': 'low',
       'gemini-3-flash': 'tier',
@@ -100,7 +100,7 @@ const MODEL_VARIANT_FAMILIES: ModelVariantFamily[] = [
     canonicalModel: 'gemini-3.1-pro',
     variants: GEMINI_31_PRO_VARIANTS,
     aliases: {
-      'gemini-3.1-pro-high': 'tier',
+      'gemini-3.1-pro-high': 'high',
       'gemini-pro': 'tier',
       'gemini-3.1-pro-low': 'low',
     },
@@ -131,24 +131,6 @@ function resolveNonVariantModel(
   tier: ModelVariantTier,
   budgetTokens: number | undefined,
 ): ResolvedModelVariant | null {
-  if (
-    model === 'gemini-3.1-flash-lite' ||
-    model === 'gemini-2.5-flash-lite' ||
-    model === 'gemini-2.5-flash' ||
-    model === 'gemini-2.5-flash-thinking'
-  ) {
-    return {
-      canonicalModel: 'gemini-3.1-flash-lite',
-      model: 'gemini-3.1-flash-lite',
-      tier,
-      thinkingBudget: 0,
-      maxOutputTokens: 16384,
-      includeThoughts: false,
-      preserveClientBudget: false,
-      supportsTools: false,
-    };
-  }
-
   if (model === 'claude-opus-4-6' || model === 'claude-opus-4-6-thinking') {
     return {
       canonicalModel: 'claude-opus-4-6-thinking',

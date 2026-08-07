@@ -20,149 +20,115 @@ function createToken(overrides: Partial<AccountLeaseTokenData> = {}): AccountLea
 }
 
 function createPolicy(tokenCache: Map<string, AccountLeaseTokenData>) {
-  const logger = {
-    log: vi.fn(),
-  };
-  const policy = new AccountLeaseModelPolicy({
-    getTokenCache: () => tokenCache,
-    logger,
-  });
-
+  const logger = { log: vi.fn() };
   return {
     logger,
-    policy,
+    policy: new AccountLeaseModelPolicy({
+      getTokenCache: () => tokenCache,
+      logger,
+    }),
   };
 }
 
 describe('AccountLeaseModelPolicy', () => {
-  it('distinguishes an exact model from a compatible family fallback', () => {
+  it('distinguishes exact availability without inferring family compatibility', () => {
     const tokenCache = new Map([
       [
-        'exact',
+        'acc-1',
         createToken({
-          model_quotas: {
-            'gemini-3.1-pro-low': 80,
-          },
+          model_quotas: { 'gemini-3.1-pro-low': 80 },
         }),
       ],
+    ]);
+    const { policy } = createPolicy(tokenCache);
+
+    expect(policy.getExactModelAvailabilityForAccount('acc-1', 'gemini-3.1-pro-low')).toBe(
+      'available',
+    );
+    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3-pro')).toBe('unavailable');
+    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro')).toBe('gemini-3-pro');
+  });
+
+  it('does not substitute image model versions', () => {
+    const tokenCache = new Map([
       [
-        'fallback',
+        'acc-1',
         createToken({
           model_quotas: {
-            'gemini-pro-agent': 80,
+            'gemini-3.1-pro-image': 80,
+            'gemini-3.1-flash-image': 80,
           },
         }),
       ],
     ]);
     const { policy } = createPolicy(tokenCache);
 
-    expect([
-      policy.getExactModelAvailabilityForAccount('exact', 'gemini-3.1-pro-low'),
-      policy.getExactModelAvailabilityForAccount('fallback', 'gemini-3.1-pro-low'),
-    ]).toEqual(['available', 'unavailable']);
+    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro-image')).toBe(
+      'gemini-3-pro-image',
+    );
+    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-flash-image')).toBe(
+      'gemini-3-flash-image',
+    );
   });
 
-  it('rejects an unregistered same-family preview as a physical fallback', () => {
+  it('uses a forwarding rule only from the selected account', () => {
     const tokenCache = new Map([
       [
         'acc-1',
         createToken({
-          model_quotas: {
-            'gemini-3.1-pro-preview': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3.1-pro-low')).toBe(
-      'unavailable',
-    );
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.1-pro-low')).toBe(
-      'gemini-3.1-pro-low',
-    );
-  });
-
-  it('allows a registered same-family physical fallback with complete parameters', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-pro-agent': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3.1-pro-low')).toBe('available');
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.1-pro-low')).toBe(
-      'gemini-pro-agent',
-    );
-  });
-
-  it('rewrites gemini pro requests to the first available account candidate', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.1-pro-low': 80,
-          },
-        }),
-      ],
-    ]);
-    const { logger, policy } = createPolicy(tokenCache);
-
-    const resolved = policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro');
-
-    expect(resolved).toBe('gemini-3.1-pro-low');
-    expect(logger.log).toHaveBeenCalledWith(
-      '[Dynamic-Model-Rewrite] account=acc-1 gemini-3-pro -> gemini-3.1-pro-low',
-    );
-  });
-
-  it('keeps original model when dynamic rewrite is not applicable', () => {
-    const tokenCache = new Map([['acc-1', createToken()]]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-flash')).toBe('gemini-3-flash');
-  });
-
-  it('uses quota forwarding rules before family candidates', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.5-flash-extra-low': 80,
-          },
+          model_quotas: { 'gemini-3.5-flash-extra-low': 80 },
           model_forwarding_rules: {
             'gemini-3.5-flash-high': 'gemini-3.5-flash-extra-low',
           },
         }),
       ],
+      [
+        'acc-2',
+        createToken({
+          account_id: 'acc-2',
+          model_quotas: { 'gemini-3.5-flash-extra-low': 80 },
+        }),
+      ],
     ]);
     const { logger, policy } = createPolicy(tokenCache);
 
-    const resolved = policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-high');
-
-    expect(resolved).toBe('gemini-3.5-flash-extra-low');
+    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-high')).toBe(
+      'gemini-3.5-flash-extra-low',
+    );
+    expect(policy.resolveDynamicModelForAccount('acc-2', 'gemini-3.5-flash-high')).toBe(
+      'gemini-3.5-flash-high',
+    );
     expect(logger.log).toHaveBeenCalledWith(
-      '[Dynamic-Model-Rewrite] account=acc-1 gemini-3.5-flash-high -> gemini-3.5-flash-extra-low',
+      '[Provider-Model-Rewrite] account=acc-1 gemini-3.5-flash-high -> gemini-3.5-flash-extra-low',
     );
   });
 
-  it('routes Antigravity display presets to their real upstream model IDs', () => {
+  it('ignores forwarding targets the selected account does not advertise', () => {
+    const tokenCache = new Map([
+      [
+        'acc-1',
+        createToken({
+          model_quotas: { 'gemini-3.5-flash-high': 80 },
+          model_forwarding_rules: {
+            'gemini-3.5-flash-high': 'gemini-future-unavailable',
+          },
+        }),
+      ],
+    ]);
+    const { policy } = createPolicy(tokenCache);
+
+    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-high')).toBe(
+      'gemini-3.5-flash-high',
+    );
+  });
+
+  it('routes provider-advertised display presets to their physical upstream IDs', () => {
     const tokenCache = new Map([
       [
         'acc-1',
         createToken({
           model_quotas: {
             'gemini-3-flash-agent': 80,
-            'gemini-3.5-flash-low': 80,
-            'gemini-3.5-flash-extra-low': 80,
             'claude-sonnet-4-6': 80,
           },
           quota: {
@@ -171,16 +137,6 @@ describe('AccountLeaseModelPolicy', () => {
                 percentage: 80,
                 resetTime: '',
                 display_name: 'Gemini 3.5 Flash (High)',
-              },
-              'gemini-3.5-flash-low': {
-                percentage: 80,
-                resetTime: '',
-                display_name: 'Gemini 3.5 Flash (Medium)',
-              },
-              'gemini-3.5-flash-extra-low': {
-                percentage: 80,
-                resetTime: '',
-                display_name: 'Gemini 3.5 Flash (Low)',
               },
               'claude-sonnet-4-6': {
                 percentage: 80,
@@ -192,165 +148,36 @@ describe('AccountLeaseModelPolicy', () => {
         }),
       ],
     ]);
-    const { logger, policy } = createPolicy(tokenCache);
+    const { policy } = createPolicy(tokenCache);
 
     expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-high')).toBe(
       'gemini-3-flash-agent',
     );
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-medium')).toBe(
-      'gemini-3.5-flash-low',
-    );
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.5-flash-low')).toBe(
-      'gemini-3.5-flash-extra-low',
-    );
     expect(policy.resolveDynamicModelForAccount('acc-1', 'claude-sonnet-4-6-thinking')).toBe(
       'claude-sonnet-4-6',
     );
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3.5-flash-high')).toBe(
-      'available',
-    );
     expect(policy.getAllCollectedModels()).toEqual(
-      new Set([
-        'gemini-3.5-flash-high',
-        'gemini-3.5-flash-medium',
-        'gemini-3.5-flash-low',
-        'claude-sonnet-4-6-thinking',
-      ]),
-    );
-    expect(logger.log).toHaveBeenCalledWith(
-      '[Dynamic-Model-Rewrite] account=acc-1 gemini-3.5-flash-high -> gemini-3-flash-agent',
+      new Set(['gemini-3.5-flash-high', 'claude-sonnet-4-6-thinking']),
     );
   });
 
-  it('reports whether an account can actually serve a dynamically listed model', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3-flash': 80,
-          },
-        }),
-      ],
-    ]);
+  it('reports unknown when an account has no capability metadata', () => {
+    const tokenCache = new Map([['acc-1', createToken()]]);
     const { policy } = createPolicy(tokenCache);
 
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3-flash')).toBe('available');
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gpt-oss-120b-medium')).toBe(
-      'unavailable',
-    );
+    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-3-flash')).toBe('unknown');
     expect(policy.getModelAvailabilityForAccount('missing', 'gemini-3-flash')).toBe('unknown');
   });
 
-  it('keeps the registered Gemini Pro suffix instead of an unregistered preview', () => {
+  it('reads output limits and thinking budgets from account quota state', () => {
     const tokenCache = new Map([
       [
         'acc-1',
         createToken({
-          model_quotas: {
-            'gemini-3.1-pro-preview': 80,
-            'gemini-3.1-pro-high': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.1-pro-high')).toBe(
-      'gemini-3.1-pro-high',
-    );
-  });
-
-  it('uses gemini-pro-agent when the leased account advertises it', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-pro-agent': 80,
-            'gemini-3.1-pro-preview': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-pro-agent')).toBe(
-      'gemini-pro-agent',
-    );
-    expect(policy.getModelAvailabilityForAccount('acc-1', 'gemini-pro-agent')).toBe('available');
-  });
-
-  it('rewrites image models only within their requested quality tier', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.1-pro-image': 80,
-            'gemini-3.1-flash-image': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro-image')).toBe(
-      'gemini-3.1-pro-image',
-    );
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-flash-image')).toBe(
-      'gemini-3.1-flash-image',
-    );
-  });
-
-  it('keeps the requested image model when that exact version is available', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3-pro-image': 80,
-            'gemini-3.1-pro-image': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro-image')).toBe(
-      'gemini-3-pro-image',
-    );
-  });
-
-  it('does not silently downgrade a Pro image request to Flash', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.1-flash-image': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro-image')).toBe(
-      'gemini-3-pro-image',
-    );
-  });
-
-  it('reads output limits and thinking budgets from token quota state', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_limits: {
-            'gemini-3-pro': 8192,
-          },
+          model_limits: { 'MODELS/GEMINI-3-PRO': 8192 },
           quota: {
             models: {
-              'models/gemini-3-pro': {
+              'MODELS/GEMINI-3-PRO': {
                 percentage: 100,
                 resetTime: '2026-06-20T00:00:00.000Z',
                 thinking_budget: 32768.8,
@@ -364,135 +191,5 @@ describe('AccountLeaseModelPolicy', () => {
 
     expect(policy.getModelOutputLimitForAccount('acc-1', 'models/gemini-3-pro')).toBe(8192);
     expect(policy.getModelThinkingBudgetForAccount('acc-1', 'gemini-3-pro')).toBe(32768);
-  });
-
-  it('reroutes an upstream-rejected variant to the best advertised family sibling', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.6-flash-low': 80,
-            'gemini-3.6-flash-medium': 80,
-            'gemini-3.6-flash-tiered': 80,
-            'gemini-3.5-flash-low': 80,
-          },
-        }),
-      ],
-    ]);
-    const { logger, policy } = createPolicy(tokenCache);
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.6-flash-low')).toBe(
-      'gemini-3.6-flash-low',
-    );
-
-    policy.markModelUnrequestable('gemini-3.6-flash-low');
-
-    expect(policy.getAllCollectedModels()).toEqual(
-      new Set(['gemini-3.6-flash-medium', 'gemini-3.6-flash-tiered', 'gemini-3.5-flash-low']),
-    );
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.6-flash-low')).toBe(
-      'gemini-3.6-flash-tiered',
-    );
-    expect(logger.log).toHaveBeenCalledWith(
-      '[Unrequestable-Model-Rewrite] account=acc-1 gemini-3.6-flash-low -> gemini-3.6-flash-tiered',
-    );
-  });
-
-  it('skips unrequestable siblings and stays cross-family safe', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.6-flash-low': 80,
-            'gemini-3.6-flash-medium': 80,
-            'gemini-3.5-flash-high': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    policy.markModelUnrequestable('gemini-3.6-flash-low');
-    policy.markModelUnrequestable('gemini-3.6-flash-medium');
-
-    // Both 3.6 variants are rejected and 3.5 belongs to another family base,
-    // so the requested id passes through unchanged.
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.6-flash-low')).toBe(
-      'gemini-3.6-flash-low',
-    );
-  });
-
-  it('never reroutes to a sibling only advertised by a different account', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.6-flash-low': 80,
-          },
-        }),
-      ],
-      [
-        'acc-2',
-        createToken({
-          account_id: 'acc-2',
-          model_quotas: {
-            'gemini-3.6-flash-tiered': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    policy.markModelUnrequestable('gemini-3.6-flash-low');
-
-    // acc-1 does not advertise the tiered sibling itself, so it must not be
-    // rewritten to a model that only acc-2 can serve.
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3.6-flash-low')).toBe(
-      'gemini-3.6-flash-low',
-    );
-    expect(policy.resolveDynamicModelForAccount('acc-2', 'gemini-3.6-flash-low')).toBe(
-      'gemini-3.6-flash-tiered',
-    );
-  });
-
-  it('never selects an unrequestable model through fallback candidate paths', () => {
-    const tokenCache = new Map([
-      [
-        'acc-1',
-        createToken({
-          model_quotas: {
-            'gemini-3.1-pro-preview': 80,
-            'gemini-3.1-pro-low': 80,
-          },
-        }),
-      ],
-    ]);
-    const { policy } = createPolicy(tokenCache);
-
-    // The pro-candidate chain prefers the preview id; once upstream rejects
-    // it, fallback selection must skip it instead of re-serving it.
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro')).toBe(
-      'gemini-3.1-pro-preview',
-    );
-
-    policy.markModelUnrequestable('gemini-3.1-pro-preview');
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'gemini-3-pro')).toBe(
-      'gemini-3.1-pro-low',
-    );
-  });
-
-  it('keeps unknown models untouched when marked unrequestable without siblings', () => {
-    const tokenCache = new Map([['acc-1', createToken()]]);
-    const { policy } = createPolicy(tokenCache);
-
-    policy.markModelUnrequestable('claude-opus-4-6-thinking');
-
-    expect(policy.resolveDynamicModelForAccount('acc-1', 'claude-opus-4-6-thinking')).toBe(
-      'claude-opus-4-6-thinking',
-    );
   });
 });

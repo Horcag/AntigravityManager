@@ -56,19 +56,7 @@ const modelSpecs = {
       is_thinking: false,
     },
   },
-  aliases: {
-    'gpt-4o': 'gemini-3-flash',
-    'gpt-3.5-turbo': 'gemini-3-flash',
-    'gemini-2.0-flash': 'gemini-3-flash',
-    'gemini-2.5-flash': 'gemini-3-flash',
-    'gemini-3.1-pro': 'gemini-3.1-pro-high',
-    'gemini-3.1-pro-preview': 'gemini-3.1-pro-high',
-    'claude-sonnet-4-6': 'claude-sonnet-4-6-thinking',
-    'claude-sonnet-4-5': 'claude-sonnet-4-6-thinking',
-    'claude-3-5-sonnet': 'claude-sonnet-4-6-thinking',
-    'claude-3-7-sonnet': 'claude-sonnet-4-6-thinking',
-    'claude-opus-4-5-thinking': 'claude-opus-4-6-thinking',
-  },
+  aliases: {},
 } as const;
 
 export default modelSpecs;

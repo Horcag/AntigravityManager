@@ -1,11 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_APP_CONFIG, type ProxyConfig } from '@/modules/config/types';
 import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { setServerConfig } from '../../server/server-config';
-import {
-  getAllDynamicModels,
-  updateDynamicForwardingRules,
-} from '@/modules/proxy-gateway/antigravity/ModelMapping';
+import { getAllDynamicModels } from '@/modules/proxy-gateway/antigravity/ModelMapping';
 
 function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
   return {
@@ -19,6 +16,10 @@ function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
 }
 
 describe('ModelRoutingService', () => {
+  beforeEach(() => {
+    setServerConfig(createProxyConfig({}));
+  });
+
   it('advertises only discovered models and concrete configured aliases', () => {
     expect(
       getAllDynamicModels(
@@ -37,30 +38,72 @@ describe('ModelRoutingService', () => {
     expect(getAllDynamicModels()).toEqual([]);
   });
 
-  it('normalizes Gemini model path prefixes and known Gemini aliases', () => {
+  it('does not hide provider-discovered models based on family or endpoint heuristics', () => {
+    expect(
+      getAllDynamicModels({}, ['gemini-2.5-flash', 'gemini-3-pro-image', 'claude-sonnet-4-5']),
+    ).toEqual(['claude-sonnet-4-5', 'gemini-2.5-flash', 'gemini-3-pro-image']);
+  });
+
+  it('normalizes only the Google resource path prefix', () => {
     const policy = new ModelRoutingService();
 
     expect(policy.normalizeGeminiModel('models/gemini-2.5-flash')).toBe('gemini-2.5-flash');
-    expect(policy.resolveTargetModel('models/gemini-3.1-pro-preview')).toBe('gemini-3.1-pro-high');
-    expect(policy.resolveTargetModel('gemini-3-flash-image')).toBe('gemini-3.1-flash-image');
+    expect(policy.resolveTargetModel('models/gemini-3-flash-preview')).toBe(
+      'gemini-3-flash-preview',
+    );
+    expect(policy.resolveTargetModel('gemini-3-pro-image-preview')).toBe(
+      'gemini-3-pro-image-preview',
+    );
   });
 
-  it('maps dotted Opus 4.6 aliases to the verified thinking model', () => {
+  it('does not silently substitute model families or versions', () => {
     const policy = new ModelRoutingService();
 
-    expect(policy.resolveTargetModel('claude-opus-4.6')).toBe('claude-opus-4-6-thinking');
-    expect(policy.resolveTargetModel('claude-opus-4.6-thinking')).toBe('claude-opus-4-6-thinking');
-  });
-
-  it('routes Gemini Pro high presets through the upstream agent model', () => {
-    const policy = new ModelRoutingService();
-
-    expect(policy.resolveTargetModel('gemini-3.1-pro-high')).toBe('gemini-pro-agent');
-    expect(policy.resolveTargetModel('gemini-3-pro-high')).toBe('gemini-pro-agent');
+    expect(policy.resolveTargetModel('gpt-4o')).toBe('gpt-4o');
+    expect(policy.resolveTargetModel('claude-opus-4.6')).toBe('claude-opus-4.6');
+    expect(policy.resolveTargetModel('gemini-3.1-pro-preview')).toBe('gemini-3.1-pro-preview');
+    expect(policy.resolveTargetModel('gemini-3-flash-image')).toBe('gemini-3-flash-image');
     expect(policy.resolveTargetModel('gemini-pro-agent')).toBe('gemini-pro-agent');
   });
 
-  it('applies configured wildcard mappings before default model routing', () => {
+  it('applies an explicit structured alias and reports its source', () => {
+    setServerConfig(
+      createProxyConfig({
+        model_aliases: [{ alias: 'my-opus', target: 'claude-opus-4-6-thinking', enabled: true }],
+      }),
+    );
+    const policy = new ModelRoutingService();
+
+    expect(policy.resolveModelRoute('my-opus')).toEqual({
+      requestedModel: 'my-opus',
+      normalizedModel: 'my-opus',
+      targetModel: 'claude-opus-4-6-thinking',
+      source: 'configured',
+      alias: 'my-opus',
+      enabled: true,
+      wildcard: false,
+    });
+  });
+
+  it('keeps a disabled structured alias canonical and shadows legacy mappings', () => {
+    setServerConfig(
+      createProxyConfig({
+        model_aliases: [{ alias: 'custom-fast', target: 'gemini-3-flash', enabled: false }],
+        custom_mapping: { 'custom-fast': 'gemini-3.1-flash-lite' },
+      }),
+    );
+    const policy = new ModelRoutingService();
+
+    expect(policy.resolveModelRoute('custom-fast')).toEqual(
+      expect.objectContaining({
+        targetModel: 'custom-fast',
+        source: 'disabled',
+        enabled: false,
+      }),
+    );
+  });
+
+  it('preserves legacy wildcard mappings as explicit user configuration', () => {
     setServerConfig(
       createProxyConfig({
         custom_mapping: {
@@ -71,13 +114,6 @@ describe('ModelRoutingService', () => {
     const policy = new ModelRoutingService();
 
     expect(policy.resolveTargetModel('custom-fast')).toBe('gemini-3-flash');
-  });
-
-  it('applies dynamic deprecated-model forwarding to quota-provided targets', () => {
-    updateDynamicForwardingRules('Gemini-Deprecated-Test', 'gemini-future-test');
-    const policy = new ModelRoutingService();
-
-    expect(policy.resolveTargetModel('gemini-deprecated-test')).toBe('gemini-future-test');
   });
 
   it('adds Claude beta headers only for Claude-compatible models', () => {

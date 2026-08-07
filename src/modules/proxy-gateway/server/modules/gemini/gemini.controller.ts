@@ -17,10 +17,14 @@ import { Observable } from 'rxjs';
 import { ProxyGuard } from '../../guards/proxy.guard';
 import { ProxyService } from '../../proxy.service';
 import { GeminiRequest } from '../../common/interfaces/request-interfaces';
-import { getServerConfig } from '../../../../../server/server-config';
 import { getAllDynamicModels } from '../../../antigravity/ModelMapping';
 import { AccountLeaseService } from '../account-lease/account-lease.service';
 import { validateGeminiSystemInstruction, sanitizeUpstreamError } from './gemini-wire';
+import {
+  pauseObservableUpstream,
+  resumeObservableUpstream,
+} from '../../common/stream-backpressure';
+import { createModelRouteHeaders, getModelRouteMetadata } from '../../common/model-route-metadata';
 
 type GeminiModelMetadata = {
   name: string;
@@ -151,13 +155,18 @@ export class GeminiController {
       if (action === 'streamGenerateContent') {
         const stream = await this.proxyService.handleGeminiStreamGenerateContent(model, body);
         if (stream instanceof Observable) {
-          this.writeObservableSseResponse(res, stream);
+          this.writeObservableSseResponse(
+            res,
+            stream,
+            createModelRouteHeaders(getModelRouteMetadata(stream)),
+          );
           return;
         }
       }
 
       if (action === 'generateContent') {
         const result = await this.proxyService.handleGeminiGenerateContent(model, body);
+        this.applyResponseHeaders(res, createModelRouteHeaders(getModelRouteMetadata(result)));
         res.status(HttpStatus.OK).send(result);
         return;
       }
@@ -217,9 +226,8 @@ export class GeminiController {
   }
 
   private buildGeminiModelList(): GeminiModelMetadata[] {
-    const config = getServerConfig();
     const dynamicModelIds = getAllDynamicModels(
-      config?.custom_mapping ?? {},
+      {},
       this.accountLeaseService?.getAllCollectedModels(),
     );
 
@@ -235,11 +243,16 @@ export class GeminiController {
     };
   }
 
-  private writeObservableSseResponse(res: FastifyReply, stream: Observable<unknown>): void {
+  private writeObservableSseResponse(
+    res: FastifyReply,
+    stream: Observable<unknown>,
+    responseHeaders: Record<string, string> = {},
+  ): void {
     if (!res.raw || !isFunction(res.raw.writeHead) || !isFunction(res.raw.write)) {
       res.header('Content-Type', 'text/event-stream');
       res.header('Cache-Control', 'no-cache');
       res.header('Connection', 'keep-alive');
+      this.applyResponseHeaders(res, responseHeaders);
       res.send(stream);
       return;
     }
@@ -252,34 +265,66 @@ export class GeminiController {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
+      ...responseHeaders,
     });
 
-    const subscription = stream.subscribe({
+    let waitingForDrain = false;
+    let subscription: { unsubscribe(): void } | undefined;
+    const clearDrainListener = (): void => {
+      if (!waitingForDrain) {
+        return;
+      }
+      waitingForDrain = false;
+      res.raw.removeListener('drain', onDrain);
+    };
+    const onDrain = (): void => {
+      waitingForDrain = false;
+      resumeObservableUpstream(stream);
+    };
+    const onClose = (): void => {
+      clearDrainListener();
+      subscription?.unsubscribe();
+    };
+    const cleanupResponseListeners = (): void => {
+      clearDrainListener();
+      res.raw.removeListener('close', onClose);
+    };
+
+    res.raw.on('close', onClose);
+    subscription = stream.subscribe({
       next: (chunk) => {
         if (res.raw.writableEnded) {
           return;
         }
         const payload = isString(chunk) ? chunk : String(chunk ?? '');
-        res.raw.write(payload);
+        if (!res.raw.write(payload) && !waitingForDrain) {
+          waitingForDrain = true;
+          pauseObservableUpstream(stream);
+          res.raw.once('drain', onDrain);
+        }
       },
       error: (error) => {
         if (res.raw.writableEnded) {
           return;
         }
+        cleanupResponseListeners();
         const sanitized = sanitizeUpstreamError(error);
         res.raw.write(`data: ${JSON.stringify(sanitized.errorEnvelope)}\n\n`);
         res.raw.end();
       },
       complete: () => {
+        cleanupResponseListeners();
         if (!res.raw.writableEnded) {
           res.raw.end();
         }
       },
     });
+  }
 
-    res.raw.on('close', () => {
-      subscription.unsubscribe();
-    });
+  private applyResponseHeaders(res: FastifyReply, headers: Record<string, string>): void {
+    for (const [name, value] of Object.entries(headers)) {
+      res.header(name, value);
+    }
   }
 
   private supportsReplyHijack(reply: FastifyReply): reply is FastifyReply & { hijack: () => void } {

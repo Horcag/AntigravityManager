@@ -99,7 +99,7 @@ describe('RateLimitTrackerService parity replay', () => {
     expect(tracker.isRateLimited('acc-success', 'gemini-3.1-flash-lite')).toBe(true);
   });
 
-  it('clears recovered model aliases without clearing another model family', () => {
+  it('clears only exact recovered model locks', () => {
     const tracker = new RateLimitTrackerService();
     const resetTime = new Date(Date.now() + 60_000).toISOString();
 
@@ -116,7 +116,10 @@ describe('RateLimitTrackerService parity replay', () => {
       'gemini-3.1-flash-lite',
     );
 
-    expect(tracker.clearModelFamilies('acc-recovered', ['gemini-3.1-pro'])).toBe(1);
+    expect(tracker.clearModels('acc-recovered', ['gemini-3.1-pro'])).toBe(0);
+    expect(tracker.isRateLimited('acc-recovered', 'gemini-3.1-pro-high')).toBe(true);
+
+    expect(tracker.clearModels('acc-recovered', ['models/GEMINI-3.1-PRO-HIGH'])).toBe(1);
     expect(tracker.isRateLimited('acc-recovered', 'gemini-3.1-pro-high')).toBe(false);
     expect(tracker.isRateLimited('acc-recovered', 'gemini-3.1-flash-lite')).toBe(true);
   });

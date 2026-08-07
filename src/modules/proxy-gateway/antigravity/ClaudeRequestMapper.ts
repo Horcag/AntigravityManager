@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { isEmpty, isPlainObject, isString, sortBy } from 'lodash-es';
-import { mapClaudeModelToGemini, normalizeGeminiModelAlias } from './ModelMapping';
+import { mapClaudeModelToGemini } from './ModelMapping';
 import { getMaxOutputTokens, getThinkingBudget } from './ModelSpecs';
 import { cleanJsonSchema, normalizeObjectJsonSchema } from './JsonSchemaUtils';
 import type { SignatureKey, SignatureStore } from './SignatureStore';
@@ -102,9 +102,7 @@ export function transformClaudeRequestIn(
   );
 
   // Map model name
-  const mappedModel = resolvedModel
-    ? normalizeGeminiModelAlias(resolvedModel)
-    : mapClaudeModelToGemini(claudeReq.model);
+  const mappedModel = mapClaudeModelToGemini(resolvedModel ?? claudeReq.model);
 
   // Convert Claude tools to Tool array for networking detection
   const normalizedTools: Tool[] | undefined = claudeReq.tools
@@ -350,70 +348,32 @@ function resolveRequestConfig(
 ): ResolvedRequestConfig {
   // 1. Image Generation Check
   if (isGeminiImageModel(mappedModel)) {
-    const { imageConfig, parsedBaseModel } = parseImageConfig(originalModel, metadata);
+    const imageConfig = parseImageConfig(originalModel, metadata);
     return {
       requestType: 'image_gen',
       injectGoogleSearch: false,
-      finalModel: parsedBaseModel,
+      finalModel: mappedModel,
       imageConfig,
     };
   }
 
   const hasNetworkingTool = detectsNetworkingTool(tools);
 
-  // Strip -online suffix
-  const isOnlineSuffix = originalModel.endsWith('-online');
-
-  const enableNetworking = isOnlineSuffix || hasNetworkingTool;
-
-  let finalModel = mappedModel.replace(/-online$/, '');
-  finalModel = normalizeGeminiModelAlias(finalModel);
-
-  if (enableNetworking && !supportsWebSearchModel(finalModel)) {
-    finalModel = 'gemini-3-flash';
-  }
+  const enableNetworking = hasNetworkingTool;
 
   return {
     requestType: enableNetworking ? 'web_search' : 'agent',
     injectGoogleSearch: enableNetworking,
-    finalModel,
+    finalModel: mappedModel,
     imageConfig: null,
   };
-}
-
-function supportsWebSearchModel(modelName: string): boolean {
-  const normalized = modelName.toLowerCase();
-  return (
-    normalized === 'gemini-2.5-flash' ||
-    normalized === 'gemini-1.5-pro' ||
-    normalized.startsWith('gemini-1.5-pro-') ||
-    normalized.startsWith('gemini-2.5-flash-') ||
-    normalized.startsWith('gemini-2.0-flash') ||
-    normalized.startsWith('gemini-3-') ||
-    normalized.startsWith('gemini-3.') ||
-    normalized.startsWith('gemini-3.5-') ||
-    normalized.startsWith('gemini-pro-') ||
-    normalized.startsWith('agent') ||
-    normalized.includes('claude-3-5-sonnet') ||
-    normalized.includes('claude-3-opus') ||
-    normalized.includes('claude-sonnet') ||
-    normalized.includes('claude-opus') ||
-    normalized.includes('claude-4')
-  );
 }
 
 /**
  * Parses image generation configuration
  * Extracts aspect ratio and resolution settings from model name
  */
-function parseImageConfig(
-  modelName: string,
-  metadata?: ClaudeRequest['metadata'],
-): {
-  imageConfig: ImageConfig;
-  parsedBaseModel: string;
-} {
-  const normalizedModel = modelName.toLowerCase();
+function parseImageConfig(modelName: string, metadata?: ClaudeRequest['metadata']): ImageConfig {
   let aspectRatio = '1:1';
   if (modelName.includes('-16x9')) aspectRatio = '16:9';
   else if (modelName.includes('-9x16')) aspectRatio = '9:16';
@@ -444,15 +404,7 @@ function parseImageConfig(
     config.imageSize = imageSize;
   }
 
-  const parsedBaseModel =
-    normalizedModel.startsWith('gemini-3.1-flash-image') ||
-    normalizedModel.startsWith('gemini-3-flash-image')
-      ? 'gemini-3.1-flash-image'
-      : normalizedModel.startsWith('gemini-3.1-pro-image')
-        ? 'gemini-3.1-pro-image'
-        : 'gemini-3-pro-image';
-
-  return { imageConfig: config, parsedBaseModel };
+  return config;
 }
 
 function isGeminiImageModel(modelName: string): boolean {

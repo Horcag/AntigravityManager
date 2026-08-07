@@ -129,6 +129,13 @@ export class OpenAIResponsesStreamingMapper {
 
   constructor(private readonly options: OpenAIResponsesStreamingMapperOptions) {}
 
+  public setModel(model: string): void {
+    const normalized = model.trim();
+    if (normalized) {
+      this.options.model = normalized;
+    }
+  }
+
   public createResponseCreatedEvent(): string {
     return this.serialize({
       response: {

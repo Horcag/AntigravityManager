@@ -27,7 +27,7 @@ describe('applyAnthropicModelVariant', () => {
 
     expect(applyAnthropicModelVariant(request)).toEqual({
       request: {
-        model: 'gemini-pro-agent',
+        model: 'gemini-3.1-pro',
         messages: [{ role: 'user', content: 'Hello' }],
         max_tokens: 2048,
         thinking: {
@@ -50,7 +50,7 @@ describe('applyAnthropicModelVariant', () => {
     expect(request.model).toBe('gemini-3.1-pro');
   });
 
-  it('silently removes thinking and tool fields for a registered checkpoint without tool support', () => {
+  it('preserves unverified Anthropic model capabilities for the upstream to decide', () => {
     const request: AnthropicChatRequest = {
       model: 'gemini-3.1-flash-lite',
       messages: [{ role: 'user', content: 'Use the tool' }],
@@ -72,15 +72,7 @@ describe('applyAnthropicModelVariant', () => {
       },
     };
 
-    expect(applyAnthropicModelVariant(request).request).toEqual({
-      model: 'gemini-3.1-flash-lite',
-      messages: [{ role: 'user', content: 'Use the tool' }],
-      tools: undefined,
-      tool_choice: undefined,
-      thinking: undefined,
-      max_tokens: 16384,
-      output_config: undefined,
-    });
+    expect(applyAnthropicModelVariant(request)).toEqual({ request, variant: null });
   });
 
   it('updates the complete Anthropic request when an account requires a different registered tier', () => {
@@ -126,7 +118,7 @@ describe('applyAnthropicModelVariant', () => {
 });
 
 describe('applyOpenAIModelVariant', () => {
-  it('applies the registered model parameters and silently strips unsupported tools', () => {
+  it('preserves unverified model capabilities for the upstream to decide', () => {
     const request: OpenAIChatRequest = {
       model: 'gemini-2.5-flash',
       messages: [{ role: 'user', content: 'Use the tool' }],
@@ -146,14 +138,7 @@ describe('applyOpenAIModelVariant', () => {
       tool_choice: 'required',
     };
 
-    expect(applyOpenAIModelVariant(request).request).toEqual({
-      model: 'gemini-3.1-flash-lite',
-      messages: [{ role: 'user', content: 'Use the tool' }],
-      max_tokens: 4096,
-      thinking: undefined,
-      tools: undefined,
-      tool_choice: undefined,
-    });
+    expect(applyOpenAIModelVariant(request)).toEqual({ request, variant: null });
   });
 
   it('lets an exact OpenAI reasoning_effort override the inferred budget tier', () => {
@@ -168,12 +153,30 @@ describe('applyOpenAIModelVariant', () => {
     });
 
     expect(applied.request).toMatchObject({
-      model: 'gemini-3.5-flash-low',
+      model: 'gemini-3.5-flash',
       max_tokens: 65536,
       thinking: {
         budget_tokens: 4000,
       },
     });
+  });
+
+  it('does not let reasoning effort change an explicitly named tier', () => {
+    const applied = applyOpenAIModelVariant({
+      model: 'gemini-3.5-flash-high',
+      messages: [],
+      reasoning_effort: 'low',
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'gemini-3.5-flash-high',
+      reasoning_effort: 'high',
+      max_tokens: 65536,
+      thinking: {
+        budget_tokens: 10000,
+      },
+    });
+    expect(applied.variant?.model).toBe('gemini-3-flash-agent');
   });
 
   it('preserves an explicit OpenAI disabled-thinking request across tier routing', () => {

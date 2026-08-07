@@ -30,7 +30,7 @@ describe('OpenCodeModelSyncDialog', () => {
     render(
       createElement(OpenCodeModelSyncDialog, {
         availableModels: AVAILABLE_MODELS,
-        configuredModels: [{ id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' }],
+        configuredModels: [{ id: 'gemini-3.5-flash-high', name: 'Gemini 3.5 Flash (High)' }],
         initialBaseUrl: 'http://127.0.0.1:8045/v1',
         syncAccounts: false,
         onOpenChange,
@@ -39,9 +39,11 @@ describe('OpenCodeModelSyncDialog', () => {
       }),
     );
 
-    const geminiCheckbox = screen.getByRole('checkbox', { name: /Gemini 3.5 Flash/ });
+    const geminiCheckbox = screen.getByRole('checkbox', {
+      name: /Gemini 3\.5 Flash \(High\)/,
+    });
     const vendorCheckbox = screen.getByRole('checkbox', { name: /Vendor Preview/ });
-    expect(screen.getAllByRole('checkbox', { name: /Gemini 3.5 Flash/ })).toHaveLength(1);
+    expect(screen.getAllByRole('checkbox', { name: /Gemini 3.5 Flash/ })).toHaveLength(2);
     expect(geminiCheckbox.getAttribute('data-state')).toBe('checked');
     expect(vendorCheckbox.getAttribute('data-state')).toBe('unchecked');
 
@@ -84,7 +86,7 @@ describe('OpenCodeModelSyncDialog', () => {
     render(
       createElement(OpenCodeModelSyncDialog, {
         availableModels: AVAILABLE_MODELS,
-        configuredModels: [{ id: 'gemini-3.5-flash' }],
+        configuredModels: [{ id: 'gemini-3.5-flash-high' }],
         initialBaseUrl: 'http://127.0.0.1:8045/v1',
         syncAccounts: false,
         onOpenChange: vi.fn(),

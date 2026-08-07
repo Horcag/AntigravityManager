@@ -1,10 +1,10 @@
 import type { CloudAccount } from '@/modules/cloud-account/types';
 import type { AccountLeaseAccountStore } from '../interfaces/account-lease-adapters';
+import { buildAccountLeaseQuotaSnapshot } from '../policies/account-lease-quota-policy';
 import {
-  buildAccountLeaseQuotaSnapshot,
-  type AccountLeaseQuotaSnapshot,
-} from '../policies/account-lease-quota-policy';
-import { type AccountLeaseTokenData, normalizeClientKey } from '../interfaces/account-lease-token-types';
+  type AccountLeaseTokenData,
+  normalizeClientKey,
+} from '../interfaces/account-lease-token-types';
 
 interface AccountLeaseTokenCacheLogger {
   error(message: string, error?: unknown): void;
@@ -14,7 +14,6 @@ interface AccountLeaseTokenCacheLogger {
 interface AccountLeaseTokenCacheOptions {
   accountStore: AccountLeaseAccountStore;
   getTokenCache: () => Map<string, AccountLeaseTokenData>;
-  applyQuotaSnapshot: (snapshot: AccountLeaseQuotaSnapshot) => void;
   logger: AccountLeaseTokenCacheLogger;
 }
 
@@ -46,7 +45,6 @@ export class AccountLeaseTokenCache {
 
     const quota = account.quota;
     const extractedState = buildAccountLeaseQuotaSnapshot(quota);
-    this.options.applyQuotaSnapshot(extractedState);
 
     return {
       account_id: account.id,

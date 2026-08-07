@@ -264,12 +264,8 @@ function resolveSubscriptionTier(payload: LoadProjectResponse): string | undefin
   return undefined;
 }
 
-function isTrackedModel(modelName: string): boolean {
-  return /^(gemini|claude|gpt|image|imagen)/i.test(modelName);
-}
-
 function toModelQuotaInfo(modelName: string, info: ModelInfoRaw): ModelQuotaInfo | null {
-  if (!isTrackedModel(modelName) || !info.quotaInfo) {
+  if (!modelName.trim() || !info.quotaInfo) {
     return null;
   }
 

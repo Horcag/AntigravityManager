@@ -121,11 +121,7 @@ export class ModelAvailabilityService {
     }
     this.hydrate();
     const normalizedModelId = normalizeModelId(modelId);
-    let changed = this.entries.delete(createKey(accountId, normalizedModelId));
-    if (normalizedModelId.includes('image')) {
-      changed = this.entries.delete(createKey(accountId, 'gemini-3.1-flash-image')) || changed;
-      changed = this.entries.delete(createKey(accountId, 'gemini-3-pro-image')) || changed;
-    }
+    const changed = this.entries.delete(createKey(accountId, normalizedModelId));
     if (changed) {
       this.persist();
     }
@@ -147,6 +143,23 @@ export class ModelAvailabilityService {
     if (changed) {
       this.persist();
     }
+  }
+
+  getActiveEntry(
+    accountId: string,
+    modelId: string,
+    now: number = Date.now(),
+  ): ProxyModelAvailability | undefined {
+    if (!accountId || !modelId) {
+      return undefined;
+    }
+    this.hydrate();
+    const entry = this.entries.get(createKey(accountId, modelId));
+    return entry && entry.unavailableUntil > now ? entry : undefined;
+  }
+
+  isUnavailable(accountId: string, modelId: string, now: number = Date.now()): boolean {
+    return this.getActiveEntry(accountId, modelId, now) !== undefined;
   }
 
   getSnapshot(): ProxyModelAvailability[] {
@@ -219,9 +232,7 @@ export function getPersistedModelAvailabilitySnapshot(): ProxyModelAvailability[
     return [];
   }
   try {
-    const parsed = ProxyModelAvailabilityListSchema.safeParse(
-      persistentAvailabilityAdapter.load(),
-    );
+    const parsed = ProxyModelAvailabilityListSchema.safeParse(persistentAvailabilityAdapter.load());
     if (!parsed.success) {
       return [];
     }
@@ -237,9 +248,7 @@ export function clearPersistedCapabilityFailures(accountId: string): void {
     return;
   }
   try {
-    const parsed = ProxyModelAvailabilityListSchema.safeParse(
-      persistentAvailabilityAdapter.load(),
-    );
+    const parsed = ProxyModelAvailabilityListSchema.safeParse(persistentAvailabilityAdapter.load());
     if (!parsed.success) {
       return;
     }

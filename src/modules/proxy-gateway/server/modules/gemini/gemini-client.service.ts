@@ -109,6 +109,7 @@ export class GeminiClient {
     accessToken: string,
     upstreamProxyUrl?: string,
     extraHeaders?: Record<string, string>,
+    deadlineAt?: number,
   ): Promise<NodeJS.ReadableStream> {
     const response = await this.executeInternalWithExplicitContextCache<NodeJS.ReadableStream>(
       ':streamGenerateContent?alt=sse',
@@ -120,6 +121,7 @@ export class GeminiClient {
       },
       'stream-generate',
       extraHeaders,
+      deadlineAt,
     );
 
     return response.data;
@@ -130,6 +132,7 @@ export class GeminiClient {
     accessToken: string,
     upstreamProxyUrl?: string,
     extraHeaders?: Record<string, string>,
+    deadlineAt?: number,
   ): Promise<GeminiResponse> {
     const response = await this.executeInternalWithExplicitContextCache<
       GeminiResponse | { response: GeminiResponse }
@@ -141,6 +144,7 @@ export class GeminiClient {
       {},
       'generate-content',
       extraHeaders,
+      deadlineAt,
     );
     const payload = response.data;
     if (isObjectLike(payload) && 'response' in payload) {
@@ -157,8 +161,14 @@ export class GeminiClient {
     config: AxiosRequestConfig,
     operation: string,
     extraHeaders?: Record<string, string>,
+    deadlineAt?: number,
   ): Promise<AxiosResponse<T>> {
-    const prepared = await this.applyExplicitContextCache(body, accessToken, upstreamProxyUrl);
+    const prepared = await this.applyExplicitContextCache(
+      body,
+      accessToken,
+      upstreamProxyUrl,
+      deadlineAt,
+    );
     try {
       return await this.executeRequestWithEndpointFailover<T>(
         path,
@@ -168,6 +178,7 @@ export class GeminiClient {
         config,
         operation,
         extraHeaders,
+        deadlineAt,
       );
     } catch (error) {
       if (!prepared.cacheKey || !this.shouldRetryWithoutExplicitContextCache(error)) {
@@ -186,6 +197,7 @@ export class GeminiClient {
         config,
         operation,
         extraHeaders,
+        deadlineAt,
       );
     }
   }
@@ -194,6 +206,7 @@ export class GeminiClient {
     body: GeminiInternalRequest,
     accessToken: string,
     upstreamProxyUrl?: string,
+    deadlineAt?: number,
   ): Promise<PreparedInternalRequest> {
     if (!this.isExplicitContextCacheEnabled()) {
       return { body };
@@ -205,7 +218,7 @@ export class GeminiClient {
     }
 
     const cacheName = await explicitContextCacheManager.resolve(candidate, () =>
-      this.createExplicitContextCache(candidate, accessToken, upstreamProxyUrl),
+      this.createExplicitContextCache(candidate, accessToken, upstreamProxyUrl, deadlineAt),
     );
     if (!cacheName) {
       return { body };
@@ -247,6 +260,7 @@ export class GeminiClient {
     candidate: ExplicitContextCacheCandidate,
     accessToken: string,
     upstreamProxyUrl?: string,
+    deadlineAt?: number,
   ): Promise<ExplicitContextCacheResource | null> {
     const location = this.getExplicitContextCacheLocation();
     const baseUrl = this.getExplicitContextCacheBaseUrl(location);
@@ -271,7 +285,7 @@ export class GeminiClient {
           'User-Agent': requestUserAgent,
         },
         proxy: this.resolveUpstreamAxiosProxy(upstreamProxyUrl),
-        timeout: Math.min(this.getInternalTimeoutMs(), 20_000),
+        timeout: Math.min(this.getRemainingTimeoutMs(deadlineAt), 20_000),
       });
       if (!isString(response.data?.name) || isEmpty(response.data.name.trim())) {
         this.logger.warn(
@@ -286,6 +300,9 @@ export class GeminiClient {
         name: response.data.name,
       };
     } catch (error) {
+      if (error instanceof UpstreamRequestError) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logger.warn(`[ContextCache] Create failed; bypassing cache: ${message}`);
       return null;
@@ -329,8 +346,23 @@ export class GeminiClient {
 
   private getInternalTimeoutMs(): number {
     const config = getServerConfig();
-    const timeoutSeconds = config?.request_timeout ?? 300;
+    const timeoutSeconds = config?.request_timeout ?? 120;
     return Math.max(1, timeoutSeconds) * 1000;
+  }
+
+  private getRemainingTimeoutMs(deadlineAt?: number): number {
+    const configuredTimeout = this.getInternalTimeoutMs();
+    if (deadlineAt === undefined) {
+      return configuredTimeout;
+    }
+    const remainingMs = Math.floor(deadlineAt - Date.now());
+    if (remainingMs <= 0) {
+      throw new UpstreamRequestError({
+        message: 'Proxy request deadline exceeded',
+        status: 504,
+      });
+    }
+    return Math.min(configuredTimeout, remainingMs);
   }
 
   private shouldFailoverToNextEndpoint(error: unknown): boolean {
@@ -360,9 +392,9 @@ export class GeminiClient {
     config: AxiosRequestConfig,
     operation: string,
     extraHeaders?: Record<string, string>,
+    deadlineAt?: number,
   ): Promise<AxiosResponse<T>> {
     const baseUrls = this.getInternalBaseUrls();
-    const timeout = this.getInternalTimeoutMs();
     const requestUserAgent = await resolveRequestUserAgent();
     const axiosProxy = this.resolveUpstreamAxiosProxy(upstreamProxyUrl);
     let lastError: unknown = null;
@@ -387,7 +419,7 @@ export class GeminiClient {
               ...projectHeaders,
               ...(extraHeaders ?? {}),
             },
-            timeout,
+            timeout: this.getRemainingTimeoutMs(deadlineAt),
             proxy: axiosProxy,
             ...config,
           });
@@ -459,6 +491,9 @@ export class GeminiClient {
   }
 
   private async throwUpstreamRequestError(error: unknown, operation: string): Promise<never> {
+    if (error instanceof UpstreamRequestError) {
+      throw error;
+    }
     if (axios.isAxiosError(error)) {
       const responseData = error.response?.data;
       const upstreamMessage = await this.extractAxiosErrorMessage(responseData);
@@ -651,6 +686,9 @@ export class GeminiClient {
   }
 
   private throwAsCleanError(error: unknown): never {
+    if (error instanceof UpstreamRequestError) {
+      throw error;
+    }
     // Re-throw as clean Error to avoid circular reference issues.
     throw error instanceof Error ? new Error(error.message) : new Error(String(error));
   }

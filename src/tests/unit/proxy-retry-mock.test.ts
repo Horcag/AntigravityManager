@@ -26,6 +26,7 @@ const mockAccountLeaseService = {
   getModelOutputLimitForAccount: vi.fn(),
   getModelThinkingBudgetForAccount: vi.fn(),
   resolveDynamicModelForAccount: vi.fn((_token: unknown, model: string) => model),
+  getModelCatalogStatus: vi.fn(),
 };
 const mockGeminiClient = { streamGenerateInternal: vi.fn(), generateInternal: vi.fn() };
 
@@ -77,6 +78,10 @@ class TestableProxyService extends ProxyService {
   public testToAnthropicResponse(response: ClaudeResponse) {
     return (this as any).toAnthropicChatResponse(response);
   }
+
+  public testNoAvailableAccountError(model: string) {
+    return (this as any).createNoAvailableAccountError(model);
+  }
 }
 
 function createToken(id: string = 'acc-1') {
@@ -98,8 +103,26 @@ function createToken(id: string = 'acc-1') {
 describe('ProxyService Empty Stream Retry Logic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAccountLeaseService.resolveDynamicModelForAccount.mockImplementation(
+      (_token: unknown, model: string) => model,
+    );
     setServerConfig(createProxyConfig());
   });
+
+  it.each([
+    ['unknown_model', 404, 'model_not_found'],
+    ['catalog_unavailable', 503, 'model_catalog_unavailable'],
+    ['known', 429, 'model_capacity_exhausted'],
+  ] as const)(
+    'maps %s catalog state to a deterministic route error',
+    (catalogState, status, code) => {
+      mockAccountLeaseService.getModelCatalogStatus.mockReturnValue(catalogState);
+      const error = new TestableProxyService().testNoAvailableAccountError('missing-model');
+
+      expect(error).toMatchObject({ status, code });
+      expect(error.message).toContain('missing-model');
+    },
+  );
 
   it('classifies retry matrix consistently', () => {
     const service = new TestableProxyService();
@@ -558,7 +581,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       accountIdOrEmail: 'acc-1',
       status: 429,
       body: '429 quota exceeded',
-      model: 'gemini-3-flash',
+      model: 'gpt-4o',
     });
     expect((result as any).choices?.[0]?.message?.content).toBeDefined();
   });
@@ -588,6 +611,34 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       { inlineData: { mimeType: 'image/png', data: 'AAAABBBB' } },
       { text: ' carefully.' },
     ]);
+  });
+
+  it('applies variant controls after resolving an explicit alias target', async () => {
+    setServerConfig(
+      createProxyConfig({
+        model_aliases: [{ alias: 'my-high-model', target: 'gemini-3.5-flash-high', enabled: true }],
+      }),
+    );
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockAccountLeaseService.resolveDynamicModelForAccount.mockReturnValue('gemini-3-flash-agent');
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      usageMetadata: { totalTokenCount: 5 },
+    });
+
+    await service.handleChatCompletions({
+      model: 'my-high-model',
+      messages: [{ role: 'user', content: 'Hello' }],
+      reasoning_effort: 'low',
+    });
+
+    expect(mockAccountLeaseService.getNextToken).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'gemini-3.5-flash-high' }),
+    );
+    const internalRequest = mockGeminiClient.generateInternal.mock.calls[0][0];
+    expect(internalRequest.model).toBe('gemini-3-flash-agent');
+    expect(internalRequest.request.generationConfig.thinkingConfig.thinkingBudget).toBe(10000);
   });
 
   it('replays captured signatures only for the same selected account and effective model', async () => {
@@ -915,7 +966,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
   });
 
-  it('keeps the web-search fallback selected by the request mapper', async () => {
+  it('keeps the explicit model when web search capability is unverified', async () => {
     setServerConfig(
       createProxyConfig({
         custom_mapping: {
@@ -938,7 +989,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
 
     const internalRequest = mockGeminiClient.generateInternal.mock.calls[0][0];
-    expect(internalRequest.model).toBe('gemini-3-flash');
+    expect(internalRequest.model).toBe('custom-search-model');
   });
 
   it('retries Anthropic flow with the same error classification matrix', async () => {
@@ -967,9 +1018,41 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       accountIdOrEmail: 'acc-1',
       status: 429,
       body: '429 rate limit exceeded',
-      model: 'claude-sonnet-4-6-thinking',
+      model: 'claude-sonnet-4-5',
     });
     expect((result as any).type).toBe('message');
+  });
+
+  it('classifies the Anthropic no-project retry failure instead of the superseded project error', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken
+      .mockResolvedValueOnce(createToken('acc-1'))
+      .mockResolvedValueOnce(createToken('acc-2'));
+    mockGeminiClient.generateInternal
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockRejectedValueOnce(new Error('429 fallback quota exceeded'))
+      .mockResolvedValueOnce({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+        usageMetadata: { totalTokenCount: 5 },
+      });
+
+    await service.handleAnthropicMessages({
+      model: 'claude-sonnet-4-5',
+      stream: false,
+      max_tokens: 256,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as any);
+
+    expect(mockAccountLeaseService.markFromUpstreamError).toHaveBeenCalledWith({
+      accountIdOrEmail: 'acc-1',
+      status: 429,
+      body: '429 fallback quota exceeded',
+      model: 'claude-sonnet-4-5',
+    });
   });
 
   it('retries Gemini flow with the same error classification matrix', async () => {
@@ -995,7 +1078,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       accountIdOrEmail: 'acc-1',
       status: 429,
       body: '429 quota exceeded',
-      model: 'gemini-3-flash',
+      model: 'gemini-2.5-flash',
     });
     expect((result as any).candidates?.[0]?.content?.parts?.[0]?.text).toBe('ok');
   });
@@ -1016,7 +1099,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(internalPayload).not.toHaveProperty('sessionId');
   });
 
-  it('normalizes Gemini 3.1 preview alias to Gemini 3.1 Pro High for upstream', async () => {
+  it('preserves the requested Gemini 3.1 preview identity upstream', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
     mockGeminiClient.generateInternal.mockResolvedValue({
@@ -1029,7 +1112,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     } as any);
 
     const internalPayload = mockGeminiClient.generateInternal.mock.calls[0][0];
-    expect(internalPayload.model).toBe('gemini-3.1-pro-high');
+    expect(internalPayload.model).toBe('gemini-3.1-pro-preview');
   });
 
   it('preserves provider Gemini usage and response metadata', async () => {
@@ -1191,6 +1274,43 @@ describe('GeminiClient internal request parity', () => {
     expect(postSpy.mock.calls[1][0]).toBe(postSpy.mock.calls[0][0]);
     expect(postSpy.mock.calls[0][2]?.headers?.['x-goog-user-project']).toBe('project-1');
     expect(postSpy.mock.calls[1][2]?.headers).not.toHaveProperty('x-goog-user-project');
+  });
+
+  it('uses the remaining end-to-end deadline for the upstream attempt', async () => {
+    const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({
+      data: { candidates: [{ content: { parts: [{ text: 'ok' }] } }] },
+    });
+    const client = new GeminiClient();
+    const deadlineAt = Date.now() + 1_000;
+
+    await client.generateInternal(
+      { project: 'project-1', request: {} } as any,
+      'access-token',
+      undefined,
+      undefined,
+      deadlineAt,
+    );
+
+    const timeout = postSpy.mock.calls[0][2]?.timeout;
+    expect(timeout).toBeTypeOf('number');
+    expect(timeout).toBeGreaterThan(0);
+    expect(timeout).toBeLessThanOrEqual(1_000);
+  });
+
+  it('does not start another upstream attempt after the request deadline', async () => {
+    const postSpy = vi.spyOn(axios, 'post');
+    const client = new GeminiClient();
+
+    await expect(
+      client.generateInternal(
+        { project: 'project-1', request: {} } as any,
+        'access-token',
+        undefined,
+        undefined,
+        Date.now() - 1,
+      ),
+    ).rejects.toMatchObject({ status: 504, message: 'Proxy request deadline exceeded' });
+    expect(postSpy).not.toHaveBeenCalled();
   });
 });
 

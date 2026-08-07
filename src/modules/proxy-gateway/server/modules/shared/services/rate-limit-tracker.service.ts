@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import { isEmpty, isNumber, isObjectLike, isString } from 'lodash-es';
-import { getQuotaModelFamilyId } from '@/modules/cloud-account/utils/quota-model-families';
 
 export enum RateLimitReason {
   QuotaExhausted = 'quota_exhausted',
@@ -251,8 +250,12 @@ export class RateLimitTrackerService {
   private readonly failureCounts = new Map<string, FailureCountEntry>();
 
   private buildLockoutKey(accountId: string, model?: string): string {
-    if (!isEmpty(model?.trim() ?? '')) {
-      return `${accountId}:${model}`;
+    const normalizedModel = model
+      ?.trim()
+      .replace(/^models\//i, '')
+      .toLowerCase();
+    if (!isEmpty(normalizedModel ?? '')) {
+      return `${accountId}:${normalizedModel}`;
     }
     return accountId;
   }
@@ -326,28 +329,22 @@ export class RateLimitTrackerService {
     return this.lockoutByKey.delete(this.buildLockoutKey(accountId, model));
   }
 
-  /**
-   * Quota responses use canonical model ids while request failures can be keyed by a routed alias.
-   * Compare known routing families so a recovered canonical model also releases its alias lock.
-   */
-  clearModelFamilies(accountId: string, models: Iterable<string>): number {
-    const recoveredFamilies = new Set(Array.from(models, (model) => getQuotaModelFamilyId(model)));
-    if (recoveredFamilies.size === 0) {
-      return 0;
-    }
-
+  clearModels(accountId: string, models: Iterable<string>): number {
     let deleted = 0;
-    for (const [key, info] of this.lockoutByKey.entries()) {
-      if (!info.model || key !== this.buildLockoutKey(accountId, info.model)) {
+    const normalizedModels = new Set(
+      Array.from(models, (model) =>
+        model
+          .trim()
+          .replace(/^models\//i, '')
+          .toLowerCase(),
+      ).filter(Boolean),
+    );
+    for (const model of normalizedModels) {
+      if (!this.clearModel(accountId, model)) {
         continue;
       }
-
-      if (recoveredFamilies.has(getQuotaModelFamilyId(info.model))) {
-        this.lockoutByKey.delete(key);
-        deleted += 1;
-      }
+      deleted += 1;
     }
-
     return deleted;
   }
 

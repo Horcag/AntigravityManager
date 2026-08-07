@@ -9,6 +9,12 @@ export const ProxyExperimentalConfigSchema = z.object({
   enable_cloud_code_meta: z.boolean().default(false),
 });
 
+export const ModelAliasRouteSchema = z.object({
+  alias: z.string().trim().min(1),
+  target: z.string().trim().min(1),
+  enabled: z.boolean().default(true),
+});
+
 export const ProxyConfigSchema = z.object({
   enabled: z.boolean(),
   port: z.number(),
@@ -25,6 +31,7 @@ export const ProxyConfigSchema = z.object({
   preferred_account_id: z.string().default(''),
   circuit_breaker_enabled: z.boolean().default(true),
   circuit_breaker_backoff_steps: z.array(z.number()).default([60, 300, 1800, 7200]),
+  model_aliases: z.array(ModelAliasRouteSchema).default([]),
   custom_mapping: z.record(z.string(), z.string()).default({}),
   anthropic_mapping: z.record(z.string(), z.string()), // Mapping table
   request_timeout: z.number().default(120), // Timeout in seconds
@@ -69,6 +76,7 @@ export const AppConfigSchema = z.object({
 
 export type UpstreamProxyConfig = z.infer<typeof UpstreamProxyConfigSchema>;
 export type ProxyExperimentalConfig = z.infer<typeof ProxyExperimentalConfigSchema>;
+export type ModelAliasRoute = z.infer<typeof ModelAliasRouteSchema>;
 export type ProxyConfig = z.infer<typeof ProxyConfigSchema>;
 export type AppConfig = z.infer<typeof AppConfigSchema>;
 
@@ -116,6 +124,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
     preferred_account_id: '',
     circuit_breaker_enabled: true,
     circuit_breaker_backoff_steps: [60, 300, 1800, 7200],
+    model_aliases: [],
     custom_mapping: {},
     anthropic_mapping: {},
     request_timeout: 120,
