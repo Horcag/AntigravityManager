@@ -80,6 +80,8 @@ type ResponsesFinishReasonSource = 'gemini' | 'openai';
 export class OpenAIResponsesStreamingMapper {
   private readonly createdAt = Math.floor(Date.now() / 1000);
   private readonly emittedToolCallIds = new Set<string>();
+  private readonly groundingChunkKeys = new Set<string>();
+  private readonly groundingQueries = new Set<string>();
   private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private readonly messageItemId: string;
   private readonly outputItems: ResponsesOutputItem[] = [];
@@ -142,14 +144,28 @@ export class OpenAIResponsesStreamingMapper {
 
   public processGrounding(grounding: GeminiResponsesGroundingMetadata): string[] {
     let groundingText = '';
-    if (grounding.webSearchQueries?.length) {
-      groundingText += `\n\n---\n**🔍 Searched for you:** ${grounding.webSearchQueries.join(', ')}`;
+    const newQueries = (grounding.webSearchQueries ?? []).filter((query) => {
+      if (this.groundingQueries.has(query)) {
+        return false;
+      }
+      this.groundingQueries.add(query);
+      return true;
+    });
+    if (newQueries.length) {
+      groundingText += `\n\n---\n**🔍 Searched for you:** ${newQueries.join(', ')}`;
     }
-    const links = grounding.groundingChunks?.flatMap((chunk, index) => {
+    const links = grounding.groundingChunks?.flatMap((chunk) => {
       if (!chunk.web) {
         return [];
       }
-      return [`[${index + 1}] [${chunk.web.title || 'Web source'}](${chunk.web.uri || '#'})`];
+      const title = chunk.web.title || 'Web source';
+      const uri = chunk.web.uri || '#';
+      const key = `${title}\u0000${uri}`;
+      if (this.groundingChunkKeys.has(key)) {
+        return [];
+      }
+      this.groundingChunkKeys.add(key);
+      return [`[${this.groundingChunkKeys.size}] [${title}](${uri})`];
     });
     if (links?.length) {
       groundingText += `\n\n**🌐 Citations:**\n${links.join('\n')}`;

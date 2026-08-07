@@ -433,7 +433,7 @@ export class ProxyService {
               subscriber.next(startMsg);
             }
 
-            for (const part of parts) {
+            for (const part of Array.isArray(parts) ? parts : []) {
               if (this.isGeminiPart(part)) {
                 const chunks = processor.process(part);
                 chunks.forEach((chunk) => subscriber.next(chunk));

@@ -617,13 +617,13 @@ function buildContents(
   lookupSignature: SignatureLookup = NO_SIGNATURE_LOOKUP,
 ): GeminiContent[] {
   const contents: GeminiContent[] = [];
-  /** Signature carried by explicit request content only, never by replayed store state. */
-  let lastThoughtSignature: string | null = null;
   /** Signature effectively attached to each tool_use id, replayed onto its tool_result. */
   const toolIdToSignature = new Map<string, string>();
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    /** Same-turn fallback must not cross a message boundary. */
+    let lastThoughtSignature: string | null = null;
     const role = msg.role === 'assistant' ? 'model' : msg.role;
     const parts: GeminiPart[] = [];
     const contentBlocks = Array.isArray(msg.content)
@@ -658,7 +658,7 @@ function buildContents(
         toolIdToName.set(block.id, block.name);
         // Explicit signatures win; otherwise replay only what was captured for THIS tool call.
         const finalSig: string | null =
-          block.signature ?? lastThoughtSignature ?? lookupSignature(block.id);
+          block.signature ?? lookupSignature(block.id) ?? lastThoughtSignature;
         if (finalSig) {
           if (block.signature) {
             lastThoughtSignature = block.signature;

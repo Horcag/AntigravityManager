@@ -262,6 +262,47 @@ describe('thought signature state isolation', () => {
     expect(toolUsePart(request, ACCOUNT_A)?.thoughtSignature).toBe('explicit-signature');
   });
 
+  it('prefers keyed signatures over same-turn fallback without leaking earlier-turn signatures', () => {
+    SignatureStore.store({ ...ACCOUNT_A, toolCallId: 'call_keyed' }, SIGNATURE_B);
+    const body = transformClaudeRequestIn(
+      {
+        model: 'gemini-3-pro',
+        max_tokens: 1024,
+        thinking: { type: 'enabled', budget_tokens: 256 },
+        messages: [
+          {
+            role: 'assistant',
+            content: [{ type: 'thinking', thinking: 'old', signature: SIGNATURE_A }],
+          },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'thinking', thinking: 'current', signature: 'same-turn-signature' },
+              { type: 'tool_use', id: 'call_fallback', name: 'lookup', input: {} },
+              { type: 'tool_use', id: 'call_keyed', name: 'lookup', input: {} },
+            ],
+          },
+          {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: 'call_stale', name: 'lookup', input: {} }],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ACCOUNT_A,
+    );
+    const functionCalls = body.request.contents
+      .flatMap((content) => content.parts)
+      .filter((part) => part.functionCall !== undefined);
+
+    expect(functionCalls.map((part) => part.thoughtSignature)).toEqual([
+      'same-turn-signature',
+      SIGNATURE_B,
+      undefined,
+    ]);
+  });
+
   it('captures signatures from non-streaming function calls', () => {
     transformResponse(
       {

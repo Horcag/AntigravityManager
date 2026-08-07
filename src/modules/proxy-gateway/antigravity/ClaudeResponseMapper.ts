@@ -268,10 +268,15 @@ class NonStreamingProcessor {
     if (typeof promptTokens !== 'number' || typeof outputTokens !== 'number') {
       return undefined;
     }
+    const thoughtsTokens = geminiResponse.usageMetadata?.thoughtsTokenCount;
 
     return {
       input_tokens: promptTokens,
-      output_tokens: outputTokens,
+      output_tokens:
+        outputTokens +
+        (typeof thoughtsTokens === 'number' && Number.isFinite(thoughtsTokens)
+          ? thoughtsTokens
+          : 0),
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
     };

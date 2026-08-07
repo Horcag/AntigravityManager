@@ -244,6 +244,32 @@ describe('OpenAIResponsesStreamingMapper', () => {
     });
   });
 
+  it('deduplicates repeated grounding frames while preserving citation numbering', () => {
+    const mapper = createMapper();
+    const grounding = {
+      groundingChunks: [
+        { web: { title: 'First source', uri: 'https://example.com/first' } },
+        { web: { title: 'Second source', uri: 'https://example.com/second' } },
+      ],
+      webSearchQueries: ['Gemini grounding'],
+    };
+
+    const events = [
+      ...mapper.processGrounding(grounding),
+      ...mapper.processGrounding(grounding),
+      ...mapper.complete(),
+    ].map(parseEvent);
+    const text = String(
+      events.find((event) => event.type === 'response.output_text.done')?.text ?? '',
+    );
+
+    expect(text.match(/Searched for you/g)).toHaveLength(1);
+    expect(text.match(/https:\/\/example\.com\/first/g)).toHaveLength(1);
+    expect(text.match(/https:\/\/example\.com\/second/g)).toHaveLength(1);
+    expect(text).toContain('[1] [First source]');
+    expect(text).toContain('[2] [Second source]');
+  });
+
   it('does not leave an output-index gap for an exact function call replay', () => {
     const mapper = createMapper();
     const events = [

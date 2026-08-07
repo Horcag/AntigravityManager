@@ -158,5 +158,18 @@ describe('StreamingState', () => {
       expect(output).toContain('Citations');
       expect(output).toContain('https://example.com/gemini');
     });
+
+    it('includes reasoning tokens in Anthropic streaming output usage', () => {
+      const output = state
+        .emitFinish('STOP', {
+          promptTokenCount: 2,
+          candidatesTokenCount: 3,
+          thoughtsTokenCount: 4,
+        })
+        .join('');
+
+      expect(output).toContain('"input_tokens":2');
+      expect(output).toContain('"output_tokens":7');
+    });
   });
 });

@@ -422,6 +422,7 @@ export interface Candidate {
 export interface UsageMetadata {
   promptTokenCount?: number;
   candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
   totalTokenCount?: number;
 }
 

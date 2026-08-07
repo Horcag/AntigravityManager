@@ -7,6 +7,10 @@ import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
 
+function tokenCountOrZero(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
 interface SignatureManager {
   pending: string | null;
 }
@@ -62,7 +66,9 @@ export class StreamingState {
     const usage: Usage | undefined = usageMeta
       ? {
           input_tokens: usageMeta.promptTokenCount || 0,
-          output_tokens: usageMeta.candidatesTokenCount || 0,
+          output_tokens:
+            tokenCountOrZero(usageMeta.candidatesTokenCount) +
+            tokenCountOrZero(usageMeta.thoughtsTokenCount),
         }
       : undefined;
 
@@ -216,7 +222,9 @@ export class StreamingState {
     const usage: Usage = usageMetadata
       ? {
           input_tokens: usageMetadata.promptTokenCount || 0,
-          output_tokens: usageMetadata.candidatesTokenCount || 0,
+          output_tokens:
+            tokenCountOrZero(usageMetadata.candidatesTokenCount) +
+            tokenCountOrZero(usageMetadata.thoughtsTokenCount),
         }
       : { input_tokens: 0, output_tokens: 0 };
 

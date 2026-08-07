@@ -44,4 +44,17 @@ describe('ClaudeResponseMapper termination reasons', () => {
     expect(response).toMatchObject({ stop_sequence: null });
     expect(Object.hasOwn(response, 'stop_sequence')).toBe(true);
   });
+
+  it('includes reasoning tokens in Anthropic non-stream output usage', () => {
+    const response = transformResponse({
+      candidates: [{ content: { role: 'model', parts: [{ text: 'result' }] } }],
+      usageMetadata: {
+        candidatesTokenCount: 3,
+        promptTokenCount: 2,
+        thoughtsTokenCount: 4,
+      },
+    });
+
+    expect(response.usage).toMatchObject({ input_tokens: 2, output_tokens: 7 });
+  });
 });

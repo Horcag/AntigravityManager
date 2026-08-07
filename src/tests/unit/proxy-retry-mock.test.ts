@@ -603,7 +603,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(output.match(/"type":"message_stop"/g)).toHaveLength(1);
   });
 
-  it('treats grounding-only Anthropic stream output as usable', async () => {
+  it('accepts repeated grounding-only Anthropic frames without duplicate lifecycle events', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();
     const chunks: string[] = [];
@@ -615,27 +615,29 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       });
     });
 
-    stream.emit(
-      'data',
-      Buffer.from(
-        `data: ${JSON.stringify({
-          candidates: [
-            {
-              groundingMetadata: {
-                groundingChunks: [{ web: { title: 'Source', uri: 'https://example.com/source' } }],
-                webSearchQueries: ['source lookup'],
-              },
+    const frame = Buffer.from(
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            groundingMetadata: {
+              groundingChunks: [{ web: { title: 'Source', uri: 'https://example.com/source' } }],
+              webSearchQueries: ['source lookup'],
             },
-          ],
-        })}\n\n`,
-      ),
+          },
+        ],
+      })}\n\n`,
     );
+    for (let index = 0; index < 4; index++) {
+      stream.emit('data', frame);
+    }
     stream.emit('end');
     await completed;
 
     const output = chunks.join('');
     expect(output).toContain('Searched for you');
     expect(output).toContain('https://example.com/source');
+    expect(output.match(/Searched for you/g)).toHaveLength(1);
+    expect(output.match(/https:\/\/example\.com\/source/g)).toHaveLength(1);
     expect(output.match(/"type":"message_start"/g)).toHaveLength(1);
     expect(output.match(/"type":"message_stop"/g)).toHaveLength(1);
   });
