@@ -99,7 +99,9 @@ export class MultipartOpenAIExceptionFilter extends BaseExceptionFilter {
 
     if (pathname.startsWith('/v1beta/')) {
       const status = this.getHttpStatus(error);
-      response.status(status).send(createGoogleErrorEnvelope(status, getGoogleErrorMessage(error, status)));
+      response
+        .status(status)
+        .send(createGoogleErrorEnvelope(status, getGoogleErrorMessage(error, status)));
       return;
     }
 
