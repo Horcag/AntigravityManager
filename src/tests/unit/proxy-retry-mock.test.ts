@@ -132,6 +132,58 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(geminiHeaders).toEqual({});
   });
 
+  it.each([
+    ['exact custom alias', { 'public-fast': 'gemini-3-flash' }, 'public-fast'],
+    ['wildcard custom alias', { 'public-*': 'gemini-3-flash' }, 'public-fast'],
+  ])(
+    'allows final assistant prefill through an %s mapped to gemini-3-flash',
+    async (_caseName, custom_mapping, model) => {
+      setServerConfig(createProxyConfig({ custom_mapping }));
+      const service = new TestableProxyService();
+      mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+      mockGeminiClient.generateInternal.mockResolvedValue({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      });
+
+      await service.handleAnthropicMessages({
+        model,
+        messages: [
+          { role: 'user', content: 'start' },
+          { role: 'assistant', content: 'continue from this prefill' },
+        ],
+      } as any);
+
+      expect(mockAccountLeaseService.getNextToken).toHaveBeenCalledOnce();
+      expect(mockGeminiClient.generateInternal.mock.calls[0][0].model).toBe('gemini-3-flash');
+    },
+  );
+
+  it.each([
+    ['exact alias', { 'public-medium': 'gemini-3.5-flash-high' }, 'public-medium', false],
+    ['wildcard alias', { 'public-*': 'claude-sonnet-4-6-thinking' }, 'public-claude', true],
+  ])(
+    'rejects final assistant prefill for an unsupported %s before token lease and upstream in %s mode',
+    async (_caseName, custom_mapping, model, stream) => {
+      setServerConfig(createProxyConfig({ custom_mapping }));
+      const service = new TestableProxyService();
+
+      await expect(
+        service.handleAnthropicMessages({
+          model,
+          stream,
+          messages: [
+            { role: 'user', content: 'start' },
+            { role: 'assistant', content: 'continue from this prefill' },
+          ],
+        } as any),
+      ).rejects.toThrow('Final assistant prefill is not supported for this model.');
+
+      expect(mockAccountLeaseService.getNextToken).not.toHaveBeenCalled();
+      expect(mockGeminiClient.generateInternal).not.toHaveBeenCalled();
+      expect(mockGeminiClient.streamGenerateInternal).not.toHaveBeenCalled();
+    },
+  );
+
   it('should emit error when stream ends without data', async () => {
     const service = new TestableProxyService();
     const stream = new EventEmitter();

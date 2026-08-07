@@ -1113,17 +1113,12 @@ describe('ProxyController Integration', () => {
     }
   });
 
-  it.each([
-    ['claude-sonnet-4-6', 'claude-sonnet-4-6-thinking', false],
-    ['claude-sonnet-4-6', 'claude-sonnet-4-6-thinking', true],
-    ['gemini-3.5-flash-high', 'gemini-3.5-flash-high', false],
-    ['gemini-3.5-flash-high', 'gemini-3.5-flash-high', true],
-  ])(
-    'rejects unsupported Anthropic final assistant prefills for %s before %s dispatch',
-    async (model, targetModel, stream) => {
+  it.each(['claude-sonnet-4-6', 'gemini-3.5-flash-high'])(
+    'forwards final Anthropic assistant prefills for %s to canonical service routing',
+    async (model) => {
       vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
       const proxyService = {
-        handleAnthropicMessages: vi.fn(),
+        handleAnthropicMessages: vi.fn().mockResolvedValue({ id: 'msg_1', type: 'message' }),
       };
       const app = await createHttpApp(proxyService);
       const server = app.getHttpAdapter().getInstance();
@@ -1135,7 +1130,6 @@ describe('ProxyController Integration', () => {
           headers: { authorization: 'Bearer test-key' },
           payload: {
             model,
-            stream,
             messages: [
               { role: 'user', content: 'start' },
               { role: 'assistant', content: 'continue from this prefill' },
@@ -1143,20 +1137,56 @@ describe('ProxyController Integration', () => {
           },
         });
 
-        expect(response.statusCode).toBe(400);
-        expect(response.json()).toEqual({
-          type: 'error',
-          error: {
-            type: 'invalid_request_error',
-            message: `Final assistant prefill is not supported for target model '${targetModel}'.`,
-          },
-        });
-        expect(proxyService.handleAnthropicMessages).not.toHaveBeenCalled();
+        expect(response.statusCode).toBe(200);
+        expect(proxyService.handleAnthropicMessages).toHaveBeenCalledOnce();
       } finally {
         await app.close();
       }
     },
   );
+
+  it('returns the Anthropic invalid-request envelope for a service prefill rejection', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = {
+      handleAnthropicMessages: vi
+        .fn()
+        .mockRejectedValue(
+          new OpenAIProtocolException(
+            'Final assistant prefill is not supported for this model.',
+            HttpStatus.BAD_REQUEST,
+            { param: 'messages' },
+          ),
+        ),
+    };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/v1/messages',
+        headers: { authorization: 'Bearer test-key' },
+        payload: {
+          model: 'public-medium',
+          messages: [
+            { role: 'user', content: 'start' },
+            { role: 'assistant', content: 'continue from this prefill' },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: 'Final assistant prefill is not supported for this model.',
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
 
   it('allows a user-final Anthropic history for targets that reject assistant prefills', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);

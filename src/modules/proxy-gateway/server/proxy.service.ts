@@ -204,7 +204,7 @@ export class ProxyService {
       !supportsAnthropicAssistantPrefill(targetModel)
     ) {
       throw this.invalidOpenAIRequest(
-        `Final assistant prefill is not supported for target model '${targetModel}'.`,
+        'Final assistant prefill is not supported for this model.',
         'messages',
       );
     }
