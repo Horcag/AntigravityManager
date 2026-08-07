@@ -10,6 +10,7 @@ import {
 import { decodeSignature } from './signature-utils';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
+import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 /**
  * Non-streaming response processor (Gemini -> Claude)
@@ -22,6 +23,7 @@ class NonStreamingProcessor {
   private thinkingSignature: string | null = null;
   private trailingSignature: string | null = null;
   private hasToolCall: boolean = false;
+  private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   /** Signature seen earlier in THIS response, used only for tool calls of this same response. */
   private responseSignature: string | null = null;
 
@@ -86,6 +88,9 @@ class NonStreamingProcessor {
       this.hasToolCall = true;
 
       const fc = part.functionCall;
+      if (this.toolCallIdIntegrity.record(fc.id, fc.name, fc.args) === 'replay') {
+        return;
+      }
       const toolId = fc.id || `${fc.name}-${uuidv4()}`;
 
       const toolUse: ContentBlock = {

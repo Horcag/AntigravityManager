@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { transformResponse } from '@/modules/proxy-gateway/antigravity/ClaudeResponseMapper';
+import { ToolCallIdConflictError } from '@/modules/proxy-gateway/antigravity/tool-call-id-integrity';
 
 describe('ClaudeResponseMapper termination reasons', () => {
   it.each([
@@ -56,5 +57,61 @@ describe('ClaudeResponseMapper termination reasons', () => {
     });
 
     expect(response.usage).toMatchObject({ input_tokens: 2, output_tokens: 7 });
+  });
+
+  it('emits an explicit tool call only once when its exact payload is replayed', () => {
+    const response = transformResponse({
+      candidates: [
+        {
+          content: {
+            role: 'model',
+            parts: [
+              { functionCall: { args: { query: 'status' }, id: 'call_1', name: 'lookup' } },
+              { functionCall: { args: { query: 'status' }, id: 'call_1', name: 'lookup' } },
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(response.content.filter((block) => block.type === 'tool_use')).toHaveLength(1);
+  });
+
+  it('rejects conflicting reuse of an explicit tool call id', () => {
+    expect(() =>
+      transformResponse({
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                { functionCall: { args: { query: 'status' }, id: 'call_1', name: 'lookup' } },
+                { functionCall: { args: { query: 'other' }, id: 'call_1', name: 'lookup' } },
+              ],
+            },
+          },
+        ],
+      }),
+    ).toThrow(ToolCallIdConflictError);
+  });
+
+  it('emits distinct generated ids for tool calls without upstream ids', () => {
+    const response = transformResponse({
+      candidates: [
+        {
+          content: {
+            role: 'model',
+            parts: [
+              { functionCall: { args: { query: 'status' }, name: 'lookup' } },
+              { functionCall: { args: { query: 'status' }, name: 'lookup' } },
+            ],
+          },
+        },
+      ],
+    });
+    const toolUses = response.content.filter((block) => block.type === 'tool_use');
+
+    expect(toolUses).toHaveLength(2);
+    expect(toolUses[0].id).not.toBe(toolUses[1].id);
   });
 });

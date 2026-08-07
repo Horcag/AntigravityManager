@@ -3,6 +3,7 @@ import {
   PartProcessor,
   StreamingState,
 } from '../../modules/proxy-gateway/antigravity/ClaudeStreamingMapper';
+import { ToolCallIdConflictError } from '../../modules/proxy-gateway/antigravity/tool-call-id-integrity';
 
 describe('StreamingState', () => {
   let state: StreamingState;
@@ -134,7 +135,22 @@ describe('StreamingState', () => {
             name: 'builtin_web_search',
           },
         }),
-      ).toThrow('Conflicting function call reuse');
+      ).toThrow(ToolCallIdConflictError);
+    });
+
+    it('emits distinct generated ids for repeated tool calls without upstream ids', () => {
+      const processor = new PartProcessor(state);
+      const first = processor.process({
+        functionCall: { args: { query: 'gemini docs' }, name: 'builtin_web_search' },
+      });
+      const second = processor.process({
+        functionCall: { args: { query: 'gemini docs' }, name: 'builtin_web_search' },
+      });
+      const getToolId = (chunks: string[]) => chunks.join('').match(/"id":"([^"]+)"/)?.[1];
+
+      expect(getToolId(first)).toBeDefined();
+      expect(getToolId(second)).toBeDefined();
+      expect(getToolId(first)).not.toBe(getToolId(second));
     });
 
     it('aggregates grounding metadata into final text block', () => {

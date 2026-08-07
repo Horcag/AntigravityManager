@@ -2,6 +2,7 @@ import { GeminiPart, GroundingMetadata, Usage, UsageMetadata } from './types';
 import { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
+import { v4 as uuidv4 } from 'uuid';
 import { logger } from '@/shared/logging/logger';
 import { mapGeminiFinishReasonToAnthropic } from './gemini-finish-reason';
 
@@ -520,7 +521,7 @@ export class PartProcessor {
 
     this.state.markToolUsed();
 
-    const toolId = fc.id || `${fc.name}-${Math.random().toString(36).substr(2, 9)}`;
+    const toolId = fc.id || `${fc.name}-${uuidv4()}`;
 
     const toolUse: any = {
       type: 'tool_use',
