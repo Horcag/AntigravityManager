@@ -35,6 +35,8 @@ import {
   OpenAIChatResponse,
   OpenAIContentPart,
   OpenAILegacyCompletionRequest,
+  OpenAIResponsesTool,
+  OpenAIResponsesToolChoice,
   OpenAIStreamOptions,
   GeminiRequest,
   GeminiResponse,
@@ -108,8 +110,8 @@ interface OpenAIResponsesRequest {
   model?: string;
   instructions?: string;
   input?: unknown;
-  tools?: OpenAIChatRequest['tools'];
-  tool_choice?: OpenAIChatRequest['tool_choice'];
+  tools?: OpenAIResponsesTool[];
+  tool_choice?: OpenAIResponsesToolChoice;
   max_output_tokens?: number;
   temperature?: number;
   top_p?: number;
@@ -258,7 +260,7 @@ export class ProxyController {
     this.requireJsonObject(body);
     this.requireNonEmptyString(body.model, 'model');
     this.validateResponsesInput(body.input);
-    this.validateTools(body.tools, body.tool_choice);
+    this.validateResponsesTools(body.tools, body.tool_choice);
     this.validateUnsupportedIdentityOptions(body);
     this.validateResponsesOptions(body);
     const request = this.buildResponsesChatRequest(body);
@@ -1264,6 +1266,69 @@ export class ProxyController {
     }
   }
 
+  private validateResponsesTools(
+    tools: OpenAIResponsesTool[] | undefined,
+    toolChoice: OpenAIResponsesToolChoice | undefined,
+  ): void {
+    if (tools !== undefined && !Array.isArray(tools)) {
+      throw this.invalidRequest('tools must be an array', 'tools');
+    }
+
+    for (const [index, tool] of (tools ?? []).entries()) {
+      const toolRecord = this.toRecord(tool);
+      if (!toolRecord) {
+        throw this.invalidRequest('tools entries must be objects', 'tools');
+      }
+      if (toolRecord.type !== 'function') {
+        throw this.unsupportedParameter(
+          `tools[${index}].type`,
+          'only function tools are supported by this gateway',
+        );
+      }
+      this.requireNonEmptyString(toolRecord.name, `tools[${index}].name`);
+      if (toolRecord.description !== undefined && !isString(toolRecord.description)) {
+        throw this.invalidRequest(
+          'tool descriptions must be strings',
+          `tools[${index}].description`,
+        );
+      }
+      if (toolRecord.parameters !== undefined && !isPlainObject(toolRecord.parameters)) {
+        throw this.invalidRequest('tool parameters must be objects', `tools[${index}].parameters`);
+      }
+      if (toolRecord.strict !== undefined && !isBoolean(toolRecord.strict)) {
+        throw this.invalidRequest('tool strict must be a boolean', `tools[${index}].strict`);
+      }
+    }
+
+    if (
+      toolChoice === undefined ||
+      toolChoice === 'auto' ||
+      toolChoice === 'none' ||
+      toolChoice === 'required'
+    ) {
+      return;
+    }
+
+    const choiceRecord = this.toRecord(toolChoice);
+    if (!choiceRecord) {
+      throw this.invalidRequest('tool_choice is invalid', 'tool_choice');
+    }
+    if (choiceRecord.type !== 'function') {
+      throw this.unsupportedParameter(
+        'tool_choice.type',
+        'only function tool choices are supported by this gateway',
+      );
+    }
+    this.requireNonEmptyString(choiceRecord.name, 'tool_choice');
+    const name = choiceRecord.name;
+    if (!tools?.some((tool) => tool.name === name)) {
+      throw this.invalidRequest(
+        `tool_choice function "${name}" is not among the provided tools`,
+        'tool_choice',
+      );
+    }
+  }
+
   private validateChatMessageContent(
     message: OpenAIChatRequest['messages'][number],
     index: number,
@@ -1976,8 +2041,8 @@ export class ProxyController {
     model?: string;
     instructions?: string;
     input?: unknown;
-    tools?: OpenAIChatRequest['tools'];
-    tool_choice?: OpenAIChatRequest['tool_choice'];
+    tools?: OpenAIResponsesTool[];
+    tool_choice?: OpenAIResponsesToolChoice;
     max_output_tokens?: number;
     temperature?: number;
     top_p?: number;
@@ -2114,8 +2179,19 @@ export class ProxyController {
     return {
       model: body.model ?? OPENAI_COMPATIBLE_DEFAULT_MODELS.responses,
       messages,
-      tools: body.tools,
-      tool_choice: body.tool_choice,
+      tools: body.tools?.map((tool) => ({
+        type: 'function',
+        function: {
+          name: tool.name,
+          ...(tool.description === undefined ? {} : { description: tool.description }),
+          ...(tool.parameters === undefined ? {} : { parameters: tool.parameters }),
+          ...(tool.strict === undefined ? {} : { strict: tool.strict }),
+        },
+      })),
+      tool_choice:
+        typeof body.tool_choice === 'object' && body.tool_choice !== null
+          ? { type: 'function', function: { name: body.tool_choice.name } }
+          : body.tool_choice,
       max_tokens: body.max_output_tokens,
       temperature: body.temperature,
       top_p: body.top_p,

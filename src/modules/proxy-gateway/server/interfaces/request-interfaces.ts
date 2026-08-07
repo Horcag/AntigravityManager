@@ -72,6 +72,21 @@ export type OpenAIToolChoice =
   | 'required'
   | { type: 'function'; function: { name: string } };
 
+/** The Responses API declares functions directly instead of nesting them under `function`. */
+export interface OpenAIResponsesTool {
+  type: 'function';
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+  strict?: boolean;
+}
+
+export type OpenAIResponsesToolChoice =
+  | 'none'
+  | 'auto'
+  | 'required'
+  | { type: 'function'; name: string };
+
 export interface OpenAIMessage {
   role: string;
   content?: string | OpenAIContentPart[] | null;
@@ -94,6 +109,7 @@ export interface OpenAITool {
     name: string;
     description?: string;
     parameters?: Record<string, unknown>;
+    strict?: boolean;
   };
   [key: string]: unknown;
 }

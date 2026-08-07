@@ -543,19 +543,30 @@ describe('ProxyController Integration', () => {
         url === '/v1/chat/completions'
           ? { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
           : { model: 'gpt-4o', input: 'hi' };
+      const tools =
+        url === '/v1/chat/completions'
+          ? [{ type: 'function', function: { name: 'lookup' } }]
+          : [{ type: 'function', name: 'lookup' }];
+      const invalidChoices =
+        url === '/v1/chat/completions'
+          ? [
+              { type: 'function', function: {} },
+              { type: 'function', function: { name: 'missing' } },
+            ]
+          : [
+              { type: 'function', name: '' },
+              { type: 'function', name: 'missing' },
+            ];
 
       try {
-        for (const toolChoice of [
-          { type: 'function', function: {} },
-          { type: 'function', function: { name: 'missing' } },
-        ]) {
+        for (const toolChoice of invalidChoices) {
           const response = await server.inject({
             method: 'POST',
             url,
             headers: { authorization: 'Bearer test-key' },
             payload: {
               ...base,
-              tools: [{ type: 'function', function: { name: 'lookup' } }],
+              tools,
               tool_choice: toolChoice,
             },
           });
@@ -591,21 +602,24 @@ describe('ProxyController Integration', () => {
         url === '/v1/chat/completions'
           ? { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] }
           : { model: 'gpt-4o', input: 'hi' };
+      const tools =
+        url === '/v1/chat/completions'
+          ? [{ type: 'function', function: { name: 'lookup' } }]
+          : [{ type: 'function', name: 'lookup' }];
+      const toolChoices =
+        url === '/v1/chat/completions'
+          ? ['auto', 'none', 'required', { type: 'function', function: { name: 'lookup' } }]
+          : ['auto', 'none', 'required', { type: 'function', name: 'lookup' }];
 
       try {
-        for (const toolChoice of [
-          'auto',
-          'none',
-          'required',
-          { type: 'function', function: { name: 'lookup' } },
-        ]) {
+        for (const toolChoice of toolChoices) {
           const response = await server.inject({
             method: 'POST',
             url,
             headers: { authorization: 'Bearer test-key' },
             payload: {
               ...base,
-              tools: [{ type: 'function', function: { name: 'lookup' } }],
+              tools,
               tool_choice: toolChoice,
             },
           });
@@ -618,6 +632,39 @@ describe('ProxyController Integration', () => {
       }
     },
   );
+
+  it('rejects unsupported Responses built-in, MCP, custom, and allowed-tools variants before upstream', async () => {
+    vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const app = await createHttpApp(proxyService);
+    const server = app.getHttpAdapter().getInstance();
+    const headers = { authorization: 'Bearer test-key' };
+
+    try {
+      for (const payload of [
+        { tools: [{ type: 'web_search_preview' }] },
+        { tools: [{ type: 'mcp', server_label: 'docs' }] },
+        { tools: [{ type: 'custom', name: 'code' }] },
+        { tool_choice: { type: 'allowed_tools', tools: [{ type: 'function', name: 'lookup' }] } },
+      ]) {
+        const response = await server.inject({
+          method: 'POST',
+          url: '/v1/responses',
+          headers,
+          payload: { model: 'gpt-4o', input: 'hi', ...payload },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error).toMatchObject({
+          type: 'invalid_request_error',
+          code: 'unsupported_parameter',
+        });
+      }
+      expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
 
   it('rejects malformed OpenAI and Anthropic request shapes before invoking services', async () => {
     vi.mocked(getServerConfig).mockReturnValue({ api_key: 'test-key' } as never);
@@ -2313,8 +2360,16 @@ describe('ProxyController Integration', () => {
             output: { content: 'result: ok' },
           },
         ],
-        tools: [{ type: 'function', function: { name: 'search_docs' } }],
-        tool_choice: { type: 'function', function: { name: 'search_docs' } },
+        tools: [
+          {
+            type: 'function',
+            name: 'search_docs',
+            description: 'Search indexed documentation',
+            parameters: { type: 'object', properties: { query: { type: 'string' } } },
+            strict: true,
+          },
+        ],
+        tool_choice: { type: 'function', name: 'search_docs' },
       },
       reply as any,
     );
@@ -2330,6 +2385,17 @@ describe('ProxyController Integration', () => {
     expect(callArg.messages.some((message: { role: string }) => message.role === 'tool')).toBe(
       true,
     );
+    expect(callArg.tools).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'search_docs',
+          description: 'Search indexed documentation',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+          strict: true,
+        },
+      },
+    ]);
     expect(callArg.tool_choice).toEqual({ type: 'function', function: { name: 'search_docs' } });
     expect(reply.status).toHaveBeenCalledWith(200);
     expect(reply.send).toHaveBeenCalledWith(
@@ -2347,8 +2413,16 @@ describe('ProxyController Integration', () => {
         store: false,
         temperature: 1,
         text: { format: { type: 'text' } },
-        tool_choice: { type: 'function', function: { name: 'search_docs' } },
-        tools: [{ type: 'function', function: { name: 'search_docs' } }],
+        tool_choice: { type: 'function', name: 'search_docs' },
+        tools: [
+          {
+            type: 'function',
+            name: 'search_docs',
+            description: 'Search indexed documentation',
+            parameters: { type: 'object', properties: { query: { type: 'string' } } },
+            strict: true,
+          },
+        ],
         top_p: 1,
         truncation: 'disabled',
         output: [
@@ -2897,6 +2971,8 @@ describe('ProxyController Integration', () => {
         instructions: 'stream output',
         input: 'hello',
         stream: true,
+        tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+        tool_choice: { type: 'function', name: 'lookup' },
       },
       reply as any,
     );
@@ -2906,12 +2982,17 @@ describe('ProxyController Integration', () => {
     expect(reply.header).toHaveBeenCalledWith('Connection', 'keep-alive');
     expect(reply.send).toHaveBeenCalledWith(stream);
     expect(proxyService.handleChatCompletions).toHaveBeenCalledWith(
-      expect.any(Object),
+      expect.objectContaining({
+        tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }],
+        tool_choice: { type: 'function', function: { name: 'lookup' } },
+      }),
       'responses',
       expect.objectContaining({
         instructions: 'stream output',
         temperature: 1,
         top_p: 1,
+        tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+        tool_choice: { type: 'function', name: 'lookup' },
       }),
     );
   });
