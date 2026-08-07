@@ -44,7 +44,9 @@ import { AppError } from '@/shared/errors/appError';
 
 function clearModelAvailabilityCapabilityFailures(accountId: string): void {
   if (isNestServerRunning()) {
-    getNestService<ModelAvailabilityService>(ModelAvailabilityService)?.clearCapabilityFailures(accountId);
+    getNestService<ModelAvailabilityService>(ModelAvailabilityService)?.clearCapabilityFailures(
+      accountId,
+    );
   } else {
     clearPersistedCapabilityFailures(accountId);
   }
