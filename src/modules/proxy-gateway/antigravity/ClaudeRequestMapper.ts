@@ -953,7 +953,7 @@ function buildGenerationConfig(
 
   if (isOpenAIPath) {
     config.temperature = claudeReq.temperature ?? 1.0;
-    config.topP = claudeReq.top_p ?? 0.95;
+    config.topP = claudeReq.top_p ?? 1.0;
     config.presencePenalty = claudeReq.presence_penalty;
     config.frequencyPenalty = claudeReq.frequency_penalty;
     config.seed = claudeReq.seed;
@@ -964,6 +964,25 @@ function buildGenerationConfig(
     }
     if (claudeReq.stop_sequences && claudeReq.stop_sequences.length > 0) {
       config.stopSequences = claudeReq.stop_sequences;
+    }
+    if (claudeReq.candidate_count !== undefined) {
+      config.candidateCount = claudeReq.candidate_count;
+    }
+    if (
+      claudeReq.response_format?.type === 'json_object' ||
+      claudeReq.response_format?.type === 'json_schema'
+    ) {
+      config.responseMimeType = 'application/json';
+      const responseSchema = claudeReq.response_format.json_schema?.schema;
+      if (responseSchema) {
+        config.responseSchema = responseSchema;
+      }
+    }
+    if (claudeReq.response_logprobs) {
+      config.responseLogprobs = true;
+      if ((claudeReq.top_logprobs ?? 0) > 0) {
+        config.logprobs = claudeReq.top_logprobs;
+      }
     }
     if (isThinkingEnabled) {
       config.thinkingConfig = buildThinkingConfig();

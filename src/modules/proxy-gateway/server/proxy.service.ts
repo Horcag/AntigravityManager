@@ -1,16 +1,16 @@
-import {Inject, Injectable} from '@nestjs/common';
-import {isEmpty, isNil, isNumber, isPlainObject, isString} from 'lodash-es';
-import {AccountLeaseService} from './modules/account-lease/account-lease.service';
-import {GeminiClient} from './modules/gemini/gemini-client.service';
-import {GenerationConstraintsService} from './modules/shared/services/generation-constraints.service';
-import {ProxyRetryService} from './modules/shared/services/proxy-retry.service';
-import {ModelRoutingService} from './modules/shared/services/model-routing.service';
-import {v4 as uuidv4} from 'uuid';
-import {Observable} from 'rxjs';
-import {createGeminiSseObservable} from './modules/gemini/gemini-sse-decoder';
-import {sanitizeGeminiResponse} from './modules/gemini/gemini-wire';
-import {transformClaudeRequestIn} from '../antigravity/ClaudeRequestMapper';
-import {transformResponse} from '../antigravity/ClaudeResponseMapper';
+import { Inject, Injectable } from '@nestjs/common';
+import { isEmpty, isNil, isNumber, isPlainObject, isString } from 'lodash-es';
+import { AccountLeaseService } from './modules/account-lease/account-lease.service';
+import { GeminiClient } from './modules/gemini/gemini-client.service';
+import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
+import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
+import { ModelRoutingService } from './modules/shared/services/model-routing.service';
+import { v4 as uuidv4 } from 'uuid';
+import { Observable } from 'rxjs';
+import { createGeminiSseObservable } from './modules/gemini/gemini-sse-decoder';
+import { sanitizeGeminiResponse } from './modules/gemini/gemini-wire';
+import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import { transformResponse } from '../antigravity/ClaudeResponseMapper';
 import {
   toOpenAIResponsesUsage,
   toOpenAIUsage,
@@ -26,15 +26,24 @@ import {
   type GeminiResponsesStreamPart,
   OpenAIResponsesStreamingMapper,
 } from '../antigravity/OpenAIResponsesStreamingMapper';
-import {ClaudeRequest, ClaudeResponse, GeminiInternalRequest, type UsageMetadata,} from '../antigravity/types';
-import {normalizeObjectJsonSchema} from '../antigravity/JsonSchemaUtils';
-import {extractCustomToolInput, isCustomToolCall, toCustomToolArguments,} from '../antigravity/CustomToolCall';
-import {optimizeApplyPatch} from '../antigravity/ApplyPatchPreflight';
-import {flattenOpenAITools, splitNamespaceToolName} from '../antigravity/ToolNamespace';
-import {resolveShellToolName} from '../antigravity/ShellToolName';
-import {sanitizeSystemInstructionForCache} from '../antigravity/StablePromptPrefix';
-import {classifyStreamError} from '../antigravity/stream-error-utils';
-import {SignatureStore} from '../antigravity/SignatureStore';
+import {
+  ClaudeRequest,
+  ClaudeResponse,
+  GeminiInternalRequest,
+  type UsageMetadata,
+} from '../antigravity/types';
+import { normalizeObjectJsonSchema } from '../antigravity/JsonSchemaUtils';
+import {
+  extractCustomToolInput,
+  isCustomToolCall,
+  toCustomToolArguments,
+} from '../antigravity/CustomToolCall';
+import { optimizeApplyPatch } from '../antigravity/ApplyPatchPreflight';
+import { flattenOpenAITools, splitNamespaceToolName } from '../antigravity/ToolNamespace';
+import { resolveShellToolName } from '../antigravity/ShellToolName';
+import { sanitizeSystemInstructionForCache } from '../antigravity/StablePromptPrefix';
+import { classifyStreamError } from '../antigravity/stream-error-utils';
+import { SignatureStore } from '../antigravity/SignatureStore';
 import {
   InvalidFunctionCallArgumentsError,
   normalizeFunctionCallArgs,
@@ -43,8 +52,8 @@ import {
   ToolCallIdConflictError,
   ToolCallIdIntegrityTracker,
 } from '../antigravity/tool-call-id-integrity';
-import {decodeSignature} from '../antigravity/signature-utils';
-import {decodeInternalSseData} from '../antigravity/internal-sse';
+import { decodeSignature } from '../antigravity/signature-utils';
+import { decodeInternalSseData } from '../antigravity/internal-sse';
 import {
   AnthropicChatRequest,
   AnthropicChatResponse,
@@ -52,29 +61,36 @@ import {
   GeminiRequest,
   GeminiResponse,
   GeminiUsageMetadata,
+  OpenAIChatLogprobs,
   OpenAIChatRequest,
   OpenAIChatResponse,
   OpenAIUsage,
 } from './common/interfaces/request-interfaces';
-import {resolveRequestUserAgent} from './common/utils/request-user-agent';
+import { resolveRequestUserAgent } from './common/utils/request-user-agent';
 import {
   applyAnthropicModelVariant,
   applyOpenAIModelVariant,
   rebindAnthropicModelVariant,
   rebindOpenAIModelVariant,
 } from './modules/shared/services/model-variant-request.service';
-import {safeStringifyPacket} from '@/shared/security/sensitiveDataMasking';
-import {BaseProxyService} from "@/modules/proxy-gateway/server/common/base-proxy.service";
+import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
+import { BaseProxyService } from '@/modules/proxy-gateway/server/common/base-proxy.service';
 
 type OpenAIOutputProtocol = 'chat-completions' | 'responses';
 
+interface OpenAIStreamContract {
+  expectedChoices: number;
+  includeUsage: boolean;
+  serviceTier?: string;
+}
+
 @Injectable()
 export class ProxyService extends BaseProxyService {
-
   constructor(
     @Inject(AccountLeaseService) readonly accountLeaseService: AccountLeaseService,
     @Inject(GeminiClient) readonly geminiClient: GeminiClient,
-    @Inject(GenerationConstraintsService) readonly generationConstraintsService: GenerationConstraintsService,
+    @Inject(GenerationConstraintsService)
+    readonly generationConstraintsService: GenerationConstraintsService,
     @Inject(ProxyRetryService) readonly proxyRetryService: ProxyRetryService,
     @Inject(ModelRoutingService) readonly customModelRoutingService: ModelRoutingService,
     @Inject(SignatureStore) readonly signatureStore: SignatureStore,
@@ -719,6 +735,7 @@ export class ProxyService extends BaseProxyService {
               outputProtocol,
               clientToolNames,
               this.createSignatureState(token.id, geminiBody.model),
+              this.createOpenAIStreamContract(request),
             );
           } catch (streamError) {
             this.logger.warn(
@@ -737,21 +754,20 @@ export class ProxyService extends BaseProxyService {
             this.logger.log(
               `Upstream response snippet after stream fallback: ${safeStringifyPacket(response).substring(0, 500)}`,
             );
-            const claudeResponse = transformResponse(
+            const openaiResponse = this.convertGeminiToOpenAIResponse(
               response,
-              this.createSignatureState(token.id, geminiBody.model),
-            );
-            const openaiResponse = this.convertClaudeToOpenAIResponse(
-              claudeResponse,
               request.model,
               clientToolNames,
+              this.createSignatureState(token.id, geminiBody.model),
+              this.resolveOpenAIServiceTier(request.service_tier),
+              request.top_logprobs,
             );
             return outputProtocol === 'responses'
-              ? this.createSyntheticResponsesStream(
+              ? this.createSyntheticResponsesStream(openaiResponse, clientToolNames)
+              : this.createSyntheticOpenAIStream(
                   openaiResponse,
-                  clientToolNames,
-                )
-              : this.createSyntheticOpenAIStream(openaiResponse);
+                  this.createOpenAIStreamContract(request),
+                );
           }
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -764,15 +780,14 @@ export class ProxyService extends BaseProxyService {
           this.logger.log(
             `Upstream response snippet (non-stream): ${safeStringifyPacket(response).substring(0, 500)}`,
           );
-          // Transform Gemini response to OpenAI format
-          const claudeResponse = transformResponse(
+          return this.convertGeminiToOpenAIResponse(
             response,
+            request.model,
+            clientToolNames,
             this.createSignatureState(token.id, geminiBody.model),
+            this.resolveOpenAIServiceTier(request.service_tier),
+            request.top_logprobs,
           );
-          this.logger.log(
-            `Transformed Claude response snippet: ${safeStringifyPacket(claudeResponse).substring(0, 500)}`,
-          );
-          return this.convertClaudeToOpenAIResponse(claudeResponse, request.model, clientToolNames);
         }
       } catch (err) {
         if (err instanceof Error && this.isProjectContextError(err.message)) {
@@ -809,6 +824,7 @@ export class ProxyService extends BaseProxyService {
                 outputProtocol,
                 clientToolNames,
                 this.createSignatureState(token.id, fallbackBody.model),
+                this.createOpenAIStreamContract(request),
               );
             }
 
@@ -819,14 +835,13 @@ export class ProxyService extends BaseProxyService {
               extraHeaders,
             );
             this.markUpstreamSuccess(token.id, fallbackBody.model);
-            const claudeResponse = transformResponse(
+            return this.convertGeminiToOpenAIResponse(
               response,
-              this.createSignatureState(token.id, fallbackBody.model),
-            );
-            return this.convertClaudeToOpenAIResponse(
-              claudeResponse,
               request.model,
               clientToolNames,
+              this.createSignatureState(token.id, fallbackBody.model),
+              this.resolveOpenAIServiceTier(request.service_tier),
+              request.top_logprobs,
             );
           } catch (fallbackErr) {
             lastError = fallbackErr;
@@ -853,6 +868,7 @@ export class ProxyService extends BaseProxyService {
     outputProtocol: OpenAIOutputProtocol,
     clientToolNames?: ReadonlySet<string>,
     signatureState?: StreamingSignatureState,
+    streamContract?: OpenAIStreamContract,
   ): Observable<string> {
     if (outputProtocol === 'responses') {
       return this.processResponsesStreamResponse(
@@ -867,7 +883,20 @@ export class ProxyService extends BaseProxyService {
       model,
       clientToolNames,
       signatureState,
+      streamContract,
     );
+  }
+
+  private createOpenAIStreamContract(request: OpenAIChatRequest): OpenAIStreamContract {
+    return {
+      expectedChoices: request.n ?? 1,
+      includeUsage: request.stream_options?.include_usage === true,
+      serviceTier: this.resolveOpenAIServiceTier(request.service_tier),
+    };
+  }
+
+  private resolveOpenAIServiceTier(requestedTier: string | undefined): string | undefined {
+    return requestedTier ? 'default' : undefined;
   }
 
   private processResponsesStreamResponse(
@@ -1146,17 +1175,22 @@ export class ProxyService extends BaseProxyService {
     model: string,
     clientToolNames?: ReadonlySet<string>,
     signatureState?: StreamingSignatureState,
+    streamContract: OpenAIStreamContract = { expectedChoices: 1, includeUsage: false },
   ): Observable<string> {
     return new Observable<string>((subscriber) => {
       const decoder = new TextDecoder();
       let buffer = '';
       let hasEmittedChunk = false;
-      let hasSentDone = false;
+      let settled = false;
       let lastUsage: OpenAIUsage | undefined;
-      let toolCallIndex = 0;
-      let emittedToolCallCount = 0;
-      let latestResponseSignature: string | null = null;
-      const toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
+      const observedChoiceIndexes = new Set<number>();
+      const roleEmittedIndexes = new Set<number>();
+      const finishedChoiceIndexes = new Set<number>();
+      const toolCallIndexes = new Map<number, number>();
+      const emittedToolCallCounts = new Map<number, number>();
+      const latestResponseSignatures = new Map<number, string>();
+      const toolCallIntegrityByChoice = new Map<number, ToolCallIdIntegrityTracker>();
+      let heartbeatTimer: NodeJS.Timeout | undefined;
 
       const streamId = `chatcmpl-${uuidv4()}`;
       const created = Math.floor(Date.now() / 1000);
@@ -1165,135 +1199,216 @@ export class ProxyService extends BaseProxyService {
       }
 
       const pushChunk = (payload: Record<string, unknown>): void => {
+        if (settled) {
+          return;
+        }
         hasEmittedChunk = true;
         subscriber.next(`data: ${JSON.stringify(payload)}\n\n`);
       };
 
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
-        if (!hasSentDone) {
-          subscriber.next('data: [DONE]\n\n');
-          hasSentDone = true;
+      const withOptionalUsage = (payload: Record<string, unknown>): Record<string, unknown> => {
+        const withTier = streamContract.serviceTier
+          ? { ...payload, service_tier: streamContract.serviceTier }
+          : payload;
+        return streamContract.includeUsage ? { ...withTier, usage: null } : withTier;
+      };
+
+      const emitRoleIfNeeded = (choiceIndex: number): void => {
+        observedChoiceIndexes.add(choiceIndex);
+        if (roleEmittedIndexes.has(choiceIndex)) {
+          return;
         }
+        roleEmittedIndexes.add(choiceIndex);
+        pushChunk(
+          withOptionalUsage({
+            id: streamId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [
+              {
+                index: choiceIndex,
+                delta: { role: 'assistant', content: '' },
+                finish_reason: null,
+              },
+            ],
+          }),
+        );
+      };
+
+      const requiredChoiceCount = (): number =>
+        Math.max(streamContract.expectedChoices, observedChoiceIndexes.size);
+
+      const clearHeartbeat = (): void => {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = undefined;
+        }
+      };
+
+      const finalizeSuccess = (): void => {
+        if (settled) {
+          return;
+        }
+        idleTimer.clear();
+        clearHeartbeat();
+        if (streamContract.includeUsage) {
+          pushChunk({
+            id: streamId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [],
+            usage: lastUsage ?? null,
+            ...(streamContract.serviceTier ? { service_tier: streamContract.serviceTier } : {}),
+          });
+        }
+        subscriber.next('data: [DONE]\n\n');
+        settled = true;
         subscriber.complete();
+      };
+
+      const failStream = (error: Error): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        idleTimer.clear();
+        clearHeartbeat();
+        subscriber.error(error);
+      };
+
+      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'OpenAI-SSE', () => {
+        failStream(new Error('OpenAI-compatible upstream stream idle timeout'));
       });
 
       idleTimer.reset();
+      heartbeatTimer = setInterval(() => {
+        if (!settled) {
+          subscriber.next(': ping\n\n');
+        }
+      }, 15_000);
 
-      upstreamStream.on('data', (chunk: Buffer) => {
-        idleTimer.reset();
-        buffer += decoder.decode(chunk, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+      const processLine = (line: string): void => {
+        if (settled) {
+          return;
+        }
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data: ')) {
+          return;
+        }
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data: ')) continue;
+        try {
+          const decoded = decodeInternalSseData(trimmed.slice(6));
+          if (decoded.kind !== 'response') {
+            return;
+          }
 
-          const dataStr = trimmed.slice(6);
+          const responsePayload = decoded.response;
+          const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
+          if (usageMetadata) {
+            lastUsage = toOpenAIUsageFromGeminiUsageMetadata(usageMetadata);
+          }
 
-          try {
-            const decoded = decodeInternalSseData(dataStr);
-            if (decoded.kind !== 'response') {
+          const candidates = Array.isArray(responsePayload.candidates)
+            ? responsePayload.candidates
+            : [];
+          for (const [fallbackCandidateIndex, candidateValue] of candidates.entries()) {
+            const candidate = this.toUnknownRecord(candidateValue);
+            if (!candidate) {
               continue;
             }
+            const candidateIndex = isNumber(candidate.index)
+              ? candidate.index
+              : fallbackCandidateIndex;
+            emitRoleIfNeeded(candidateIndex);
 
-            const responsePayload = decoded.response;
-            const usageMetadata = this.toGeminiUsageMetadata(responsePayload.usageMetadata);
-            if (usageMetadata) {
-              lastUsage = toOpenAIUsageFromGeminiUsageMetadata(usageMetadata);
-            }
+            const content = this.toUnknownRecord(candidate.content);
+            const parts = Array.isArray(content?.parts) ? content.parts : [];
+            let reasoningContent = '';
+            let responseContent = '';
 
-            const candidates = Array.isArray(responsePayload.candidates)
-              ? responsePayload.candidates
-              : [];
-            for (const [candidateIndex, candidateValue] of candidates.entries()) {
-              const candidate = this.toUnknownRecord(candidateValue);
-              const content = this.toUnknownRecord(candidate?.content);
-              const parts = Array.isArray(content?.parts) ? content.parts : [];
-              // Keep these streams separate because clients can render thought text twice when
-              // reasoning_content and content are present in the same delta.
-              let reasoningContent = '';
-              let responseContent = '';
+            for (const partValue of parts) {
+              const part = this.toUnknownRecord(partValue);
+              if (!part) {
+                continue;
+              }
 
-              for (const partValue of parts) {
-                const part = this.toUnknownRecord(partValue);
-                if (!part) {
-                  continue;
+              if (isString(part.text)) {
+                const cleanText = part.text
+                  .replaceAll('<think>\n', '')
+                  .replaceAll('<think>', '')
+                  .replaceAll('\n</think>', '')
+                  .replaceAll('</think>', '');
+                if (part.thought === true) {
+                  reasoningContent += cleanText;
+                } else {
+                  responseContent += cleanText;
                 }
+              }
 
-                if (isString(part.text)) {
-                  const cleanText = part.text
-                    .replaceAll('<think>\n', '')
-                    .replaceAll('<think>', '')
-                    .replaceAll('\n</think>', '')
-                    .replaceAll('</think>', '');
-                  if (part.thought === true) {
-                    reasoningContent += cleanText;
-                  } else {
-                    responseContent += cleanText;
-                  }
-                }
+              const rawSignature = isString(part.thoughtSignature)
+                ? part.thoughtSignature
+                : isString(part.thought_signature)
+                  ? part.thought_signature
+                  : undefined;
+              const signature = decodeSignature(rawSignature);
+              if (signature) {
+                latestResponseSignatures.set(candidateIndex, signature);
+              }
 
-                const rawSignature = isString(part.thoughtSignature)
-                  ? part.thoughtSignature
-                  : isString(part.thought_signature)
-                    ? part.thought_signature
-                    : undefined;
-                const signature = decodeSignature(rawSignature);
-                if (signature) {
-                  latestResponseSignature = signature;
-                }
-
-                const functionCall = this.toUnknownRecord(part.functionCall);
-                if (functionCall && isString(functionCall.name)) {
-                  const rawArguments = normalizeFunctionCallArgs(functionCall);
-                  const explicitToolCallId = isString(functionCall.id)
-                    ? functionCall.id
-                    : undefined;
-                  const integrity = toolCallIdIntegrity.record(
-                    explicitToolCallId,
-                    functionCall.name,
-                    rawArguments,
-                  );
-                  if (integrity === 'replay') {
-                    const replaySignature = signature ?? latestResponseSignature;
-                    if (replaySignature && signatureState && explicitToolCallId) {
-                      signatureState.store.store(
-                        {
-                          accountId: signatureState.accountId,
-                          model: signatureState.model,
-                          toolCallId: explicitToolCallId,
-                        },
-                        replaySignature,
-                      );
-                    }
-                    continue;
-                  }
-
-                  const splitName = splitNamespaceToolName(functionCall.name);
-                  const functionName = clientToolNames
-                    ? resolveShellToolName(splitName.name, clientToolNames)
-                    : splitName.name;
-                  const functionArguments = isCustomToolCall(functionName)
-                    ? toCustomToolArguments(
-                        functionName,
-                        optimizeApplyPatch(extractCustomToolInput(functionName, rawArguments))
-                          .input,
-                      )
-                    : rawArguments;
-                  const clientToolCallId = explicitToolCallId ?? `${functionName}-${uuidv4()}`;
-                  const capturedSignature = signature ?? latestResponseSignature;
-                  if (capturedSignature && signatureState) {
+              const functionCall = this.toUnknownRecord(part.functionCall);
+              if (functionCall && isString(functionCall.name)) {
+                const rawArguments = normalizeFunctionCallArgs(functionCall);
+                const explicitToolCallId = isString(functionCall.id) ? functionCall.id : undefined;
+                const integrityTracker =
+                  toolCallIntegrityByChoice.get(candidateIndex) ?? new ToolCallIdIntegrityTracker();
+                toolCallIntegrityByChoice.set(candidateIndex, integrityTracker);
+                const integrity = integrityTracker.record(
+                  explicitToolCallId,
+                  functionCall.name,
+                  rawArguments,
+                );
+                if (integrity === 'replay') {
+                  const replaySignature = signature ?? latestResponseSignatures.get(candidateIndex);
+                  if (replaySignature && signatureState && explicitToolCallId) {
                     signatureState.store.store(
                       {
                         accountId: signatureState.accountId,
                         model: signatureState.model,
-                        toolCallId: clientToolCallId,
+                        toolCallId: explicitToolCallId,
                       },
-                      capturedSignature,
+                      replaySignature,
                     );
                   }
-                  const toolCallChunk = {
+                  continue;
+                }
+
+                const splitName = splitNamespaceToolName(functionCall.name);
+                const functionName = clientToolNames
+                  ? resolveShellToolName(splitName.name, clientToolNames)
+                  : splitName.name;
+                const functionArguments = isCustomToolCall(functionName)
+                  ? toCustomToolArguments(
+                      functionName,
+                      optimizeApplyPatch(extractCustomToolInput(functionName, rawArguments)).input,
+                    )
+                  : rawArguments;
+                const clientToolCallId = explicitToolCallId ?? `${functionName}-${uuidv4()}`;
+                const capturedSignature = signature ?? latestResponseSignatures.get(candidateIndex);
+                if (capturedSignature && signatureState) {
+                  signatureState.store.store(
+                    {
+                      accountId: signatureState.accountId,
+                      model: signatureState.model,
+                      toolCallId: clientToolCallId,
+                    },
+                    capturedSignature,
+                  );
+                }
+                const toolCallIndex = toolCallIndexes.get(candidateIndex) ?? 0;
+                pushChunk(
+                  withOptionalUsage({
                     id: streamId,
                     object: 'chat.completion.chunk',
                     created,
@@ -1302,7 +1417,6 @@ export class ProxyService extends BaseProxyService {
                       {
                         index: candidateIndex,
                         delta: {
-                          role: 'assistant',
                           tool_calls: [
                             {
                               index: toolCallIndex,
@@ -1318,24 +1432,26 @@ export class ProxyService extends BaseProxyService {
                         finish_reason: null,
                       },
                     ],
-                  };
-                  pushChunk(toolCallChunk);
-                  toolCallIndex += 1;
-                  emittedToolCallCount += 1;
-                }
-
-                const inlineData = this.toUnknownRecord(part.inlineData);
-                if (inlineData) {
-                  const mimeType = isString(inlineData.mimeType)
-                    ? inlineData.mimeType
-                    : 'image/jpeg';
-                  const data = isString(inlineData.data) ? inlineData.data : '';
-                  responseContent += `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
-                }
+                  }),
+                );
+                toolCallIndexes.set(candidateIndex, toolCallIndex + 1);
+                emittedToolCallCounts.set(
+                  candidateIndex,
+                  (emittedToolCallCounts.get(candidateIndex) ?? 0) + 1,
+                );
               }
 
-              if (reasoningContent) {
-                const reasoningChunk = {
+              const inlineData = this.toUnknownRecord(part.inlineData);
+              if (inlineData) {
+                const mimeType = isString(inlineData.mimeType) ? inlineData.mimeType : 'image/jpeg';
+                const data = isString(inlineData.data) ? inlineData.data : '';
+                responseContent += `\n\n![Generated Image](data:${mimeType};base64,${data})\n\n`;
+              }
+            }
+
+            if (reasoningContent) {
+              pushChunk(
+                withOptionalUsage({
                   id: streamId,
                   object: 'chat.completion.chunk',
                   created,
@@ -1343,20 +1459,17 @@ export class ProxyService extends BaseProxyService {
                   choices: [
                     {
                       index: candidateIndex,
-                      delta: {
-                        role: 'assistant',
-                        content: null,
-                        reasoning_content: reasoningContent,
-                      },
+                      delta: { content: null, reasoning_content: reasoningContent },
                       finish_reason: null,
                     },
                   ],
-                };
-                pushChunk(reasoningChunk);
-              }
+                }),
+              );
+            }
 
-              if (responseContent) {
-                const contentChunk = {
+            if (responseContent) {
+              pushChunk(
+                withOptionalUsage({
                   id: streamId,
                   object: 'chat.completion.chunk',
                   created,
@@ -1368,12 +1481,13 @@ export class ProxyService extends BaseProxyService {
                       finish_reason: null,
                     },
                   ],
-                };
-                pushChunk(contentChunk);
-              }
+                }),
+              );
+            }
 
-              if (candidate && isString(candidate.finishReason)) {
-                const finishChunk = {
+            if (isString(candidate.finishReason) && !finishedChoiceIndexes.has(candidateIndex)) {
+              pushChunk(
+                withOptionalUsage({
                   id: streamId,
                   object: 'chat.completion.chunk',
                   created,
@@ -1382,41 +1496,126 @@ export class ProxyService extends BaseProxyService {
                     {
                       index: candidateIndex,
                       delta: {},
-                      // OpenAI clients only continue the tool loop when the finish reason reflects
-                      // the emitted tool call, even if Gemini reports a generic STOP.
                       finish_reason:
-                        emittedToolCallCount > 0
+                        (emittedToolCallCounts.get(candidateIndex) ?? 0) > 0
                           ? 'tool_calls'
                           : this.mapGeminiFinishReasonToOpenAIFinishReason(candidate.finishReason),
                     },
                   ],
-                  usage: lastUsage,
-                };
-                pushChunk(finishChunk);
-                subscriber.next('data: [DONE]\n\n');
-                hasSentDone = true;
-                subscriber.complete();
-                return;
-              }
+                }),
+              );
+              finishedChoiceIndexes.add(candidateIndex);
             }
-          } catch (error) {
-            if (
-              error instanceof ToolCallIdConflictError ||
-              error instanceof InvalidFunctionCallArgumentsError
-            ) {
-              idleTimer.clear();
-              (upstreamStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
-              subscriber.error(error);
-              return;
-            }
-            // Preserve compatibility: ignore per-chunk mapping failures.
+          }
+
+          if (
+            finishedChoiceIndexes.size >= requiredChoiceCount() &&
+            (!streamContract.includeUsage || lastUsage !== undefined)
+          ) {
+            finalizeSuccess();
+          }
+        } catch (error) {
+          if (
+            error instanceof ToolCallIdConflictError ||
+            error instanceof InvalidFunctionCallArgumentsError
+          ) {
+            failStream(error);
+          }
+        }
+      };
+
+      upstreamStream.on('data', (chunk: Buffer) => {
+        if (settled) {
+          return;
+        }
+        idleTimer.reset();
+        buffer += decoder.decode(chunk, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          processLine(line);
+          if (settled) {
+            return;
           }
         }
       });
 
       upstreamStream.on('end', () => {
+        if (settled) {
+          return;
+        }
         idleTimer.clear();
-        if (!hasEmittedChunk) {
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          processLine(buffer);
+        }
+        if (settled) {
+          return;
+        }
+        if (finishedChoiceIndexes.size >= requiredChoiceCount()) {
+          finalizeSuccess();
+          return;
+        }
+        const message = hasEmittedChunk
+          ? `OpenAI-compatible upstream stream ended before ${requiredChoiceCount()} choice(s) finished`
+          : 'Empty OpenAI-compatible upstream response stream';
+        failStream(new Error(message));
+      });
+
+      upstreamStream.on('error', (err: unknown) => {
+        const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
+        this.logger.error(`OpenAI-compatible stream error: ${cleanError.message}`);
+        failStream(cleanError);
+      });
+
+      return () => {
+        clearHeartbeat();
+        idleTimer.dispose();
+      };
+    });
+  }
+
+  private createSyntheticOpenAIStream(
+    response: OpenAIChatResponse,
+    streamContract: OpenAIStreamContract = { expectedChoices: 1, includeUsage: false },
+  ): Observable<string> {
+    return new Observable<string>((subscriber) => {
+      const streamId = response.id || `chatcmpl-${uuidv4()}`;
+      const created = response.created || Math.floor(Date.now() / 1000);
+      const model = response.model;
+      const chunkSize = 80;
+
+      if (this.shouldEmitCloudCodeMeta()) {
+        subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
+      }
+
+      const pushChunk = (payload: Record<string, unknown>): void => {
+        const withTier = streamContract.serviceTier
+          ? { ...payload, service_tier: streamContract.serviceTier }
+          : payload;
+        const chunk = streamContract.includeUsage ? { ...withTier, usage: null } : withTier;
+        subscriber.next(`data: ${JSON.stringify(chunk)}\n\n`);
+      };
+
+      for (const choice of response.choices ?? []) {
+        const choiceIndex = choice.index;
+        const finishReason = choice.finish_reason ?? 'stop';
+        const message = choice.message;
+        pushChunk({
+          id: streamId,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [
+            {
+              index: choiceIndex,
+              delta: { role: 'assistant', content: '' },
+              finish_reason: null,
+            },
+          ],
+        });
+
+        if (message?.reasoning_content) {
           pushChunk({
             id: streamId,
             object: 'chat.completion.chunk',
@@ -1424,90 +1623,83 @@ export class ProxyService extends BaseProxyService {
             model,
             choices: [
               {
-                index: 0,
-                delta: { content: '' },
+                index: choiceIndex,
+                delta: { content: null, reasoning_content: message.reasoning_content },
                 finish_reason: null,
               },
             ],
           });
         }
-        if (!hasSentDone) {
-          subscriber.next('data: [DONE]\n\n');
-          hasSentDone = true;
+
+        const content = isString(message?.content) ? message.content : '';
+        for (let index = 0; index < content.length; index += chunkSize) {
+          pushChunk({
+            id: streamId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [
+              {
+                index: choiceIndex,
+                delta: { content: content.slice(index, index + chunkSize) },
+                finish_reason: null,
+              },
+            ],
+          });
         }
-        subscriber.complete();
-      });
 
-      upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
-        // Convert to clean Error to avoid circular reference issues (socket objects)
-        const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
-        this.logger.error(`OpenAI-compatible stream error: ${cleanError.message}`);
-        subscriber.error(cleanError);
-      });
+        for (const [toolIndex, toolCall] of (message?.tool_calls ?? []).entries()) {
+          pushChunk({
+            id: streamId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [
+              {
+                index: choiceIndex,
+                delta: {
+                  tool_calls: [
+                    {
+                      index: toolIndex,
+                      id: toolCall.id,
+                      type: toolCall.type,
+                      function: toolCall.function,
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          });
+        }
 
-      return () => {
-        idleTimer.dispose();
-      };
-    });
-  }
-
-  private createSyntheticOpenAIStream(response: OpenAIChatResponse): Observable<string> {
-    return new Observable<string>((subscriber) => {
-      const streamId = response.id || `chatcmpl-${uuidv4()}`;
-      const created = response.created || Math.floor(Date.now() / 1000);
-      const model = response.model;
-      const choice = response.choices?.[0];
-      const finishReason = choice?.finish_reason ?? 'stop';
-      const content =
-        choice?.message && isString(choice.message.content) ? choice.message.content : '';
-      const chunkSize = 80;
-
-      if (this.shouldEmitCloudCodeMeta()) {
-        subscriber.next(this.createCloudCodeMetaChunk(this.createCloudCodeTraceId()));
-      }
-
-      if (content.length === 0) {
-        const finishChunk = {
+        pushChunk({
           id: streamId,
           object: 'chat.completion.chunk',
           created,
           model,
           choices: [
             {
-              index: 0,
+              index: choiceIndex,
               delta: {},
               finish_reason: finishReason,
             },
           ],
-          usage: response.usage,
-        };
-        subscriber.next(`data: ${JSON.stringify(finishChunk)}\n\n`);
-        subscriber.next('data: [DONE]\n\n');
-        subscriber.complete();
-        return;
+        });
       }
 
-      for (let index = 0; index < content.length; index += chunkSize) {
-        const piece = content.slice(index, index + chunkSize);
-        const isLast = index + chunkSize >= content.length;
-        const chunk = {
-          id: streamId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [
-            {
-              index: 0,
-              delta: { content: piece },
-              finish_reason: isLast ? finishReason : null,
-            },
-          ],
-          usage: isLast
-            ? response.usage
-            : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        };
-        subscriber.next(`data: ${JSON.stringify(chunk)}\n\n`);
+      if (streamContract.includeUsage) {
+        subscriber.next(
+          `data: ${JSON.stringify({
+            id: streamId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [],
+            usage: response.usage,
+            ...(streamContract.serviceTier ? { service_tier: streamContract.serviceTier } : {}),
+          })}\n\n`,
+        );
       }
 
       subscriber.next('data: [DONE]\n\n');
@@ -1735,16 +1927,23 @@ export class ProxyService extends BaseProxyService {
             effort: request.thinking.effort,
           }
         : undefined,
-      max_tokens: request.max_tokens,
+      max_tokens: request.max_completion_tokens ?? request.max_tokens,
+      candidate_count: request.n,
+      stop_sequences: typeof request.stop === 'string' ? [request.stop] : request.stop,
       temperature: request.temperature,
       top_p: request.top_p,
       presence_penalty: request.presence_penalty,
       frequency_penalty: request.frequency_penalty,
       seed: request.seed,
+      response_format: request.response_format,
+      response_logprobs: request.logprobs,
+      top_logprobs: request.top_logprobs,
       tool_choice: request.tool_choice,
       stream: request.stream,
       metadata: {
+        ...(request.metadata ?? {}),
         ...(request.extra ?? {}),
+        ...(request.user ? { user_id: request.user } : {}),
         source: 'openai',
         signature_session_key: signatureSessionKey,
       },
@@ -1933,11 +2132,19 @@ export class ProxyService extends BaseProxyService {
     if (normalized === 'MAX_TOKENS') {
       return 'length';
     }
-    if (normalized === 'SAFETY' || normalized === 'RECITATION') {
+    if (
+      normalized === 'SAFETY' ||
+      normalized === 'RECITATION' ||
+      normalized === 'BLOCKLIST' ||
+      normalized === 'PROHIBITED_CONTENT' ||
+      normalized === 'SPII' ||
+      normalized === 'IMAGE_SAFETY' ||
+      normalized === 'IMAGE_PROHIBITED_CONTENT'
+    ) {
       return 'content_filter';
     }
 
-    return finishReason.toLowerCase();
+    return 'stop';
   }
 
   private mapAnthropicStopReasonToOpenAIFinishReason(stopReason?: string | null): string | null {
@@ -1973,12 +2180,69 @@ export class ProxyService extends BaseProxyService {
     }
   }
 
-  // Convert Claude response to OpenAI format
   private convertClaudeToOpenAIResponse(
     claudeResponse: ClaudeResponse,
     model: string,
     clientToolNames?: ReadonlySet<string>,
   ): OpenAIChatResponse {
+    return {
+      id: `chatcmpl-${uuidv4()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [this.convertClaudeToOpenAIChoice(claudeResponse, 0, clientToolNames)],
+      usage: toOpenAIUsage(claudeResponse.usage),
+    };
+  }
+
+  private convertGeminiToOpenAIResponse(
+    geminiResponse: GeminiResponse,
+    model: string,
+    clientToolNames?: ReadonlySet<string>,
+    signatureState?: StreamingSignatureState,
+    serviceTier?: string,
+    topLogprobs = 0,
+  ): OpenAIChatResponse {
+    const candidates =
+      geminiResponse.candidates && geminiResponse.candidates.length > 0
+        ? geminiResponse.candidates
+        : [undefined];
+    const choices = candidates.map((candidate, fallbackIndex) => {
+      const candidateResponse: GeminiResponse = {
+        ...geminiResponse,
+        candidates: candidate ? [candidate] : [],
+      };
+      const claudeResponse = transformResponse(candidateResponse, signatureState);
+      const candidateIndex = isNumber(candidate?.index) ? candidate.index : fallbackIndex;
+      return this.convertClaudeToOpenAIChoice(
+        claudeResponse,
+        candidateIndex,
+        clientToolNames,
+        this.toOpenAIChatLogprobs(candidate?.logprobsResult, topLogprobs),
+      );
+    });
+    const usageSource = transformResponse(
+      { ...geminiResponse, candidates: candidates[0] ? [candidates[0]] : [] },
+      undefined,
+    );
+
+    return {
+      id: `chatcmpl-${uuidv4()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices,
+      usage: toOpenAIUsage(usageSource.usage),
+      ...(serviceTier ? { service_tier: serviceTier } : {}),
+    };
+  }
+
+  private convertClaudeToOpenAIChoice(
+    claudeResponse: ClaudeResponse,
+    index: number,
+    clientToolNames?: ReadonlySet<string>,
+    logprobs: OpenAIChatLogprobs | null = null,
+  ): OpenAIChatResponse['choices'][number] {
     const contentBlocks = Array.isArray(claudeResponse?.content) ? claudeResponse.content : [];
 
     const textContent = contentBlocks
@@ -2012,7 +2276,7 @@ export class ProxyService extends BaseProxyService {
           { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
         > => block?.type === 'tool_use',
       )
-      .map((block, index: number) => {
+      .map((block, toolIndex: number) => {
         const splitName = splitNamespaceToolName(block.name || 'unknown_tool');
         const functionName = clientToolNames
           ? resolveShellToolName(splitName.name, clientToolNames)
@@ -2024,7 +2288,7 @@ export class ProxyService extends BaseProxyService {
             )
           : block.input;
         return {
-          id: block.id || `tool-call-${index}`,
+          id: block.id || `tool-call-${toolIndex}`,
           type: 'function' as const,
           function: {
             name: functionName,
@@ -2035,27 +2299,56 @@ export class ProxyService extends BaseProxyService {
       });
 
     return {
-      id: `chatcmpl-${uuidv4()}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: textContent || null,
-            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
-            reasoning_content: reasoningContent || undefined,
-            refusal: claudeResponse.refusal,
-          },
-          finish_reason: this.mapAnthropicStopReasonToOpenAIFinishReason(
-            claudeResponse.stop_reason,
-          ),
-        },
-      ],
-      usage: toOpenAIUsage(claudeResponse.usage),
+      index,
+      message: {
+        role: 'assistant',
+        content: textContent || null,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+        reasoning_content: reasoningContent || undefined,
+        refusal: claudeResponse.refusal,
+      },
+      logprobs,
+      finish_reason: this.mapAnthropicStopReasonToOpenAIFinishReason(claudeResponse.stop_reason),
     };
+  }
+
+  private toOpenAIChatLogprobs(value: unknown, topLogprobs: number): OpenAIChatLogprobs | null {
+    const result = this.toUnknownRecord(value);
+    const chosenCandidates = Array.isArray(result?.chosenCandidates) ? result.chosenCandidates : [];
+    const topCandidates = Array.isArray(result?.topCandidates) ? result.topCandidates : [];
+    const content = chosenCandidates.flatMap((chosenValue, index) => {
+      const chosen = this.toUnknownRecord(chosenValue);
+      if (!chosen || !isString(chosen.token) || !isNumber(chosen.logProbability)) {
+        return [];
+      }
+      const topGroup = this.toUnknownRecord(topCandidates[index]);
+      const alternatives = Array.isArray(topGroup?.candidates)
+        ? topGroup.candidates.slice(0, topLogprobs)
+        : [];
+      const mappedTopLogprobs = alternatives.flatMap((alternativeValue) => {
+        const alternative = this.toUnknownRecord(alternativeValue);
+        if (!alternative || !isString(alternative.token) || !isNumber(alternative.logProbability)) {
+          return [];
+        }
+        return [
+          {
+            token: alternative.token,
+            logprob: alternative.logProbability,
+            bytes: Array.from(Buffer.from(alternative.token, 'utf8')),
+          },
+        ];
+      });
+      return [
+        {
+          token: chosen.token,
+          logprob: chosen.logProbability,
+          bytes: Array.from(Buffer.from(chosen.token, 'utf8')),
+          top_logprobs: mappedTopLogprobs,
+        },
+      ];
+    });
+
+    return content.length > 0 ? { content } : null;
   }
 
   private extractAnthropicSessionKey(request: AnthropicChatRequest): string | undefined {
@@ -2069,9 +2362,18 @@ export class ProxyService extends BaseProxyService {
   }
 
   private extractOpenAISessionKey(request: OpenAIChatRequest): string | undefined {
+    const metadata = request.metadata;
     const extra = request.extra;
     const sessionCandidate =
-      extra?.session_id ?? extra?.sessionId ?? extra?.user_id ?? extra?.userId;
+      request.user ??
+      metadata?.session_id ??
+      metadata?.sessionId ??
+      metadata?.user_id ??
+      metadata?.userId ??
+      extra?.session_id ??
+      extra?.sessionId ??
+      extra?.user_id ??
+      extra?.userId;
     if (!isString(sessionCandidate) || isEmpty(sessionCandidate.trim())) {
       return undefined;
     }

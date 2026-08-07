@@ -244,9 +244,19 @@ class NonStreamingProcessor {
   private buildResponse(geminiResponse: GeminiResponse): ClaudeResponse {
     const finishReason = geminiResponse.candidates?.[0]?.finishReason;
     const blockReason = geminiResponse.promptFeedback?.blockReason;
+    const policyFinishReason =
+      finishReason === 'SAFETY' ||
+      finishReason === 'RECITATION' ||
+      finishReason === 'BLOCKLIST' ||
+      finishReason === 'PROHIBITED_CONTENT' ||
+      finishReason === 'SPII' ||
+      finishReason === 'IMAGE_SAFETY' ||
+      finishReason === 'IMAGE_PROHIBITED_CONTENT';
     const refusal = blockReason
       ? `Request blocked by safety policy (blockReason: ${blockReason})`
-      : undefined;
+      : policyFinishReason
+        ? `Response blocked by upstream policy (finishReason: ${finishReason})`
+        : undefined;
 
     let stopReason = 'end_turn';
     if (this.hasToolCall) {

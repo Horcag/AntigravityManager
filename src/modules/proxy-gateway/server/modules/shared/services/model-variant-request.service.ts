@@ -1,5 +1,11 @@
-import { rebindModelVariant, resolveModelVariant } from '../../../../antigravity/model-variant-registry';
-import type { AnthropicChatRequest, OpenAIChatRequest } from '../../../common/interfaces/request-interfaces';
+import {
+  rebindModelVariant,
+  resolveModelVariant,
+} from '../../../../antigravity/model-variant-registry';
+import type {
+  AnthropicChatRequest,
+  OpenAIChatRequest,
+} from '../../../common/interfaces/request-interfaces';
 
 export interface AppliedAnthropicModelVariant {
   request: AnthropicChatRequest;
@@ -91,7 +97,7 @@ export function applyOpenAIModelVariant(request: OpenAIChatRequest): AppliedOpen
     request: {
       ...request,
       model: variant.model,
-      max_tokens: variant.maxOutputTokens,
+      ...applyOpenAIOutputLimit(request, variant.maxOutputTokens),
       thinking:
         variant.thinkingBudget === 0
           ? undefined
@@ -120,7 +126,7 @@ export function rebindOpenAIModelVariant(
     request: {
       ...applied.request,
       model: variant.model,
-      max_tokens: variant.maxOutputTokens,
+      ...applyOpenAIOutputLimit(applied.request, variant.maxOutputTokens),
       thinking:
         variant.thinkingBudget === 0
           ? undefined
@@ -133,5 +139,20 @@ export function rebindOpenAIModelVariant(
       ...(applied.request.reasoning_effort !== undefined ? { reasoning_effort: variant.tier } : {}),
     },
     variant,
+  };
+}
+
+function applyOpenAIOutputLimit(
+  request: OpenAIChatRequest,
+  modelLimit: number,
+): Pick<OpenAIChatRequest, 'max_tokens' | 'max_completion_tokens'> {
+  const requestedLimit = request.max_completion_tokens ?? request.max_tokens;
+  const effectiveLimit =
+    requestedLimit === undefined ? modelLimit : Math.min(requestedLimit, modelLimit);
+  return {
+    max_tokens: effectiveLimit,
+    ...(request.max_completion_tokens !== undefined
+      ? { max_completion_tokens: effectiveLimit }
+      : {}),
   };
 }

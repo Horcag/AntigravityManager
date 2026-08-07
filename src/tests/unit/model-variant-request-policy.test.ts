@@ -131,7 +131,7 @@ describe('applyOpenAIModelVariant', () => {
     expect(applyOpenAIModelVariant(request).request).toEqual({
       model: 'gemini-3.1-flash-lite',
       messages: [{ role: 'user', content: 'Use the tool' }],
-      max_tokens: 16384,
+      max_tokens: 4096,
       thinking: undefined,
       tools: undefined,
       tool_choice: undefined,

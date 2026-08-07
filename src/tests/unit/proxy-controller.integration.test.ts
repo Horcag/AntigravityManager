@@ -278,7 +278,7 @@ describe('ProxyController Integration', () => {
   it('supports OpenAI completions compatibility endpoint', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({
-        id: 'chatcmpl_test',
+        id: 'chatcmpl-test',
         object: 'chat.completion',
         created: 1700000000,
         model: 'gpt-4o',
@@ -289,6 +289,14 @@ describe('ProxyController Integration', () => {
             message: {
               role: 'assistant',
               content: 'hello from assistant',
+            },
+          },
+          {
+            index: 1,
+            finish_reason: 'length',
+            message: {
+              role: 'assistant',
+              content: 'second candidate',
             },
           },
         ],
@@ -321,6 +329,7 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(200);
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
+        id: 'cmpl-test',
         object: 'text_completion',
         model: 'gpt-4o',
         choices: [
@@ -328,9 +337,108 @@ describe('ProxyController Integration', () => {
             text: 'hello from assistant',
             logprobs: null,
           }),
+          expect.objectContaining({
+            index: 1,
+            text: 'second candidate',
+            finish_reason: 'length',
+          }),
         ],
       }),
     );
+  });
+
+  it('returns an OpenAI validation envelope without calling upstream', async () => {
+    const proxyService = { handleChatCompletions: vi.fn() };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.chatCompletions(
+      {
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+        store: true,
+      },
+      reply as any,
+    );
+
+    expect(proxyService.handleChatCompletions).not.toHaveBeenCalled();
+    expect(reply.status).toHaveBeenCalledWith(400);
+    expect(reply.send).toHaveBeenCalledWith({
+      error: {
+        message: 'stored Chat Completions are not implemented by this proxy',
+        type: 'invalid_request_error',
+        param: 'store',
+        code: 'unsupported_parameter',
+      },
+    });
+  });
+
+  it('converts Chat SSE chunks into legacy text_completion chunks', async () => {
+    const chatStream = of(
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-stream',
+        object: 'chat.completion.chunk',
+        created: 1700000000,
+        model: 'gemini-3-flash',
+        choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
+        usage: null,
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-stream',
+        object: 'chat.completion.chunk',
+        created: 1700000000,
+        model: 'gemini-3-flash',
+        choices: [{ index: 0, delta: { content: 'hello' }, finish_reason: 'stop' }],
+        usage: null,
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        id: 'chatcmpl-stream',
+        object: 'chat.completion.chunk',
+        created: 1700000000,
+        model: 'gemini-3-flash',
+        choices: [],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      })}\n\n`,
+      'data: [DONE]\n\n',
+    );
+    const proxyService = { handleChatCompletions: vi.fn().mockResolvedValue(chatStream) };
+    const controller = new ProxyController(proxyService as any);
+    const reply = createReplyMock();
+
+    await controller.completions(
+      {
+        model: 'gemini-3-flash',
+        prompt: 'hello',
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      reply as any,
+    );
+
+    const convertedStream = reply.send.mock.calls[0][0];
+    const chunks: string[] = [];
+    await new Promise<void>((resolve, reject) => {
+      convertedStream.subscribe({
+        next: (chunk: string) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+    const payloads = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+
+    expect(payloads.every((payload) => payload.object === 'text_completion')).toBe(true);
+    expect(payloads.every((payload) => payload.id === 'cmpl-stream')).toBe(true);
+    expect(
+      payloads.flatMap((payload) => payload.choices).some((choice) => choice.text === 'hello'),
+    ).toBe(true);
+    expect(payloads.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    });
+    expect(chunks.at(-1)).toBe('data: [DONE]\n\n');
   });
 
   it('supports OpenAI responses compatibility endpoint with normalized input', async () => {

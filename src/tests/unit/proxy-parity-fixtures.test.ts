@@ -42,7 +42,10 @@ class TestableProxyService extends ProxyService {
   }
 
   public streamToOpenAI(upstreamStream: any, model: string): Observable<string> {
-    return (this as any).processStreamResponse(upstreamStream, model);
+    return (this as any).processStreamResponse(upstreamStream, model, undefined, undefined, {
+      expectedChoices: 1,
+      includeUsage: true,
+    });
   }
 }
 

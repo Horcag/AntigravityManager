@@ -14,9 +14,10 @@ import {
 import { FastifyReply, FastifyRequest } from 'fastify';
 import { isEmpty, isFunction, isNil, isObjectLike, isPlainObject, isString } from 'lodash-es';
 import { ProxyService } from './proxy.service';
-import { Observable } from 'rxjs';
+import { map, Observable } from 'rxjs';
 import {
   OpenAIChatRequest,
+  OpenAICompletionRequest,
   OpenAIToolCall,
   AnthropicChatRequest,
   OpenAIChatResponse,
@@ -32,6 +33,11 @@ import {
   OpenAIResponsesSessionStore,
   type OpenAIResponsesSession,
 } from './modules/openai/responses/openai-responses-session.store';
+import {
+  normalizeOpenAIChatRequest,
+  normalizeOpenAICompletionRequest,
+  OpenAIRequestValidationError,
+} from './modules/openai/chat/openai-request-contract';
 import { ProxyGuard } from './guards/proxy.guard';
 import {
   getOpenAICompatibleModels,
@@ -130,35 +136,12 @@ export class ProxyController {
   }
 
   @Post('completions')
-  async completions(
-    @Body()
-    body: {
-      model?: string;
-      prompt?: string | string[];
-      max_tokens?: number;
-      temperature?: number;
-      top_p?: number;
-      stream?: boolean;
-    },
-    @Res() res: FastifyReply,
-  ) {
-    const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3-flash',
-      messages: [
-        {
-          role: 'user',
-          content: this.normalizeCompletionPrompt(body.prompt),
-        },
-      ],
-      max_tokens: body.max_tokens,
-      temperature: body.temperature,
-      top_p: body.top_p,
-      stream: body.stream,
-    };
+  async completions(@Body() body: OpenAICompletionRequest, @Res() res: FastifyReply) {
     try {
+      const { request } = normalizeOpenAICompletionRequest(body);
       const result = await this.proxyService.handleChatCompletions(request);
-      if (body.stream && this.isObservableLike(result)) {
-        this.writeSseResponse(res, result);
+      if (request.stream && this.isObservableLike(result)) {
+        this.writeSseResponse(res, this.toLegacyTextCompletionsStream(result));
         return;
       }
 
@@ -338,9 +321,10 @@ export class ProxyController {
 
   private async respondOpenAIChatCompletions(body: OpenAIChatRequest, res: FastifyReply) {
     try {
-      const result = await this.proxyService.handleChatCompletions(body);
+      const request = normalizeOpenAIChatRequest(body);
+      const result = await this.proxyService.handleChatCompletions(request);
 
-      if (body.stream && this.isObservableLike(result)) {
+      if (request.stream && this.isObservableLike(result)) {
         this.writeSseResponse(res, result);
         return;
       } else {
@@ -367,36 +351,79 @@ export class ProxyController {
     }
   }
 
-  private normalizeCompletionPrompt(prompt: string | string[] | undefined): string {
-    if (!prompt) {
-      return '';
-    }
-    if (Array.isArray(prompt)) {
-      return prompt.join('\n');
-    }
-    return prompt;
-  }
-
   private toLegacyTextCompletionsResponse(response: OpenAIChatResponse): Record<string, unknown> {
-    const choice = response.choices?.[0];
-    const content = choice?.message?.content;
-    const text = isString(content) ? content : '';
-
     return {
-      id: response.id,
+      id: this.toLegacyCompletionId(response.id),
       object: 'text_completion',
       created: response.created,
       model: response.model,
-      choices: [
-        {
-          text,
-          index: choice?.index ?? 0,
-          logprobs: null,
-          finish_reason: choice?.finish_reason ?? null,
-        },
-      ],
+      choices: (response.choices ?? []).map((choice) => ({
+        text: isString(choice.message?.content) ? choice.message.content : '',
+        index: choice.index,
+        logprobs: choice.logprobs ?? null,
+        finish_reason: choice.finish_reason ?? null,
+      })),
       usage: response.usage,
     };
+  }
+
+  private toLegacyTextCompletionsStream(stream: Observable<unknown>): Observable<string> {
+    return stream.pipe(map((chunk) => this.toLegacyTextCompletionsSseChunk(chunk)));
+  }
+
+  private toLegacyTextCompletionsSseChunk(chunk: unknown): string {
+    if (!isString(chunk)) {
+      return String(chunk ?? '');
+    }
+
+    const events = chunk.split('\n\n');
+    const converted: string[] = [];
+    for (const event of events) {
+      if (!event) {
+        continue;
+      }
+      const dataLine = event.split('\n').find((line) => line.startsWith('data: '));
+      if (!dataLine || dataLine === 'data: [DONE]') {
+        converted.push(`${event}\n\n`);
+        continue;
+      }
+
+      try {
+        const payload = JSON.parse(dataLine.slice('data: '.length)) as Record<string, unknown>;
+        if (payload.object !== 'chat.completion.chunk' || !Array.isArray(payload.choices)) {
+          converted.push(`${event}\n\n`);
+          continue;
+        }
+
+        const choices = payload.choices.map((choiceValue) => {
+          const choice = this.toRecord(choiceValue) ?? {};
+          const delta = this.toRecord(choice.delta) ?? {};
+          return {
+            text: isString(delta.content) ? delta.content : '',
+            index: typeof choice.index === 'number' ? choice.index : 0,
+            logprobs: choice.logprobs ?? null,
+            finish_reason: choice.finish_reason ?? null,
+          };
+        });
+        const legacyPayload = {
+          ...payload,
+          id: this.toLegacyCompletionId(this.asString(payload.id) ?? ''),
+          object: 'text_completion',
+          choices,
+        };
+        converted.push(`data: ${JSON.stringify(legacyPayload)}\n\n`);
+      } catch {
+        converted.push(`${event}\n\n`);
+      }
+    }
+    return converted.join('');
+  }
+
+  private toLegacyCompletionId(id: string): string {
+    if (id.startsWith('chatcmpl-')) {
+      return `cmpl-${id.slice('chatcmpl-'.length)}`;
+    }
+    return id.startsWith('cmpl-') ? id : `cmpl-${id}`;
   }
 
   public prepareResponsesRequest(body: ResponsesRequestBody): PreparedResponsesRequest | null {
@@ -1200,6 +1227,18 @@ export class ProxyController {
     overrideMessage?: string,
   ): void {
     const message = overrideMessage ?? this.resolveErrorMessageText(error);
+    if (error instanceof OpenAIRequestValidationError) {
+      this.logProxyEndpointError(endpoint, HttpStatus.BAD_REQUEST, message, error);
+      res.status(HttpStatus.BAD_REQUEST).send({
+        error: {
+          message,
+          type: error.type,
+          param: error.param,
+          code: error.code,
+        },
+      });
+      return;
+    }
     const status = this.resolveErrorHttpStatus(message, error);
     this.logProxyEndpointError(endpoint, status, message, error);
     res.status(status).send({

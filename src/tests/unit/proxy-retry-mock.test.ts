@@ -581,6 +581,130 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     expect(findToolCall(otherAccountBody)?.thought_signature).toBeUndefined();
   });
 
+  it('returns every Gemini candidate with stable indexes and mapped Chat logprobs', async () => {
+    setServerConfig(
+      createProxyConfig({ custom_mapping: { 'custom-multi-model': 'custom-multi-model' } }),
+    );
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [
+        {
+          index: 0,
+          content: { parts: [{ text: 'first' }] },
+          finishReason: 'STOP',
+          logprobsResult: {
+            chosenCandidates: [{ token: 'first', logProbability: -0.1 }],
+            topCandidates: [
+              {
+                candidates: [
+                  { token: 'first', logProbability: -0.1 },
+                  { token: 'second', logProbability: -1.2 },
+                ],
+              },
+            ],
+          },
+        },
+        {
+          index: 1,
+          content: { parts: [{ text: 'second' }] },
+          finishReason: 'MAX_TOKENS',
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 3,
+        candidatesTokenCount: 4,
+        totalTokenCount: 7,
+      },
+    });
+
+    const result = await service.handleChatCompletions({
+      model: 'custom-multi-model',
+      messages: [{ role: 'user', content: 'give two' }],
+      n: 2,
+      logprobs: true,
+      top_logprobs: 2,
+      service_tier: 'auto',
+      user: 'stable-user',
+    });
+
+    expect(result).not.toBeInstanceOf(Observable);
+    if (result instanceof Observable) {
+      throw new Error('Expected a non-stream response');
+    }
+    expect(result.choices).toMatchObject([
+      {
+        index: 0,
+        message: { content: 'first' },
+        finish_reason: 'stop',
+        logprobs: {
+          content: [
+            {
+              token: 'first',
+              logprob: -0.1,
+              bytes: [102, 105, 114, 115, 116],
+              top_logprobs: [
+                { token: 'first', logprob: -0.1 },
+                { token: 'second', logprob: -1.2 },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        index: 1,
+        message: { content: 'second' },
+        finish_reason: 'length',
+        logprobs: null,
+      },
+    ]);
+    expect(result.usage).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: 4,
+      total_tokens: 7,
+      prompt_tokens_details: undefined,
+      completion_tokens_details: undefined,
+    });
+    expect(result.service_tier).toBe('default');
+    expect(
+      mockGeminiClient.generateInternal.mock.calls[0][0].request.generationConfig,
+    ).toMatchObject({
+      candidateCount: 2,
+      responseLogprobs: true,
+      logprobs: 2,
+    });
+    expect(mockGeminiClient.generateInternal.mock.calls[0][0].sessionId).toBe('stable-user');
+  });
+
+  it('maps Gemini policy finishes to the standard content_filter reason', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [
+        {
+          index: 0,
+          content: { parts: [{ text: '' }] },
+          finishReason: 'SAFETY',
+        },
+      ],
+    });
+
+    const result = await service.handleChatCompletions({
+      model: 'custom-safety-model',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    if (result instanceof Observable) {
+      throw new Error('Expected a non-stream response');
+    }
+
+    expect(result.choices[0]).toMatchObject({
+      finish_reason: 'content_filter',
+      message: {
+        refusal: expect.stringContaining('finishReason: SAFETY'),
+      },
+    });
+  });
+
   it('terminates public Anthropic streams on conflicting tool-call id reuse', async () => {
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
@@ -944,6 +1068,11 @@ describe('GeminiClient internal request parity', () => {
 });
 
 describe('ProxyService Protocol Parity Fixtures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setServerConfig(createProxyConfig());
+  });
+
   it('maps OpenAI request to Anthropic request with tools and tool result', () => {
     const service = new TestableProxyService();
 
@@ -1097,11 +1226,8 @@ describe('ProxyService Protocol Parity Fixtures', () => {
     );
 
     expect(payloads.some((payload) => '__cloudCodeMeta' in payload)).toBe(false);
-    expect(deltas).toContainEqual({
-      role: 'assistant',
-      content: null,
-      reasoning_content: 'reasoning text',
-    });
+    expect(deltas).toContainEqual({ role: 'assistant', content: '' });
+    expect(deltas).toContainEqual({ content: null, reasoning_content: 'reasoning text' });
     expect(deltas).toContainEqual({ content: 'final answer' });
     expect(
       deltas.some(
@@ -1109,6 +1235,163 @@ describe('ProxyService Protocol Parity Fixtures', () => {
       ),
     ).toBe(false);
     expect(chunks.filter((chunk) => chunk.includes('data: [DONE]'))).toHaveLength(1);
+  });
+
+  it('streams every requested choice and emits usage only in the final usage chunk', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+    mockGeminiClient.streamGenerateInternal.mockResolvedValue(stream);
+
+    const result = await service.handleChatCompletions({
+      model: 'custom-multi-model',
+      stream: true,
+      stream_options: { include_usage: true },
+      n: 2,
+      service_tier: 'auto',
+      messages: [{ role: 'user', content: 'give two answers' }],
+    });
+    if (!(result instanceof Observable)) {
+      throw new Error('Expected an OpenAI-compatible SSE stream');
+    }
+
+    const chunks: string[] = [];
+    const completed = new Promise<void>((resolve, reject) => {
+      result.subscribe({
+        next: (chunk) => chunks.push(chunk),
+        error: reject,
+        complete: resolve,
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        `data: ${JSON.stringify({
+          response: {
+            candidates: [
+              {
+                index: 0,
+                content: { parts: [{ text: 'first' }] },
+                finishReason: 'STOP',
+              },
+              {
+                index: 1,
+                content: { parts: [{ text: 'second' }] },
+                finishReason: 'MAX_TOKENS',
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 3,
+              candidatesTokenCount: 4,
+              totalTokenCount: 7,
+            },
+          },
+        })}\n`,
+      ),
+    );
+    stream.emit('end');
+    await completed;
+
+    const payloads = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+    const normalChunks = payloads.filter((payload) => payload.choices.length > 0);
+    const finishChoices = normalChunks
+      .flatMap((payload) => payload.choices)
+      .filter((choice) => choice.finish_reason !== null);
+    const usageChunk = payloads.at(-1);
+
+    expect(finishChoices).toMatchObject([
+      { index: 0, finish_reason: 'stop' },
+      { index: 1, finish_reason: 'length' },
+    ]);
+    expect(normalChunks.every((payload) => payload.usage === null)).toBe(true);
+    expect(payloads.every((payload) => payload.service_tier === 'default')).toBe(true);
+    expect(usageChunk).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+    });
+    expect(chunks.filter((chunk) => chunk.includes('data: [DONE]'))).toHaveLength(1);
+    expect(
+      mockGeminiClient.streamGenerateInternal.mock.calls.at(-1)?.[0].request.generationConfig,
+    ).toMatchObject({ candidateCount: 2 });
+  });
+
+  it('preserves choices, reasoning, and tools in the synthetic stream fallback', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+    mockGeminiClient.streamGenerateInternal.mockRejectedValue(new Error('stream unavailable'));
+    mockGeminiClient.generateInternal.mockResolvedValue({
+      candidates: [
+        {
+          index: 0,
+          content: {
+            parts: [{ thought: true, text: 'reasoning' }, { text: 'first answer' }],
+          },
+          finishReason: 'STOP',
+        },
+        {
+          index: 1,
+          content: {
+            parts: [
+              {
+                functionCall: { id: 'call_lookup', name: 'lookup', args: { key: 'value' } },
+              },
+            ],
+          },
+          finishReason: 'STOP',
+        },
+      ],
+      usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 5, totalTokenCount: 8 },
+    });
+
+    const result = await service.handleChatCompletions({
+      model: 'custom-multi-model',
+      stream: true,
+      stream_options: { include_usage: true },
+      n: 2,
+      messages: [{ role: 'user', content: 'answer or call a tool' }],
+      tools: [
+        {
+          type: 'function',
+          function: { name: 'lookup', parameters: { type: 'object' } },
+        },
+      ],
+    });
+    if (!(result instanceof Observable)) {
+      throw new Error('Expected an OpenAI-compatible SSE stream');
+    }
+
+    const chunks: string[] = [];
+    await new Promise<void>((resolve, reject) => {
+      result.subscribe({ next: (chunk) => chunks.push(chunk), error: reject, complete: resolve });
+    });
+    const payloads = chunks
+      .flatMap((chunk) => chunk.split('\n'))
+      .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+    const choices = payloads.flatMap((payload) => payload.choices);
+    const deltas = choices.map((choice) => choice.delta);
+
+    expect(deltas).toContainEqual({ content: null, reasoning_content: 'reasoning' });
+    expect(deltas).toContainEqual({ content: 'first answer' });
+    expect(
+      deltas.some(
+        (delta) =>
+          delta.tool_calls?.[0]?.id === 'call_lookup' &&
+          delta.tool_calls[0].function.name === 'lookup',
+      ),
+    ).toBe(true);
+    expect(choices.filter((choice) => choice.finish_reason !== null)).toMatchObject([
+      { index: 0, finish_reason: 'stop' },
+      { index: 1, finish_reason: 'tool_calls' },
+    ]);
+    expect(payloads.at(-1)).toMatchObject({
+      choices: [],
+      usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8 },
+    });
   });
 
   it('matches stable tool-call ordering, deduplication, signatures, and finish semantics', async () => {
@@ -1197,7 +1480,8 @@ describe('ProxyService Protocol Parity Fixtures', () => {
 
     expect(toolCalls.map((toolCall) => toolCall.id)).toEqual(['fc1', 'fc2']);
     expect(toolCalls.map((toolCall) => toolCall.index)).toEqual([0, 1]);
-    expect(toolDeltas.every((delta) => delta.role === 'assistant')).toBe(true);
+    expect(deltas).toContainEqual({ role: 'assistant', content: '' });
+    expect(toolDeltas.every((delta) => delta.role === undefined)).toBe(true);
     expect(deltas.findIndex((delta) => 'tool_calls' in delta)).toBeLessThan(
       deltas.findIndex((delta) => 'reasoning_content' in delta),
     );
@@ -1205,11 +1489,7 @@ describe('ProxyService Protocol Parity Fixtures', () => {
       deltas.findIndex((delta) => delta.content === 'final answer'),
     );
     expect(choices.at(-1)?.finish_reason).toBe('tool_calls');
-    expect(payloads.at(-1)?.usage).toMatchObject({
-      prompt_tokens: 10,
-      completion_tokens: 4,
-      total_tokens: 14,
-    });
+    expect(payloads.every((payload) => payload.usage === undefined)).toBe(true);
     expect(
       service.signatureStore.get({
         accountId: signatureState.accountId,
@@ -1307,5 +1587,86 @@ describe('ProxyService Protocol Parity Fixtures', () => {
     expect(streamResult.error?.message).toContain('socket hang up');
     expect(chunks.join('')).toContain('"content":"partial output"');
     expect(chunks.join('')).not.toContain('data: [DONE]');
+  });
+
+  it('reports an interrupted OpenAI stream when upstream ends without a finish reason', async () => {
+    const service = new TestableProxyService();
+    const stream = new EventEmitter();
+    const observable = (service as any).processStreamResponse(stream, 'gpt-4o-mini');
+    const chunks: string[] = [];
+
+    const streamResult = new Promise<Error | null>((resolve) => {
+      observable.subscribe({
+        next: (chunk: string) => chunks.push(chunk),
+        error: (error: unknown) =>
+          resolve(error instanceof Error ? error : new Error(String(error))),
+        complete: () => resolve(null),
+      });
+    });
+
+    stream.emit(
+      'data',
+      Buffer.from(
+        `data: ${JSON.stringify({
+          candidates: [{ index: 0, content: { parts: [{ text: 'partial' }] } }],
+        })}\n`,
+      ),
+    );
+    stream.emit('end');
+
+    await expect(streamResult).resolves.toMatchObject({
+      message: expect.stringContaining('ended before 1 choice(s) finished'),
+    });
+    expect(chunks.join('')).toContain('partial');
+    expect(chunks.join('')).not.toContain('data: [DONE]');
+  });
+
+  it('destroys the upstream OpenAI stream when the client unsubscribes', async () => {
+    const service = new TestableProxyService();
+    const stream = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+    mockGeminiClient.streamGenerateInternal.mockResolvedValue(stream);
+
+    const result = await service.handleChatCompletions({
+      model: 'gpt-4o-mini',
+      stream: true,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    if (!(result instanceof Observable)) {
+      throw new Error('Expected an OpenAI-compatible SSE stream');
+    }
+
+    const subscription = result.subscribe();
+    subscription.unsubscribe();
+
+    expect(stream.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('keeps an idle OpenAI SSE connection alive with standard comment frames', async () => {
+    vi.useFakeTimers();
+    try {
+      const service = new TestableProxyService();
+      const stream = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+      mockAccountLeaseService.getNextToken.mockResolvedValue(createToken());
+      mockGeminiClient.streamGenerateInternal.mockResolvedValue(stream);
+
+      const result = await service.handleChatCompletions({
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [{ role: 'user', content: 'hello' }],
+      });
+      if (!(result instanceof Observable)) {
+        throw new Error('Expected an OpenAI-compatible SSE stream');
+      }
+
+      const chunks: string[] = [];
+      const subscription = result.subscribe((chunk) => chunks.push(chunk));
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(chunks).toContain(': ping\n\n');
+      subscription.unsubscribe();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

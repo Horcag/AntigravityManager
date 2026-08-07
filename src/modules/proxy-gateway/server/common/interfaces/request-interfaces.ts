@@ -3,21 +3,68 @@ import type { GeminiToolDeclaration, SafetySetting } from '../../../antigravity/
 export interface OpenAIChatRequest {
   model: string;
   messages: OpenAIMessage[];
+  n?: number;
   temperature?: number;
   top_p?: number;
   presence_penalty?: number;
   frequency_penalty?: number;
   seed?: number;
   max_tokens?: number;
+  max_completion_tokens?: number;
+  stop?: string | string[];
   stream?: boolean;
+  stream_options?: {
+    include_usage?: boolean;
+  };
   size?: string;
   quality?: string;
   tools?: OpenAITool[];
   tool_choice?: string | { type: string; function?: { name: string } };
+  parallel_tool_calls?: boolean;
   thinking?: OpenAIThinkingConfig;
   reasoning_effort?: string;
-  response_format?: { type?: string };
+  response_format?: OpenAIResponseFormat;
+  logprobs?: boolean;
+  top_logprobs?: number;
+  logit_bias?: Record<string, number>;
+  store?: boolean;
+  metadata?: Record<string, string>;
+  user?: string;
+  service_tier?: string;
   extra?: Record<string, unknown>;
+}
+
+export interface OpenAIResponseFormat {
+  type?: string;
+  json_schema?: {
+    name?: string;
+    description?: string;
+    schema?: Record<string, unknown>;
+    strict?: boolean;
+  };
+}
+
+export interface OpenAICompletionRequest {
+  model?: string;
+  prompt?: string | string[] | number[] | number[][];
+  best_of?: number;
+  echo?: boolean;
+  frequency_penalty?: number;
+  logit_bias?: Record<string, number>;
+  logprobs?: number | null;
+  max_tokens?: number;
+  n?: number;
+  presence_penalty?: number;
+  seed?: number;
+  stop?: string | string[];
+  stream?: boolean;
+  stream_options?: {
+    include_usage?: boolean;
+  };
+  suffix?: string | null;
+  temperature?: number;
+  top_p?: number;
+  user?: string;
 }
 
 export interface OpenAIThinkingConfig {
@@ -249,6 +296,7 @@ export interface OpenAIChatResponse {
   model: string;
   choices: OpenAIChoice[];
   usage: OpenAIUsage;
+  service_tier?: string;
 }
 
 export interface OpenAIChoice {
@@ -260,7 +308,21 @@ export interface OpenAIChoice {
     reasoning_content?: string;
     refusal?: string;
   };
+  logprobs?: OpenAIChatLogprobs | null;
   finish_reason: string | null;
+}
+
+export interface OpenAIChatLogprobs {
+  content: Array<{
+    token: string;
+    logprob: number;
+    bytes: number[] | null;
+    top_logprobs: Array<{
+      token: string;
+      logprob: number;
+      bytes: number[] | null;
+    }>;
+  }>;
 }
 
 export interface AnthropicChatResponse {

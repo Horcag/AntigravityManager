@@ -53,6 +53,7 @@ export interface ClaudeRequest {
   tools?: Tool[];
   stream?: boolean;
   max_tokens?: number;
+  candidate_count?: number;
   stop_sequences?: string[];
   temperature?: number;
   top_p?: number;
@@ -61,6 +62,14 @@ export interface ClaudeRequest {
   presence_penalty?: number;
   frequency_penalty?: number;
   seed?: number;
+  response_format?: {
+    type?: string;
+    json_schema?: {
+      schema?: Record<string, unknown>;
+    };
+  };
+  response_logprobs?: boolean;
+  top_logprobs?: number;
   thinking?: ThinkingConfig;
   output_config?: {
     effort?: string;
@@ -188,12 +197,20 @@ export interface GenerationConfig {
   seed?: number;
   /** Maximum output tokens */
   maxOutputTokens?: number;
+  /** Number of response candidates requested by OpenAI-compatible clients. */
+  candidateCount?: number;
   /** List of stop sequences */
   stopSequences?: string[];
   /** Thinking mode configuration */
   thinkingConfig?: ThinkingGeminiConfig;
   /** Response MIME type */
   responseMimeType?: string;
+  /** JSON schema for structured JSON output. */
+  responseSchema?: Record<string, unknown>;
+  /** Include token log probabilities where supported upstream. */
+  responseLogprobs?: boolean;
+  /** Number of top token alternatives to return. */
+  logprobs?: number;
   /** Response modalities */
   responseModalities?: string[];
   /** Image generation configuration */

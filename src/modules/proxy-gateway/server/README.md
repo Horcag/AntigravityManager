@@ -185,3 +185,33 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - **Model Inventory Is Capability-Based**: Public model lists contain normalized IDs observed in account capability snapshots plus valid exact custom aliases. Built-in compatibility aliases (for example `gpt-4o` routed to a Gemini target) remain accepted on request paths but are not advertised as distinct models. Static image permutations are not synthesized into the catalog.
 - **Advertised Does Not Mean Verified**: Antigravity's internal quota endpoint can announce a preset before generation accepts it. A model rejected as not found is removed from the process-local catalog and may reroute to an advertised sibling. Quota exhaustion remains transient and does not make a model garbage; per-account freshness and durable negative evidence remain reliability-layer work.
 - **Slow SSE Consumers**: Disconnects, malformed events, premature closes, and a five-minute idle timeout destroy the exact upstream stream. Socket `write()` backpressure is not yet propagated to the upstream readable, so a sustained slow consumer can still cause buffering; this remains a routing/transport hardening item.
+
+---
+
+## 8. OpenAI Chat Completions and Legacy Completions Contract
+
+### Supported Chat Completions Surface
+
+- `POST /v1/chat/completions` supports non-stream and SSE responses, multiple candidates (`n`), `stop`, `max_tokens` / `max_completion_tokens`, OpenAI sampling defaults and controls, penalties, `seed`, tools, explicit `tool_choice`, structured JSON output, non-stream logprobs, `user`, and `service_tier=auto|default`.
+- JSON output maps to Gemini `responseMimeType` and the supported Gemini JSON Schema subset. `n` maps to `candidateCount`; every returned candidate keeps its index and finish reason.
+- Non-stream logprobs map Gemini chosen/top candidate token data to the OpenAI Chat logprobs shape, including UTF-8 byte arrays. If upstream omits logprob data, the choice returns `logprobs: null`.
+- Streaming emits an initial assistant-role chunk per choice, independent per-choice tool indexes and finish reasons, one `[DONE]`, and 15-second SSE comment heartbeats. With `stream_options.include_usage=true`, ordinary chunks contain `usage: null` and one final empty-choices chunk contains aggregate usage.
+- Client disconnect/cancellation destroys the exact upstream readable. An upstream error, idle timeout, or close before all requested choices finish is surfaced as a stream error and never disguised as a successful `[DONE]`.
+- Base64 `data:image/*` Chat content parts are transported. Remote image URLs are rejected rather than silently converted to prompt text.
+
+### Legacy `/v1/completions` Surface
+
+- A single string prompt (or a one-element string array) is translated through the Chat transport while responses use genuine `text_completion` objects and `cmpl-*` IDs.
+- Streaming converts every Chat chunk, choice, finish reason, and optional final usage chunk to the legacy wire shape. It does not leak `chat.completion.chunk` objects.
+- Batched prompt arrays, token-ID prompts, `best_of>1`, `echo=true`, suffix insertion, and legacy logprobs return HTTP 400 `invalid_request_error`; their semantics cannot be represented faithfully by this transport.
+
+### Explicit Compatibility Limits
+
+- Streaming Chat logprobs are rejected because the internal Gemini stream does not expose stable per-token logprob events. Non-empty `logit_bias`, `store=true`, `parallel_tool_calls=false` with tools, unsupported reasoning tiers, and unknown request controls also return HTTP 400 instead of being ignored.
+- Only reasoning efforts `low`, `medium`, and `high` are mapped. Known non-reasoning or tool-less model variants reject incompatible controls before the upstream call.
+- `service_tier=auto|default` reports `default`; priority/flex/scaled tiers are not available. `metadata` and `user` can supply stable session identity, but this proxy does not implement OpenAI stored-completion retrieval.
+- Gemini structured output implements a subset of JSON Schema. Schemas accepted by OpenAI but rejected by Gemini remain upstream validation errors; the proxy does not weaken them silently.
+- `candidateCount>1`, response logprobs, and some penalties are declared by Gemini's generation contract but can still be model-, account-, or internal-endpoint-dependent. Such upstream rejection is not rewritten as success.
+- A stream interrupted before the final usage event has no authoritative usage total. This matches the OpenAI warning that interrupted streams may not deliver the final usage chunk.
+- Response `model` still reflects the client-requested identifier while routing aliases are being separated from physical model selection. Honest requested/resolved/served model diagnostics and opt-in cross-model fallback belong to the routing policy work, not this wire adapter.
+- HTTP error typing for upstream quota/access/routing failures is handled by the shared retry/error layer. The Chat validator only owns deterministic client-side 400 errors.
