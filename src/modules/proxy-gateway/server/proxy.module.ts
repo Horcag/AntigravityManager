@@ -11,7 +11,8 @@ import { RateLimitTrackerService } from './modules/shared/services/rate-limit-tr
 import { ModelRoutingService } from './modules/shared/services/model-routing.service';
 import {
   ModelAvailabilityService,
-  proxyModelAvailabilityStore,
+  PROXY_MODEL_AVAILABILITY_PERSISTENCE,
+  persistentAvailabilityAdapter,
 } from './modules/shared/services/model-availability.service';
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
@@ -23,9 +24,10 @@ import { GenerationConstraintsService } from './modules/shared/services/generati
     RateLimitTrackerService,
     ModelRoutingService,
     {
-      provide: ModelAvailabilityService,
-      useValue: proxyModelAvailabilityStore,
+      provide: PROXY_MODEL_AVAILABILITY_PERSISTENCE,
+      useValue: persistentAvailabilityAdapter,
     },
+    ModelAvailabilityService,
     AccountLeaseService,
     ProxyRetryService,
     GenerationConstraintsService,

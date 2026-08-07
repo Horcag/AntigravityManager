@@ -1,4 +1,4 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { isNumber, isString } from 'lodash-es';
 import { getMaxOutputTokens, getThinkingBudget } from '../../../../antigravity/ModelSpecs';
 import type { GeminiInternalRequest } from '../../../../antigravity/types';
@@ -18,7 +18,6 @@ export interface RegisteredGenerationConstraints {
 @Injectable()
 export class GenerationConstraintsService {
   constructor(
-    @Optional()
     @Inject(AccountLeaseService)
     private readonly modelCapabilities: ProxyModelCapabilityReader,
   ) {}

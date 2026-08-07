@@ -53,28 +53,18 @@ export class AccountLeaseService implements OnModuleInit {
   private readonly upstream: AccountLeaseUpstream;
 
   constructor(
-    @Optional()
     @Inject(RateLimitTrackerService)
-    rateLimitTrackerOrAccountStore?: RateLimitTrackerService | AccountLeaseAccountStore,
+    rateLimitTracker: RateLimitTrackerService,
     @Optional()
     @Inject(ACCOUNT_LEASE_ACCOUNT_STORE)
-    accountStoreOrUpstream?: AccountLeaseAccountStore | AccountLeaseUpstream,
+    accountStore: AccountLeaseAccountStore = cloudAccountStoreAdapter,
     @Optional()
     @Inject(ACCOUNT_LEASE_UPSTREAM)
-    upstreamArg?: AccountLeaseUpstream,
+    upstream: AccountLeaseUpstream = googleAccountLeaseUpstreamAdapter,
   ) {
-    if (rateLimitTrackerOrAccountStore && 'isRateLimited' in rateLimitTrackerOrAccountStore) {
-      this.rateLimitTracker = rateLimitTrackerOrAccountStore as RateLimitTrackerService;
-      this.accountStore =
-        (accountStoreOrUpstream as AccountLeaseAccountStore) ?? cloudAccountStoreAdapter;
-      this.upstream = upstreamArg ?? googleAccountLeaseUpstreamAdapter;
-    } else {
-      this.rateLimitTracker = new RateLimitTrackerService();
-      this.accountStore =
-        (rateLimitTrackerOrAccountStore as AccountLeaseAccountStore) ?? cloudAccountStoreAdapter;
-      this.upstream =
-        (accountStoreOrUpstream as AccountLeaseUpstream) ?? googleAccountLeaseUpstreamAdapter;
-    }
+    this.rateLimitTracker = rateLimitTracker;
+    this.accountStore = accountStore;
+    this.upstream = upstream;
 
     this.quotaRefreshPolicy = new AccountLeaseQuotaRefreshPolicy({
       accountStore: this.accountStore,

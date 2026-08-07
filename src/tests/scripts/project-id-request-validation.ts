@@ -4,6 +4,11 @@ import { isEmpty, isString } from 'lodash-es';
 import { transformClaudeRequestIn } from '../../modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
+import { RateLimitTrackerService } from '../../modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
+import { GenerationConstraintsService } from '../../modules/proxy-gateway/server/modules/shared/services/generation-constraints.service';
+import { ProxyRetryService } from '../../modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
+import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/shared/services/model-routing.service';
+import { ModelAvailabilityService } from '../../modules/proxy-gateway/server/modules/shared/services/model-availability.service';
 
 const mockAccountLease: any = {
   getNextToken: async () => null,
@@ -21,7 +26,13 @@ const mockGeminiClient: any = {
 
 class TestableProxyService extends ProxyService {
   constructor() {
-    super(mockAccountLease, mockGeminiClient);
+    super(
+      mockAccountLease,
+      mockGeminiClient,
+      new GenerationConstraintsService(mockAccountLease),
+      new ProxyRetryService(mockAccountLease, new ModelAvailabilityService()),
+      new ModelRoutingService(),
+    );
   }
 
   public createGeminiInternal(
@@ -225,7 +236,7 @@ async function validateRuntimeAnthropicRequestFromRealAccountLease(): Promise<vo
     };
   };
 
-  const realAccountLease = new AccountLeaseService();
+  const realAccountLease = new AccountLeaseService(new RateLimitTrackerService());
   await realAccountLease.onModuleInit();
 
   const AccountLeaseProxy = {
@@ -255,7 +266,13 @@ async function validateRuntimeAnthropicRequestFromRealAccountLease(): Promise<vo
   };
 
   try {
-    const service = new ProxyService(AccountLeaseProxy as any, mockGeminiClient as any);
+    const service = new ProxyService(
+      AccountLeaseProxy as any,
+      mockGeminiClient as any,
+      new GenerationConstraintsService(AccountLeaseProxy as any),
+      new ProxyRetryService(AccountLeaseProxy as any, new ModelAvailabilityService()),
+      new ModelRoutingService(),
+    );
     await service.handleAnthropicMessages({
       model: 'claude-sonnet-4-5',
       stream: false,

@@ -1,4 +1,4 @@
-import {Inject, Injectable, Optional} from '@nestjs/common';
+import {Inject, Injectable} from '@nestjs/common';
 import {isEmpty, isNil, isNumber, isPlainObject, isString} from 'lodash-es';
 import {AccountLeaseService} from './modules/account-lease/account-lease.service';
 import {GeminiClient} from './modules/gemini/gemini-client.service';
@@ -60,9 +60,9 @@ export class ProxyService extends BaseProxyService {
   constructor(
     @Inject(AccountLeaseService) readonly accountLeaseService: AccountLeaseService,
     @Inject(GeminiClient) readonly geminiClient: GeminiClient,
-    @Optional() @Inject(GenerationConstraintsService) readonly generationConstraintsService?: GenerationConstraintsService,
-    @Optional() @Inject(ProxyRetryService) readonly proxyRetryService?: ProxyRetryService,
-    @Optional() @Inject(ModelRoutingService) readonly customModelRoutingService?: ModelRoutingService,
+    @Inject(GenerationConstraintsService) readonly generationConstraintsService: GenerationConstraintsService,
+    @Inject(ProxyRetryService) readonly proxyRetryService: ProxyRetryService,
+    @Inject(ModelRoutingService) readonly customModelRoutingService: ModelRoutingService,
   ) {
     super(
       accountLeaseService,

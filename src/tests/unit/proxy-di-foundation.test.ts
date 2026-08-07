@@ -35,6 +35,10 @@ describe('Nest DI Proxy Foundation & State Ownership', () => {
     expect(modelAvailabilityService1).toBe(modelAvailabilityService2);
     expect(accountLeaseService.getRateLimitTracker()).toBe(rateLimitTracker1);
     expect(proxyService.accountLeaseService).toBe(accountLeaseService);
+    expect(proxyService.generationConstraintsService).toBe(generationConstraints);
+    expect(proxyService.proxyRetryService).toBe(proxyRetryService);
+    expect(proxyService.customModelRoutingService).toBe(modelRoutingService);
+    expect(proxyRetryService.getModelAvailabilityStore()).toBe(modelAvailabilityService1);
 
     await appContext.close();
   });

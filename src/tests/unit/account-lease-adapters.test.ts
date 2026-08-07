@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AccountLeaseService } from '@/modules/proxy-gateway/server/modules/account-lease/account-lease.service';
+import { RateLimitTrackerService } from '@/modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
 import type {
   AccountLeaseAccountStore,
   AccountLeaseUpstream,
@@ -36,7 +37,7 @@ describe('AccountLeaseService adapters', () => {
       normalizeRefreshedOAuthClientKey: vi.fn(),
     };
 
-    const service = new AccountLeaseService(accountStore, upstream);
+    const service = new AccountLeaseService(new RateLimitTrackerService(), accountStore, upstream);
     const lease = await service.getNextToken();
 
     expect(lease?.token.project_id).toBe('resolved-project');

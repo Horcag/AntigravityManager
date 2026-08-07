@@ -36,7 +36,7 @@ interface AccountLeaseLimitPolicyOptions {
     model?: string,
   ) => boolean;
   logger: AccountLeaseLimitLogger;
-  rateLimitTracker?: RateLimitTrackerService;
+  rateLimitTracker: RateLimitTrackerService;
 }
 
 export class AccountLeaseLimitPolicy {
@@ -44,7 +44,7 @@ export class AccountLeaseLimitPolicy {
   private readonly rateLimitTracker: RateLimitTrackerService;
 
   constructor(private readonly options: AccountLeaseLimitPolicyOptions) {
-    this.rateLimitTracker = options.rateLimitTracker ?? new RateLimitTrackerService();
+    this.rateLimitTracker = options.rateLimitTracker;
   }
 
   getAccountCooldowns(): Map<string, number> {

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_CONFIG, ProxyConfig } from '@/modules/config/types';
 import { setServerConfig } from '../../server/server-config';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
+import { RateLimitTrackerService } from '../../modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
 import { GoogleAPIService } from '@/modules/cloud-account/services/GoogleAPIService';
 
 function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
@@ -53,7 +54,7 @@ describe('AccountLeaseService parity scheduling replay', () => {
   let service: AccountLeaseService;
 
   beforeEach(() => {
-    service = new AccountLeaseService();
+    service = new AccountLeaseService(new RateLimitTrackerService());
     seedTokens(service);
   });
 

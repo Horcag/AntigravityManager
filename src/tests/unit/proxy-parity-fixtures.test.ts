@@ -5,6 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { Observable } from 'rxjs';
 
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { GenerationConstraintsService } from '../../modules/proxy-gateway/server/modules/shared/services/generation-constraints.service';
+import { ProxyRetryService } from '../../modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
+import { ModelAvailabilityService } from '../../modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 
 const mockAccountLeaseService = {
   getNextToken: vi.fn(),
@@ -18,7 +22,13 @@ const mockGeminiClient = { streamGenerateInternal: vi.fn(), generateInternal: vi
 
 class TestableProxyService extends ProxyService {
   constructor() {
-    super(mockAccountLeaseService as any, mockGeminiClient as any);
+    super(
+      mockAccountLeaseService as any,
+      mockGeminiClient as any,
+      new GenerationConstraintsService(mockAccountLeaseService as any),
+      new ProxyRetryService(mockAccountLeaseService as any, new ModelAvailabilityService()),
+      new ModelRoutingService(),
+    );
   }
 
   public toAnthropic(request: any): any {

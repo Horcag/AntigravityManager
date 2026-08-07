@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_APP_CONFIG, ProxyConfig } from '@/modules/config/types';
 import { setServerConfig } from '../../server/server-config';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
+import { RateLimitTrackerService } from '../../modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
 
 function createProxyConfig(overrides: Partial<ProxyConfig>): ProxyConfig {
   return {
@@ -50,7 +51,7 @@ describe('Parity rollout guard replay', () => {
   let service: AccountLeaseService;
 
   beforeEach(() => {
-    service = new AccountLeaseService();
+    service = new AccountLeaseService(new RateLimitTrackerService());
     seedTokens(service);
   });
 

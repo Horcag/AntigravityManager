@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ProxyRetryService } from '@/modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
 import { UpstreamRequestError } from '@/modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
-import { proxyModelAvailabilityStore } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { ModelAvailabilityService } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
 import type { CloudAccount } from '@/modules/cloud-account/types';
 
 function createToken(id: string): CloudAccount {
@@ -35,12 +35,14 @@ function createPolicy() {
     log: vi.fn(),
     warn: vi.fn(),
   };
-  const policy = new ProxyRetryService(accountLeaseService, logger);
+  const modelAvailabilityStore = new ModelAvailabilityService();
+  const policy = new ProxyRetryService(accountLeaseService, modelAvailabilityStore, logger);
 
   return {
     logger,
     policy,
     accountLeaseService,
+    modelAvailabilityStore,
   };
 }
 
@@ -121,8 +123,7 @@ describe('ProxyRetryService', () => {
   });
 
   it('persists the tracker-clamped wait instead of the raw upstream retry delay', async () => {
-    proxyModelAvailabilityStore.clearAccount('acc-clamped');
-    const { policy, accountLeaseService } = createPolicy();
+    const { policy, accountLeaseService, modelAvailabilityStore } = createPolicy();
     accountLeaseService.getRemainingRateLimitWait.mockReturnValue(300);
     const startedAt = Date.now();
 
@@ -137,7 +138,7 @@ describe('ProxyRetryService', () => {
       }),
     );
 
-    const entry = proxyModelAvailabilityStore
+    const entry = modelAvailabilityStore
       .getSnapshot()
       .find((candidate) => candidate.accountId === 'acc-clamped');
     expect(accountLeaseService.markFromUpstreamError).toHaveBeenCalledBefore(
@@ -152,12 +153,10 @@ describe('ProxyRetryService', () => {
     );
     expect(entry?.unavailableUntil).toBeGreaterThanOrEqual(startedAt + 300_000);
     expect(entry?.unavailableUntil).toBeLessThanOrEqual(Date.now() + 300_000);
-    proxyModelAvailabilityStore.clearAccount('acc-clamped');
   });
 
   it('classifies generic RESOURCE_EXHAUSTED availability as a transient rate limit', async () => {
-    proxyModelAvailabilityStore.clearAccount('acc-resource');
-    const { policy } = createPolicy();
+    const { policy, modelAvailabilityStore } = createPolicy();
 
     await policy.applyUpstreamPenalty(
       'acc-resource',
@@ -174,7 +173,7 @@ describe('ProxyRetryService', () => {
       }),
     );
 
-    expect(proxyModelAvailabilityStore.getSnapshot()).toEqual(
+    expect(modelAvailabilityStore.getSnapshot()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           accountId: 'acc-resource',
@@ -183,13 +182,11 @@ describe('ProxyRetryService', () => {
         }),
       ]),
     );
-    proxyModelAvailabilityStore.clearAccount('acc-resource');
   });
 
   it('clears model-scoped retry state after a successful upstream request', () => {
-    proxyModelAvailabilityStore.clearAccount('acc-success');
-    proxyModelAvailabilityStore.mark('acc-success', 'gemini-3.1-pro-high', 'rate_limited');
-    const { policy, accountLeaseService } = createPolicy();
+    const { policy, accountLeaseService, modelAvailabilityStore } = createPolicy();
+    modelAvailabilityStore.mark('acc-success', 'gemini-3.1-pro-high', 'rate_limited');
 
     policy.markUpstreamSuccess('acc-success', 'gemini-3.1-pro-high');
 
@@ -197,7 +194,7 @@ describe('ProxyRetryService', () => {
       'acc-success',
       'gemini-3.1-pro-high',
     );
-    expect(proxyModelAvailabilityStore.getSnapshot()).not.toEqual(
+    expect(modelAvailabilityStore.getSnapshot()).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           accountId: 'acc-success',
@@ -213,8 +210,7 @@ describe('ProxyRetryService', () => {
   ] as const)(
     'keeps image-model %i failures scoped to the affected model',
     async (status, reason) => {
-      proxyModelAvailabilityStore.clearAccount('acc-image');
-      const { policy, accountLeaseService } = createPolicy();
+      const { policy, accountLeaseService, modelAvailabilityStore } = createPolicy();
 
       await policy.applyUpstreamPenalty(
         'acc-image',
@@ -227,7 +223,7 @@ describe('ProxyRetryService', () => {
 
       expect(accountLeaseService.markAsForbidden).not.toHaveBeenCalled();
       expect(accountLeaseService.markFromUpstreamError).not.toHaveBeenCalled();
-      expect(proxyModelAvailabilityStore.getSnapshot()).toEqual(
+      expect(modelAvailabilityStore.getSnapshot()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             accountId: 'acc-image',
@@ -236,7 +232,6 @@ describe('ProxyRetryService', () => {
           }),
         ]),
       );
-      proxyModelAvailabilityStore.clearAccount('acc-image');
     },
   );
 

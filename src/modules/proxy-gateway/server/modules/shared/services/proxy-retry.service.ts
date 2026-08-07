@@ -9,7 +9,7 @@ import {
   shouldGraceRetry,
 } from './rate-limit-tracker.service';
 import { UpstreamRequestError } from '../../../common/exceptions/upstream-request-exception';
-import { ModelAvailabilityService, proxyModelAvailabilityStore } from './model-availability.service';
+import { ModelAvailabilityService } from './model-availability.service';
 import { AccountLeaseService } from '../../account-lease/account-lease.service';
 
 export interface ProxyTokenRetryState {
@@ -51,21 +51,17 @@ export interface ProxyUpstreamFailureClassification {
 @Injectable()
 export class ProxyRetryService {
   private readonly logger: ProxyRetryLogger;
-  private readonly modelAvailabilityStore: ModelAvailabilityService;
 
   constructor(
     @Inject(AccountLeaseService) private readonly accountLeaseService: ProxyRetryAccountLeaseService,
-    @Optional() @Inject(ModelAvailabilityService) modelAvailabilityOrLogger?: ModelAvailabilityService | ProxyRetryLogger,
-    @Optional() loggerOrModelAvailability?: ProxyRetryLogger | ModelAvailabilityService,
+    @Inject(ModelAvailabilityService) private readonly modelAvailabilityStore: ModelAvailabilityService,
+    @Optional() logger?: ProxyRetryLogger,
   ) {
-    if (modelAvailabilityOrLogger && 'mark' in modelAvailabilityOrLogger) {
-      this.modelAvailabilityStore = modelAvailabilityOrLogger as ModelAvailabilityService;
-      this.logger = (loggerOrModelAvailability as ProxyRetryLogger) ?? new Logger(ProxyRetryService.name);
-    } else {
-      this.logger = (modelAvailabilityOrLogger as ProxyRetryLogger) ?? new Logger(ProxyRetryService.name);
-      this.modelAvailabilityStore =
-        (loggerOrModelAvailability as ModelAvailabilityService) ?? proxyModelAvailabilityStore;
-    }
+    this.logger = logger ?? new Logger(ProxyRetryService.name);
+  }
+
+  getModelAvailabilityStore(): ModelAvailabilityService {
+    return this.modelAvailabilityStore;
   }
 
   createTokenRetryState(): ProxyTokenRetryState {

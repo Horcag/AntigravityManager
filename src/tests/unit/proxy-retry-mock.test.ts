@@ -5,6 +5,10 @@ import { Readable } from 'node:stream';
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
 import { Observable } from 'rxjs';
 import { GeminiClient } from '../../modules/proxy-gateway/server/modules/gemini/gemini-client.service';
+import { GenerationConstraintsService } from '../../modules/proxy-gateway/server/modules/shared/services/generation-constraints.service';
+import { ProxyRetryService } from '../../modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
+import { ModelAvailabilityService } from '../../modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { setServerConfig } from '../../server/server-config';
 import { DEFAULT_APP_CONFIG, ProxyConfig } from '@/modules/config/types';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
@@ -42,7 +46,13 @@ function createProxyConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
 // Subclass to access private method
 class TestableProxyService extends ProxyService {
   constructor() {
-    super(mockAccountLeaseService as any, mockGeminiClient as any);
+    super(
+      mockAccountLeaseService as any,
+      mockGeminiClient as any,
+      new GenerationConstraintsService(mockAccountLeaseService as any),
+      new ProxyRetryService(mockAccountLeaseService as any, new ModelAvailabilityService()),
+      new ModelRoutingService(),
+    );
   }
 
   public testProcessStream(stream: any, model: string = 'model'): Observable<string> {

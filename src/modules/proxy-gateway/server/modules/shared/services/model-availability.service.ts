@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { z } from 'zod';
 import { CloudAccountSettingsStore } from '@/modules/cloud-account/persistence/cloud-account-settings-store';
 import { logger } from '@/shared/logging/logger';
+
+export const PROXY_MODEL_AVAILABILITY_PERSISTENCE = 'PROXY_MODEL_AVAILABILITY_PERSISTENCE';
 
 export type ProxyModelAvailabilityReason =
   | 'model_not_supported'
@@ -62,7 +64,11 @@ export class ModelAvailabilityService {
   private readonly entries = new Map<string, ProxyModelAvailability>();
   private isHydrated = false;
 
-  constructor(private readonly persistence?: ProxyModelAvailabilityPersistence) {}
+  constructor(
+    @Optional()
+    @Inject(PROXY_MODEL_AVAILABILITY_PERSISTENCE)
+    private readonly persistence?: ProxyModelAvailabilityPersistence,
+  ) {}
 
   mark(
     accountId: string,
@@ -200,17 +206,13 @@ export class ModelAvailabilityService {
   }
 }
 
-const persistentAvailabilityAdapter: ProxyModelAvailabilityPersistence | undefined =
+export const persistentAvailabilityAdapter: ProxyModelAvailabilityPersistence | undefined =
   process.env.NODE_ENV === 'test'
     ? undefined
     : {
         load: () => CloudAccountSettingsStore.getSetting(PERSISTENCE_KEY, []),
         save: (entries) => CloudAccountSettingsStore.setSetting(PERSISTENCE_KEY, entries),
       };
-
-export const proxyModelAvailabilityStore = new ModelAvailabilityService(
-  persistentAvailabilityAdapter,
-);
 
 export function getPersistedModelAvailabilitySnapshot(): ProxyModelAvailability[] {
   if (!persistentAvailabilityAdapter) {

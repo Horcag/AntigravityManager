@@ -42,16 +42,13 @@ export abstract class BaseProxyService {
     constructor(
         protected readonly accountLeaseService: AccountLeaseService,
         protected readonly geminiClient: GeminiClient,
-        generationConstraints?: GenerationConstraintsService,
-        retryPolicy?: ProxyRetryService,
-        modelRoutingPolicy?: ModelRoutingService,
+        generationConstraints: GenerationConstraintsService,
+        retryPolicy: ProxyRetryService,
+        modelRoutingPolicy: ModelRoutingService,
     ) {
-        this.generationConstraints =
-            generationConstraints ?? new GenerationConstraintsService(this.accountLeaseService);
-        this.retryPolicy =
-            retryPolicy ?? new ProxyRetryService(this.accountLeaseService, this.logger);
-        this.modelRoutingPolicy =
-            modelRoutingPolicy ?? new ModelRoutingService();
+        this.generationConstraints = generationConstraints;
+        this.retryPolicy = retryPolicy;
+        this.modelRoutingPolicy = modelRoutingPolicy;
     }
 
     protected createOfficialRequestId(): string {
