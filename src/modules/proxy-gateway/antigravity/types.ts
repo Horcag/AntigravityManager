@@ -198,6 +198,7 @@ export interface GenerationConfig {
   responseModalities?: string[];
   /** Image generation configuration */
   imageConfig?: ImageConfig;
+  [key: string]: unknown;
 }
 
 /**
@@ -210,6 +211,7 @@ export interface ThinkingGeminiConfig {
   thinkingBudget?: number;
   /** Thinking level for Claude-native adaptive modes */
   thinkingLevel?: 'low' | 'medium' | 'high' | string;
+  [key: string]: unknown;
 }
 
 /**
@@ -220,6 +222,7 @@ export interface ImageConfig {
   aspectRatio: string;
   /** Image size: 4K */
   imageSize?: string;
+  [key: string]: unknown;
 }
 
 /**
@@ -233,6 +236,7 @@ export interface GeminiToolDeclaration {
   googleSearch?: Record<string, never>;
   /** Google Search Retrieval Tool */
   googleSearchRetrieval?: Record<string, never>;
+  [key: string]: unknown;
 }
 
 /**
@@ -246,6 +250,7 @@ export interface FunctionDeclaration {
   description?: string;
   /** JSON Schema for parameters */
   parameters?: JsonSchema;
+  [key: string]: unknown;
 }
 
 /**
@@ -258,6 +263,7 @@ export interface FunctionCall {
   args: Record<string, unknown>;
   /** Call ID */
   id?: string;
+  [key: string]: unknown;
 }
 
 /**
@@ -270,6 +276,16 @@ export interface FunctionResponse {
   response: Record<string, unknown>;
   /** Call ID */
   id?: string;
+  [key: string]: unknown;
+}
+
+export interface GeminiToolConfig {
+  functionCallingConfig?: {
+    mode?: 'AUTO' | 'ANY' | 'NONE' | string;
+    allowedFunctionNames?: string[];
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 }
 
 export interface GeminiRequest {
@@ -277,20 +293,16 @@ export interface GeminiRequest {
   /** List of tool declarations */
   tools?: GeminiToolDeclaration[];
   /** Function calling configuration shared by the cached tool declarations. */
-  toolConfig?: {
-    functionCallingConfig: {
-      mode: string;
-      allowedFunctionNames?: string[];
-    };
-  };
+  toolConfig?: GeminiToolConfig | Record<string, unknown>;
   /** Safety settings */
   safetySettings?: SafetySetting[];
   /** System instruction */
-  systemInstruction?: { parts: { text: string }[] };
+  systemInstruction?: { parts: GeminiPart[] };
   /** Generation config */
   generationConfig?: GenerationConfig;
   /** Server-created explicit context cache resource name. */
   cachedContent?: string;
+  [key: string]: unknown;
 }
 
 export interface GeminiInternalRequest {
@@ -307,6 +319,7 @@ export interface GeminiInternalRequest {
 export interface GeminiContent {
   role: string;
   parts: GeminiPart[];
+  [key: string]: unknown;
 }
 
 export interface GeminiPart {
@@ -326,6 +339,7 @@ export interface GeminiPart {
     mimeType: string;
     data: string;
   };
+  [key: string]: unknown;
 }
 
 // --- Quota Models ---
@@ -422,6 +436,7 @@ export interface GeminiResponse {
     blockReason?: string;
     blockReasonMessage?: string;
   };
+  [key: string]: unknown;
 }
 
 export interface Candidate {
@@ -429,6 +444,7 @@ export interface Candidate {
   finishReason?: string;
   index?: number;
   groundingMetadata?: GroundingMetadata;
+  [key: string]: unknown;
 }
 
 export interface UsageMetadata {
@@ -445,6 +461,7 @@ export interface UsageMetadata {
   total_tokens?: number;
   total_tool_use_tokens?: number;
   cachedTokens?: number;
+  [key: string]: unknown;
 }
 
 export interface GroundingMetadata {

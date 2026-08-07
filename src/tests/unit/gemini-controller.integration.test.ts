@@ -1,202 +1,306 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { Module } from '@nestjs/common';
+import { NestFactory } from '@nestjs/core';
+import { FastifyAdapter, NestFastifyApplication } from '@nestjs/platform-fastify';
 import { of } from 'rxjs';
 
 import { GeminiController } from '../../modules/proxy-gateway/server/modules/gemini/gemini.controller';
+import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
+import { ProxyGuard } from '../../modules/proxy-gateway/server/guards/proxy.guard';
+import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 
-function createReplyMock() {
-  const reply: Record<string, any> = {};
-  reply.status = vi.fn(() => reply);
-  reply.header = vi.fn(() => reply);
-  reply.send = vi.fn(() => reply);
-  return reply;
-}
+describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
+  let app: NestFastifyApplication;
 
-describe('GeminiController Integration', () => {
-  it('supports list and get model endpoints', () => {
-    const proxyService = {};
-    const accountLeaseService = {
-      getAllCollectedModels: vi.fn(
-        () => new Set(['gemini-3-flash', 'gemini-3.1-pro-high', 'gemini-3.5-flash-extra-low']),
-      ),
-    };
-    const controller = new GeminiController(proxyService as any, accountLeaseService as any);
-    const replyList = createReplyMock();
-    const replyGet = createReplyMock();
+  const mockProxyService = {
+    handleGeminiGenerateContent: vi.fn(),
+    handleGeminiStreamGenerateContent: vi.fn(),
+  };
 
-    controller.listModels(replyList as any);
-    controller.getModel('gemini-2.5-flash', replyGet as any);
+  const mockAccountLeaseService = {
+    getAllCollectedModels: vi.fn(
+      () => new Set(['gemini-3-flash', 'gemini-3.1-pro-high', 'gemini-3.5-flash-extra-low']),
+    ),
+  };
 
-    expect(replyList.status).toHaveBeenCalledWith(200);
-    expect(replyList.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        models: expect.any(Array),
-      }),
+  beforeAll(async () => {
+    @Module({
+      controllers: [GeminiController],
+      providers: [
+        { provide: ProxyService, useValue: mockProxyService },
+        { provide: AccountLeaseService, useValue: mockAccountLeaseService },
+      ],
+    })
+    class TestGeminiModule {}
+
+    app = await NestFactory.create<NestFastifyApplication>(
+      TestGeminiModule,
+      new FastifyAdapter(),
+      { logger: false },
     );
-    expect(replyList.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        models: expect.arrayContaining([
-          expect.objectContaining({
-            name: 'models/gemini-3-flash',
-            description: '',
-            inputTokenLimit: 128000,
-            outputTokenLimit: 8192,
-            supportedGenerationMethods: ['generateContent', 'countTokens'],
-          }),
-          expect.objectContaining({
-            name: 'models/gemini-3.1-pro-high',
-            description: '',
-            inputTokenLimit: 128000,
-            outputTokenLimit: 8192,
-            supportedGenerationMethods: ['generateContent', 'countTokens'],
-          }),
-          expect.objectContaining({
-            name: 'models/gemini-3.5-flash-extra-low',
-          }),
-        ]),
-      }),
-    );
-    expect(replyGet.status).toHaveBeenCalledWith(200);
-    expect(replyGet.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'models/gemini-2.5-flash',
-        displayName: 'gemini-2.5-flash',
-      }),
-    );
+
+    // Bypass ProxyGuard authentication for routing/serialization tests
+    app.useGlobalGuards({
+      canActivate: () => true,
+    });
+
+    await app.init();
+    await app.getHttpAdapter().getInstance().ready();
   });
 
-  it('keeps Antigravity public presets before dynamic quota cache is available', () => {
-    const controller = new GeminiController({} as any);
-    const reply = createReplyMock();
+  afterAll(async () => {
+    if (app) {
+      await app.close();
+    }
+  });
 
-    controller.listModels(reply as any);
+  it('GET /v1beta/models returns dynamic model list', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models',
+    });
 
-    const payload = reply.send.mock.calls[0][0];
-    const names = payload.models.map((model: { name: string }) => model.name);
-    expect(names).toEqual(
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.models).toEqual(
       expect.arrayContaining([
-        'models/gemini-3.5-flash-medium',
-        'models/gemini-3.5-flash-high',
-        'models/gemini-3.5-flash-low',
-        'models/gemini-3.1-pro-low',
-        'models/gemini-3.1-pro-high',
-        'models/claude-sonnet-4-6-thinking',
-        'models/claude-opus-4-6-thinking',
-        'models/gpt-oss-120b-medium',
+        expect.objectContaining({
+          name: 'models/gemini-3-flash',
+          supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+        }),
+        expect.objectContaining({
+          name: 'models/gemini-3.1-pro-high',
+        }),
       ]),
     );
   });
 
-  it('handles generateContent action from colon endpoint format', async () => {
-    const proxyService = {
-      handleGeminiGenerateContent: vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: { role: 'model', parts: [{ text: 'hello' }] },
-            finishReason: 'STOP',
-            avgLogprobs: -0.1,
-          },
-        ],
-        usageMetadata: {
-          promptTokenCount: 1,
-          candidatesTokenCount: 1,
-          totalTokenCount: 2,
-        },
-        createTime: '2026-02-10T10:00:00.000Z',
-        modelVersion: 'gemini-2.5-flash-latest',
-        responseId: 'resp_123',
-      }),
-      handleGeminiStreamGenerateContent: vi.fn(),
-    };
-    const controller = new GeminiController(proxyService as any);
-    const reply = createReplyMock();
+  it('GET /v1beta/models/:model returns model detail or 404', async () => {
+    const resFound = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models/gemini-3-flash',
+    });
+    expect(resFound.statusCode).toBe(200);
+    expect(resFound.json()).toMatchObject({
+      name: 'models/gemini-3-flash',
+      displayName: 'gemini-3-flash',
+    });
 
-    await controller.modelAction(
-      'models/gemini-3.1-pro-high:generateContent',
-      { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] } as any,
-      reply as any,
-    );
-
-    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledWith(
-      'models/gemini-3.1-pro-high',
-      expect.any(Object),
-    );
-    expect(reply.status).toHaveBeenCalledWith(200);
-    expect(reply.send).toHaveBeenCalledWith({
-      candidates: [
-        {
-          content: { role: 'model', parts: [{ text: 'hello' }] },
-          finishReason: 'STOP',
-          index: 0,
-        },
-      ],
-      usageMetadata: {
-        promptTokenCount: 1,
-        candidatesTokenCount: 1,
-        totalTokenCount: 2,
+    const resNotFound = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models/unknown-model-xyz',
+    });
+    expect(resNotFound.statusCode).toBe(404);
+    expect(resNotFound.json()).toEqual({
+      error: {
+        code: 404,
+        message: 'models/unknown-model-xyz is not found',
+        status: 'NOT_FOUND',
       },
     });
   });
 
-  it('handles streamGenerateContent action and emits SSE headers', async () => {
-    const stream = of('data: {"ok":true}\n\n');
-    const proxyService = {
-      handleGeminiGenerateContent: vi.fn(),
-      handleGeminiStreamGenerateContent: vi.fn().mockResolvedValue(stream),
-    };
-    const controller = new GeminiController(proxyService as any);
-    const reply = createReplyMock();
+  it('POST /v1beta/models/:model/countTokens and :countTokens return 501 UNIMPLEMENTED', async () => {
+    const resSlash = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash/countTokens',
+      payload: { contents: [{ role: 'user', parts: [{ text: 'count me' }] }] },
+    });
+    expect(resSlash.statusCode).toBe(501);
+    expect(resSlash.json()).toEqual({
+      error: {
+        code: 501,
+        message: 'countTokens is not implemented by this provider',
+        status: 'UNIMPLEMENTED',
+      },
+    });
 
-    await controller.modelAction(
-      'gemini-2.5-flash:streamGenerateContent',
-      { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] } as any,
-      reply as any,
-    );
-
-    expect(reply.header).toHaveBeenCalledWith('Content-Type', 'text/event-stream');
-    expect(reply.header).toHaveBeenCalledWith('Cache-Control', 'no-cache');
-    expect(reply.header).toHaveBeenCalledWith('Connection', 'keep-alive');
-    expect(reply.send).toHaveBeenCalledWith(stream);
+    const resColon = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:countTokens',
+      payload: { contents: [{ role: 'user', parts: [{ text: 'count me' }] }] },
+    });
+    expect(resColon.statusCode).toBe(501);
+    expect(resColon.json()).toEqual({
+      error: {
+        code: 501,
+        message: 'countTokens is not implemented by this provider',
+        status: 'UNIMPLEMENTED',
+      },
+    });
   });
 
-  it('supports countTokens action', async () => {
-    const proxyService = {
-      handleGeminiGenerateContent: vi.fn(),
-      handleGeminiStreamGenerateContent: vi.fn(),
-    };
-    const controller = new GeminiController(proxyService as any);
-    const reply = createReplyMock();
-
-    await controller.countTokens(
-      'gemini-2.5-flash',
-      { contents: [{ role: 'user', parts: [{ text: 'abcd efgh' }] }] } as any,
-      reply as any,
-    );
-
-    expect(reply.status).toHaveBeenCalledWith(200);
-    expect(reply.send).toHaveBeenCalledWith({ totalTokens: 0 });
+  it('POST /v1beta/models/:model:embedContent returns 501 UNIMPLEMENTED', async () => {
+    const resEmbed = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:embedContent',
+      payload: { contents: [{ role: 'user', parts: [{ text: 'test' }] }] },
+    });
+    expect(resEmbed.statusCode).toBe(501);
+    expect(resEmbed.json()).toEqual({
+      error: {
+        code: 501,
+        message: 'embedContent is not implemented by this provider',
+        status: 'UNIMPLEMENTED',
+      },
+    });
   });
 
-  it('returns bad request for invalid combined endpoint action', async () => {
-    const proxyService = {
-      handleGeminiGenerateContent: vi.fn(),
-      handleGeminiStreamGenerateContent: vi.fn(),
-    };
-    const controller = new GeminiController(proxyService as any);
-    const reply = createReplyMock();
+  it('rejects top-level cachedContent, serviceTier, and store with 501 UNIMPLEMENTED', async () => {
+    const resCached = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        cachedContent: 'cachedContents/123',
+      },
+    });
+    expect(resCached.statusCode).toBe(501);
+    expect(resCached.json().error.message).toContain("Field 'cachedContent'");
 
-    await controller.modelAction(
-      'models/gemini-2.5-flash-generateContent',
-      { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] } as any,
-      reply as any,
-    );
+    const resServiceTier = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        serviceTier: 'flex',
+      },
+    });
+    expect(resServiceTier.statusCode).toBe(501);
+    expect(resServiceTier.json().error.message).toContain("Field 'serviceTier'");
 
-    expect(reply.status).toHaveBeenCalledWith(400);
-    expect(reply.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        error: expect.objectContaining({
-          status: 'INVALID_ARGUMENT',
+    const resStore = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        store: true,
+      },
+    });
+    expect(resStore.statusCode).toBe(501);
+    expect(resStore.json().error.message).toContain("Field 'store'");
+  });
+
+  it('returns 400 INVALID_ARGUMENT when systemInstruction cannot be represented as text-only', async () => {
+    const resInvalidSystem = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        systemInstruction: {
+          parts: [{ text: 'valid', inlineData: { mimeType: 'image/png', data: 'xyz' } }],
+        },
+      },
+    });
+    expect(resInvalidSystem.statusCode).toBe(400);
+    expect(resInvalidSystem.json()).toEqual({
+      error: {
+        code: 400,
+        message: 'systemInstruction contains non-text fields unsupported by this provider',
+        status: 'INVALID_ARGUMENT',
+      },
+    });
+  });
+
+  it('handles generateContent losslessly preserving candidate logprobs, version and responseId', async () => {
+    mockProxyService.handleGeminiGenerateContent.mockResolvedValueOnce({
+      candidates: [
+        {
+          content: { role: 'model', parts: [{ text: 'hello world' }] },
+          finishReason: 'STOP',
+          index: 0,
+          avgLogprobs: -0.05,
+          safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH', probability: 'NEGLIGIBLE' }],
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 5,
+        candidatesTokenCount: 2,
+        totalTokenCount: 7,
+      },
+      modelVersion: 'gemini-3-flash',
+      responseId: 'resp_abc123',
+    });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      candidates: [
+        {
+          content: { role: 'model', parts: [{ text: 'hello world' }] },
+          finishReason: 'STOP',
+          index: 0,
+          avgLogprobs: -0.05,
+          safetyRatings: [{ category: 'HARM_CATEGORY_HATE_SPEECH', probability: 'NEGLIGIBLE' }],
+        },
+      ],
+      usageMetadata: {
+        promptTokenCount: 5,
+        candidatesTokenCount: 2,
+        totalTokenCount: 7,
+      },
+      modelVersion: 'gemini-3-flash',
+      responseId: 'resp_abc123',
+    });
+  });
+
+  it('redacts private identifiers and project IDs in upstream Google errors while preserving status and Retry-After', async () => {
+    mockProxyService.handleGeminiGenerateContent.mockRejectedValueOnce(
+      new UpstreamRequestError({
+        message: 'Quota exceeded for project 998877',
+        status: 429,
+        headers: { retryAfter: '45' },
+        body: JSON.stringify({
+          error: {
+            code: 429,
+            message: 'Quota exceeded for project 998877 on account test@domain.com',
+            status: 'RESOURCE_EXHAUSTED',
+          },
         }),
       }),
     );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('45');
+    const body = res.json();
+    expect(body.error.code).toBe(429);
+    expect(body.error.status).toBe('RESOURCE_EXHAUSTED');
+    expect(body.error.message).not.toContain('998877');
+    expect(body.error.message).not.toContain('test@domain.com');
+    expect(body.error.message).toContain('project [REDACTED]');
+    expect(body.error.message).toContain('[REDACTED_EMAIL]');
+  });
+
+  it('handles streamGenerateContent action and returns event-stream header', async () => {
+    const sseStream = of('data: {"candidates":[{"content":{"parts":[{"text":"chunk"}]}}]}\n\n');
+    mockProxyService.handleGeminiStreamGenerateContent.mockResolvedValueOnce(sseStream);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:streamGenerateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.payload).toContain('data: {"candidates":[{"content":{"parts":[{"text":"chunk"}]}}]}');
   });
 });

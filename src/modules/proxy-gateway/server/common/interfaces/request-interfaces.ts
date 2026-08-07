@@ -1,4 +1,4 @@
-import type { GeminiToolDeclaration } from '../../../antigravity/types';
+import type { GeminiToolDeclaration, SafetySetting } from '../../../antigravity/types';
 
 export interface OpenAIChatRequest {
   model: string;
@@ -151,6 +151,7 @@ export interface AnthropicImageSource {
 export interface GeminiContent {
   role: string;
   parts: GeminiPart[];
+  [key: string]: unknown;
 }
 
 export interface GeminiPart {
@@ -158,11 +159,13 @@ export interface GeminiPart {
   inlineData?: GeminiInlineData;
   thoughtSignature?: string;
   thought_signature?: string;
+  [key: string]: unknown;
 }
 
 export interface GeminiInlineData {
   mimeType: string;
   data: string;
+  [key: string]: unknown;
 }
 
 export interface GeminiRequest {
@@ -170,6 +173,10 @@ export interface GeminiRequest {
   systemInstruction?: { parts: GeminiPart[] };
   generationConfig?: GeminiGenerationConfig;
   tools?: GeminiToolDeclaration[];
+  toolConfig?: Record<string, unknown>;
+  safetySettings?: SafetySetting[];
+  cachedContent?: string;
+  [key: string]: unknown;
 }
 
 export interface GeminiGenerationConfig {
@@ -177,6 +184,7 @@ export interface GeminiGenerationConfig {
   maxOutputTokens?: number;
   topP?: number;
   topK?: number;
+  [key: string]: unknown;
 }
 
 export interface GeminiResponse {
@@ -186,12 +194,14 @@ export interface GeminiResponse {
     blockReason?: string;
     blockReasonMessage?: string;
   };
+  [key: string]: unknown;
 }
 
 export interface GeminiCandidate {
   content?: GeminiContent;
   finishReason?: string;
   index?: number;
+  [key: string]: unknown;
 }
 
 export interface GeminiUsageMetadata {
@@ -217,6 +227,7 @@ export interface GeminiUsageMetadata {
     tokenCount?: number;
   }>;
   trafficType?: string;
+  [key: string]: unknown;
 }
 
 export interface OpenAIUsage {

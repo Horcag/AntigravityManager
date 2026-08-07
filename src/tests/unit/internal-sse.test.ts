@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
-import { lastValueFrom, Observable, toArray } from 'rxjs';
+import { lastValueFrom, toArray } from 'rxjs';
 
 import { decodeInternalSseData } from '@/modules/proxy-gateway/antigravity/internal-sse';
-import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
+import { createGeminiSseObservable } from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
+import { sanitizeGeminiResponse } from '@/modules/proxy-gateway/server/modules/gemini/gemini-wire';
 
 describe('decodeInternalSseData', () => {
   it('unwraps a v1internal-wrapped chunk so candidates/usage/model/id are reachable at the top level', () => {
@@ -44,7 +45,7 @@ describe('decodeInternalSseData', () => {
     expect(result).toEqual({ kind: 'response', response: bare });
   });
 
-  it('does not double-unwrap a payload carrying both response and a top-level candidates', () => {
+  it('does not double-unwrap a payload carrying both response and top-level candidates', () => {
     const payload = {
       candidates: [{ content: { role: 'model', parts: [{ text: 'top-level' }] } }],
       response: {
@@ -84,89 +85,158 @@ describe('decodeInternalSseData', () => {
   });
 });
 
-function parseEvent(serializedEvent: string): Record<string, unknown> {
-  const dataLine = serializedEvent.split('\n').find((line) => line.startsWith('data: '));
-  if (!dataLine) {
-    throw new Error(`No data line found in event: ${serializedEvent}`);
-  }
-  return JSON.parse(dataLine.slice('data: '.length)) as Record<string, unknown>;
-}
-
-function createAnthropicStream(
-  service: ProxyService,
-  upstreamStream: NodeJS.ReadableStream,
-): Observable<unknown> {
-  const method: unknown = Reflect.get(service, 'processAnthropicInternalStream');
-  if (typeof method !== 'function') {
-    throw new Error('Anthropic stream processor is unavailable');
-  }
-
-  const result: unknown = Reflect.apply(method, service, [upstreamStream, 'gemini-3-pro']);
-  if (!(result instanceof Observable)) {
-    throw new Error('Anthropic stream processor did not return an Observable');
-  }
-  return result;
-}
-
-describe('ProxyService Anthropic streaming envelope handling', () => {
-  it('unwraps a wrapped two-part chunk and does not drop the second part', async () => {
-    const service = new ProxyService({} as never, {} as never, {} as never, {} as never, {} as never);
+describe('createGeminiSseObservable', () => {
+  it('unwraps v1internal wrapped SSE chunks into bare Gemini data events', async () => {
     const upstreamStream = Readable.from([
       Buffer.from(
-        'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"c2ln","text":"first"},{"text":"second"}]}}],"usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":2},"modelVersion":"gemini-3-flash","responseId":"resp_wrapped"}}\n\n',
+        'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"modelVersion":"gemini-3-flash"},"traceId":"t123","metadata":{}}\n\n',
       ),
-      Buffer.from('data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n'),
     ]);
 
-    const serializedEvents = await lastValueFrom(
-      createAnthropicStream(service, upstreamStream).pipe(toArray()),
-    );
-    const events = serializedEvents.map((event) => parseEvent(String(event)));
+    const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toContain('data: {');
+    const parsed = JSON.parse(chunks[0].replace(/^data: /, '').trim());
 
-    const deltaEvents = events.filter((event) => event.type === 'content_block_delta');
-    const texts = deltaEvents
-      .map((event) => (event.delta as Record<string, unknown>)?.text)
-      .filter((text): text is string => typeof text === 'string');
-
-    expect(texts).toContain('first');
-    expect(texts).toContain('second');
-
-    const messageStart = events.find((event) => event.type === 'message_start');
-    expect(messageStart).toMatchObject({
-      message: expect.objectContaining({ id: 'resp_wrapped', model: 'gemini-3-flash' }),
+    expect(parsed).toEqual({
+      candidates: [
+        {
+          content: { role: 'model', parts: [{ text: 'hello' }] },
+          index: 0,
+        },
+      ],
+      modelVersion: 'gemini-3-flash',
     });
+    expect(parsed).not.toHaveProperty('traceId');
+    expect(parsed).not.toHaveProperty('metadata');
   });
 
-  it('still routes undecodable payloads through the parse-error recovery', async () => {
-    const service = new ProxyService({} as never, {} as never, {} as never, {} as never, {} as never);
-    const upstreamStream = Readable.from(
-      Array.from({ length: 5 }, () => Buffer.from('data: {"response":\n\n')),
-    );
-
-    const serializedEvents = await lastValueFrom(
-      createAnthropicStream(service, upstreamStream).pipe(toArray()),
-    );
-    const events = serializedEvents.map((event) => parseEvent(String(event)));
-
-    // StreamingState only emits this once its consecutive-error counter passes
-    // its threshold, so seeing it proves handleParseError still runs for
-    // payloads the decoder classifies as invalid without throwing.
-    const errorEvent = events.find((event) => event.type === 'error');
-    expect(errorEvent).toMatchObject({
-      error: expect.objectContaining({ code: 'stream_decode_error' }),
+  it('handles split SSE frames across chunks and split UTF-8 characters', async () => {
+    const unicodeChar = '👋'; // UTF-8: 4 bytes [0xF0, 0x9F, 0x90, 0x9B]
+    const fullJson = JSON.stringify({
+      response: {
+        candidates: [{ content: { role: 'model', parts: [{ text: unicodeChar }] } }],
+      },
     });
+    const fullText = `data: ${fullJson}\n\n`;
+    const buf = Buffer.from(fullText, 'utf-8');
+
+    const chunk1 = buf.subarray(0, 15);
+    const chunk2 = buf.subarray(15);
+
+    const upstreamStream = Readable.from([chunk1, chunk2]);
+    const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
+
+    expect(chunks).toHaveLength(1);
+    const parsed = JSON.parse(chunks[0].replace(/^data: /, '').trim());
+    expect(parsed.candidates[0].content.parts[0].text).toBe(unicodeChar);
   });
 
-  it('emits a message_delta for a wrapped finishReason-only chunk', async () => {
-    const service = new ProxyService({} as never, {} as never, {} as never, {} as never, {} as never);
-    const upstreamStream = Readable.from([
-      Buffer.from('data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n'),
-    ]);
+  it('handles multiline data and CRLF line endings', async () => {
+    const streamContent =
+      'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":\r\n' +
+      'data: "multiline text"}]}}]}}\r\n\r\n';
 
-    const serializedEvents = await lastValueFrom(
-      createAnthropicStream(service, upstreamStream).pipe(toArray()),
-    );
-    const events = serializedEvents.map((event) => parseEvent(String(event)));
-    expect(events.some((event) => event.type === 'message_delta')).toBe(true);
+    const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+    const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
+
+    expect(chunks).toHaveLength(1);
+    const parsed = JSON.parse(chunks[0].replace(/^data: /, '').trim());
+    expect(parsed.candidates[0].content.parts[0].text).toBe('multiline text');
+  });
+
+  it('handles multiple events per chunk', async () => {
+    const chunk =
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"first"}]}}]}}\n\n' +
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"second"}]}}]}}\n\n';
+
+    const upstreamStream = Readable.from([Buffer.from(chunk)]);
+    const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toContain('first');
+    expect(chunks[1]).toContain('second');
+  });
+
+  it('handles final unterminated event on stream end', async () => {
+    const chunk = 'data: {"response":{"candidates":[{"content":{"parts":[{"text":"final event without blank line"}]}}]}}';
+
+    const upstreamStream = Readable.from([Buffer.from(chunk)]);
+    const chunks = await lastValueFrom(createGeminiSseObservable(upstreamStream).pipe(toArray()));
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toContain('final event without blank line');
+  });
+
+  it('preserves candidate unknown fields while removing top-level private fields', () => {
+    const input = {
+      candidates: [
+        {
+          content: { role: 'model', parts: [{ text: 'part' }] },
+          metadata: { candidateMeta: 'keep' },
+          traceId: 'cand_trace',
+          customField: 42,
+        },
+      ],
+      traceId: 'top_trace',
+      metadata: { top: true },
+    };
+
+    const sanitized = sanitizeGeminiResponse(input as any);
+    expect(sanitized).not.toHaveProperty('traceId');
+    expect(sanitized).not.toHaveProperty('metadata');
+
+    const candidate = sanitized.candidates?.[0] as Record<string, unknown>;
+    expect(candidate.metadata).toEqual({ candidateMeta: 'keep' });
+    expect(candidate.traceId).toBe('cand_trace');
+    expect(candidate.customField).toBe(42);
+  });
+
+  it('emits error on malformed JSON after a valid event', async () => {
+    const streamContent =
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"valid"}]}}]}}\n\n' +
+      'data: {malformed json\n\n';
+
+    const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+
+    let emittedChunks = 0;
+    let caughtError: unknown = null;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        createGeminiSseObservable(upstreamStream).subscribe({
+          next: () => {
+            emittedChunks++;
+          },
+          error: (err) => {
+            caughtError = err;
+            reject(err);
+          },
+          complete: () => resolve(),
+        });
+      });
+    } catch {
+      // Expected rejection
+    }
+
+    expect(emittedChunks).toBe(1);
+    expect(caughtError).toBeDefined();
+    expect((caughtError as Error).message).toContain('Stream parse error');
+  });
+
+  it('destroys upstream stream on unsubscribe and idle timeout', async () => {
+    const upstreamStream = new Readable({
+      read() {
+        // Keeps stream open
+      },
+    });
+
+    const destroySpy = vi.spyOn(upstreamStream, 'destroy');
+
+    const subscription = createGeminiSseObservable(upstreamStream, 50).subscribe();
+
+    // Unsubscribe explicitly
+    subscription.unsubscribe();
+    expect(destroySpy).toHaveBeenCalled();
   });
 });

@@ -11,7 +11,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
-import { isEmpty, isFunction, isNumber, isString } from 'lodash-es';
+import { isFunction, isNil, isObjectLike, isString } from 'lodash-es';
 import { Observable } from 'rxjs';
 
 import { ProxyGuard } from '../../guards/proxy.guard';
@@ -20,18 +20,15 @@ import { GeminiRequest, GeminiResponse } from '../../common/interfaces/request-i
 import { getServerConfig } from '../../../../../server/server-config';
 import { getAllDynamicModels } from '../../../antigravity/ModelMapping';
 import { AccountLeaseService } from '../account-lease/account-lease.service';
+import {
+  validateGeminiSystemInstruction,
+  sanitizeUpstreamError,
+} from './gemini-wire';
 
 type GeminiModelMetadata = {
   name: string;
   displayName: string;
-  description: string;
-  inputTokenLimit: number;
-  outputTokenLimit: number;
   supportedGenerationMethods: string[];
-  temperature: number;
-  topK: number;
-  topP: number;
-  version: string;
 };
 
 @Controller('v1beta')
@@ -58,16 +55,16 @@ export class GeminiController {
     const matched = this.buildGeminiModelList().find((item) => item.name === targetName);
 
     if (matched) {
-      res.status(HttpStatus.OK).send({
-        name: matched.name,
-        displayName: matched.displayName,
-      });
+      res.status(HttpStatus.OK).send(matched);
       return;
     }
 
-    res.status(HttpStatus.OK).send({
-      name: targetName,
-      displayName: targetName.replace(/^models\//, ''),
+    res.status(HttpStatus.NOT_FOUND).send({
+      error: {
+        code: HttpStatus.NOT_FOUND,
+        message: `${targetName} is not found`,
+        status: 'NOT_FOUND',
+      },
     });
   }
 
@@ -107,11 +104,48 @@ export class GeminiController {
     body: GeminiRequest,
     res: FastifyReply,
   ): Promise<void> {
-    if (action === 'countTokens') {
-      res.status(HttpStatus.OK).send({
-        totalTokens: 0,
+    const unsupportedField = this.checkUnsupportedGeminiFields(
+      body as unknown as Record<string, unknown>,
+    );
+    if (unsupportedField) {
+      res.status(HttpStatus.NOT_IMPLEMENTED).send({
+        error: {
+          code: HttpStatus.NOT_IMPLEMENTED,
+          message: `Field '${unsupportedField}' is not supported by this provider`,
+          status: 'UNIMPLEMENTED',
+        },
       });
       return;
+    }
+
+    if (
+      action === 'countTokens' ||
+      action === 'embedContent' ||
+      action === 'batchEmbedContents' ||
+      action === 'batchGenerateContent'
+    ) {
+      res.status(HttpStatus.NOT_IMPLEMENTED).send({
+        error: {
+          code: HttpStatus.NOT_IMPLEMENTED,
+          message: `${action} is not implemented by this provider`,
+          status: 'UNIMPLEMENTED',
+        },
+      });
+      return;
+    }
+
+    if (action === 'generateContent' || action === 'streamGenerateContent') {
+      const sysVal = validateGeminiSystemInstruction((body as Record<string, unknown>)?.systemInstruction);
+      if (!sysVal.valid) {
+        res.status(HttpStatus.BAD_REQUEST).send({
+          error: {
+            code: HttpStatus.BAD_REQUEST,
+            message: sysVal.message || 'Invalid systemInstruction format',
+            status: 'INVALID_ARGUMENT',
+          },
+        });
+        return;
+      }
     }
 
     try {
@@ -125,7 +159,7 @@ export class GeminiController {
 
       if (action === 'generateContent') {
         const result = await this.proxyService.handleGeminiGenerateContent(model, body);
-        res.status(HttpStatus.OK).send(this.buildNormalizedGeminiGenerateResponse(result));
+        res.status(HttpStatus.OK).send(result);
         return;
       }
 
@@ -137,15 +171,28 @@ export class GeminiController {
         },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Internal Server Error';
-      res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
-        error: {
-          code: HttpStatus.INTERNAL_SERVER_ERROR,
-          message,
-          status: 'INTERNAL',
-        },
-      });
+      const sanitized = sanitizeUpstreamError(error);
+      if (sanitized.retryAfter) {
+        res.header('Retry-After', sanitized.retryAfter);
+      }
+      res.status(sanitized.statusCode).send(sanitized.errorEnvelope);
     }
+  }
+
+  private checkUnsupportedGeminiFields(body: Record<string, unknown>): string | null {
+    if (!isObjectLike(body)) {
+      return null;
+    }
+    if ('cachedContent' in body && !isNil(body.cachedContent)) {
+      return 'cachedContent';
+    }
+    if ('serviceTier' in body && !isNil(body.serviceTier)) {
+      return 'serviceTier';
+    }
+    if ('store' in body && !isNil(body.store)) {
+      return 'store';
+    }
+    return null;
   }
 
   private parseModelActionToken(modelAction: string): {
@@ -185,65 +232,8 @@ export class GeminiController {
     return {
       name: modelName,
       displayName,
-      description: '',
-      inputTokenLimit: 128000,
-      outputTokenLimit: 8192,
-      supportedGenerationMethods: ['generateContent', 'countTokens'],
-      temperature: 1,
-      topK: 64,
-      topP: 0.95,
-      version: '001',
+      supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
     };
-  }
-
-  private buildNormalizedGeminiGenerateResponse(response: GeminiResponse): GeminiResponse {
-    const candidates = (response.candidates ?? []).map((candidate, index) => ({
-      content: candidate.content,
-      finishReason: candidate.finishReason,
-      index: isNumber(candidate.index) ? candidate.index : index,
-    }));
-
-    const normalized: GeminiResponse = {
-      candidates,
-      promptFeedback: response.promptFeedback,
-    };
-
-    if (response.usageMetadata) {
-      const usageMetadata = this.normalizeGeminiUsageMetadata(response.usageMetadata);
-      if (!isEmpty(usageMetadata)) {
-        normalized.usageMetadata = usageMetadata;
-      }
-    }
-
-    return normalized;
-  }
-
-  private normalizeGeminiUsageMetadata(
-    usageMetadata: GeminiResponse['usageMetadata'],
-  ): NonNullable<GeminiResponse['usageMetadata']> {
-    const normalized: NonNullable<GeminiResponse['usageMetadata']> = {};
-    if (usageMetadata?.promptTokenCount !== undefined) {
-      normalized.promptTokenCount = usageMetadata.promptTokenCount;
-    }
-    if (usageMetadata?.candidatesTokenCount !== undefined) {
-      normalized.candidatesTokenCount = usageMetadata.candidatesTokenCount;
-    }
-    if (usageMetadata?.totalTokenCount !== undefined) {
-      normalized.totalTokenCount = usageMetadata.totalTokenCount;
-    }
-    if (usageMetadata?.thoughtsTokenCount !== undefined) {
-      normalized.thoughtsTokenCount = usageMetadata.thoughtsTokenCount;
-    }
-    if (usageMetadata?.promptTokensDetails !== undefined) {
-      normalized.promptTokensDetails = usageMetadata.promptTokensDetails;
-    }
-    if (usageMetadata?.candidatesTokensDetails !== undefined) {
-      normalized.candidatesTokensDetails = usageMetadata.candidatesTokensDetails;
-    }
-    if (usageMetadata?.trafficType !== undefined) {
-      normalized.trafficType = usageMetadata.trafficType;
-    }
-    return normalized;
   }
 
   private writeObservableSseResponse(res: FastifyReply, stream: Observable<unknown>): void {
@@ -277,15 +267,8 @@ export class GeminiController {
         if (res.raw.writableEnded) {
           return;
         }
-        const message = error instanceof Error ? error.message : String(error);
-        res.raw.write(
-          `data: ${JSON.stringify({
-            error: {
-              message,
-              type: 'server_error',
-            },
-          })}\n\n`,
-        );
+        const sanitized = sanitizeUpstreamError(error);
+        res.raw.write(`data: ${JSON.stringify(sanitized.errorEnvelope)}\n\n`);
         res.raw.end();
       },
       complete: () => {

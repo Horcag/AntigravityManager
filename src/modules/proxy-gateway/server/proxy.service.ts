@@ -1,5 +1,5 @@
 import {Inject, Injectable} from '@nestjs/common';
-import {isEmpty, isNil, isNumber, isPlainObject, isString} from 'lodash-es';
+import {isEmpty, isNil, isNumber, isObjectLike, isPlainObject, isString} from 'lodash-es';
 import {AccountLeaseService} from './modules/account-lease/account-lease.service';
 import {GeminiClient} from './modules/gemini/gemini-client.service';
 import {GenerationConstraintsService} from './modules/shared/services/generation-constraints.service';
@@ -7,6 +7,8 @@ import {ProxyRetryService} from './modules/shared/services/proxy-retry.service';
 import {ModelRoutingService} from './modules/shared/services/model-routing.service';
 import {v4 as uuidv4} from 'uuid';
 import {Observable} from 'rxjs';
+import {createGeminiSseObservable} from './modules/gemini/gemini-sse-decoder';
+import {sanitizeGeminiResponse} from './modules/gemini/gemini-wire';
 import {transformClaudeRequestIn} from '../antigravity/ClaudeRequestMapper';
 import {transformResponse} from '../antigravity/ClaudeResponseMapper';
 import {
@@ -578,40 +580,7 @@ export class ProxyService extends BaseProxyService {
   }
 
   private passthroughSseStream(upstreamStream: NodeJS.ReadableStream): Observable<string> {
-    return new Observable<string>((subscriber) => {
-      const decoder = new TextDecoder();
-      let receivedData = false;
-      const idleTimer = this.createStreamIdleTimer(upstreamStream, 'Gemini-SSE', () => {
-        subscriber.complete();
-      });
-
-      idleTimer.reset();
-
-      upstreamStream.on('data', (chunk: Buffer) => {
-        receivedData = true;
-        idleTimer.reset();
-        subscriber.next(decoder.decode(chunk, { stream: true }));
-      });
-
-      upstreamStream.on('end', () => {
-        idleTimer.clear();
-        if (!receivedData) {
-          subscriber.error(new Error('Empty response stream'));
-          return;
-        }
-        subscriber.complete();
-      });
-
-      upstreamStream.on('error', (err: unknown) => {
-        idleTimer.clear();
-        const cleanError = err instanceof Error ? new Error(err.message) : new Error(String(err));
-        subscriber.error(cleanError);
-      });
-
-      return () => {
-        idleTimer.dispose();
-      };
-    });
+    return createGeminiSseObservable(upstreamStream);
   }
 
   private normalizeGeminiModel(model: string): string {
@@ -647,46 +616,7 @@ export class ProxyService extends BaseProxyService {
   }
 
   private normalizeGeminiGenerateResponse(response: GeminiResponse): GeminiResponse {
-    const candidates = Array.isArray(response.candidates)
-      ? response.candidates.map((candidate, index) => ({
-          content: candidate?.content,
-          finishReason: candidate?.finishReason,
-          index: isNumber(candidate?.index) ? candidate.index : index,
-        }))
-      : [];
-
-    const normalized: GeminiResponse = {
-      candidates,
-      promptFeedback: response.promptFeedback,
-    };
-
-    const usage = response.usageMetadata;
-    if (usage) {
-      const usageMetadata: NonNullable<GeminiResponse['usageMetadata']> = {};
-      if (usage.promptTokenCount !== undefined) {
-        usageMetadata.promptTokenCount = usage.promptTokenCount;
-      }
-      if (usage.candidatesTokenCount !== undefined) {
-        usageMetadata.candidatesTokenCount = usage.candidatesTokenCount;
-      }
-      if (usage.totalTokenCount !== undefined) {
-        usageMetadata.totalTokenCount = usage.totalTokenCount;
-      }
-      if (usage.promptTokensDetails !== undefined) {
-        usageMetadata.promptTokensDetails = usage.promptTokensDetails;
-      }
-      if (usage.candidatesTokensDetails !== undefined) {
-        usageMetadata.candidatesTokensDetails = usage.candidatesTokensDetails;
-      }
-      if (usage.trafficType !== undefined) {
-        usageMetadata.trafficType = usage.trafficType;
-      }
-      if (!isEmpty(usageMetadata)) {
-        normalized.usageMetadata = usageMetadata;
-      }
-    }
-
-    return normalized;
+    return sanitizeGeminiResponse(response);
   }
 
   async handleChatCompletions(
@@ -1630,20 +1560,33 @@ export class ProxyService extends BaseProxyService {
   }
 
   private toInternalGeminiRequest(request: GeminiRequest): GeminiInternalRequest['request'] {
-    return {
+    const internalRequest: GeminiInternalRequest['request'] = {
       contents: request.contents,
-      generationConfig: request.generationConfig,
-      // Forwarded verbatim: without this the `/v1beta` passthrough silently
-      // strips tool declarations, so the model can never call a tool.
-      tools: request.tools,
-      systemInstruction: request.systemInstruction
-        ? {
-            parts: request.systemInstruction.parts
-              .filter((part): part is { text: string } => isString(part.text))
-              .map((part) => ({ text: part.text })),
-          }
-        : undefined,
     };
+
+    if (request.generationConfig) {
+      internalRequest.generationConfig = request.generationConfig;
+    }
+    if (request.tools) {
+      internalRequest.tools = request.tools;
+    }
+    if (request.toolConfig) {
+      internalRequest.toolConfig = request.toolConfig;
+    }
+    if (request.safetySettings) {
+      internalRequest.safetySettings = request.safetySettings;
+    }
+
+    if (request.systemInstruction) {
+      const textParts = (request.systemInstruction.parts ?? [])
+        .filter((part): part is { text: string } => isString(part.text) && part.text.length > 0)
+        .map((part) => ({ text: part.text }));
+      if (textParts.length > 0) {
+        internalRequest.systemInstruction = { parts: textParts };
+      }
+    }
+
+    return internalRequest;
   }
 
   // Convert OpenAI request format to Claude/Anthropic format

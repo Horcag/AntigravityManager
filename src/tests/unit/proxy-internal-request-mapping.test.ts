@@ -39,6 +39,27 @@ describe('toInternalGeminiRequest', () => {
     expect(internal.tools).toEqual(tools);
   });
 
+  it('forwards toolConfig and safetySettings verbatim', () => {
+    const toolConfig = {
+      functionCallingConfig: {
+        mode: 'ANY',
+        allowedFunctionNames: ['get_weather'],
+      },
+    };
+    const safetySettings = [
+      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_LOW_AND_ABOVE' },
+    ];
+
+    const internal = toInternalRequest({
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      toolConfig,
+      safetySettings,
+    } as any);
+
+    expect(internal.toolConfig).toEqual(toolConfig);
+    expect(internal.safetySettings).toEqual(safetySettings);
+  });
+
   it('leaves tools undefined when the caller sent none', () => {
     const internal = toInternalRequest({
       contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
@@ -57,5 +78,14 @@ describe('toInternalGeminiRequest', () => {
     expect(internal.contents).toEqual([{ role: 'user', parts: [{ text: 'hi' }] }]);
     expect(internal.generationConfig).toEqual({ temperature: 0.25, maxOutputTokens: 64 });
     expect(internal.systemInstruction).toEqual({ parts: [{ text: 'be brief' }] });
+  });
+
+  it('omits systemInstruction when no valid text parts exist', () => {
+    const internal = toInternalRequest({
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      systemInstruction: { parts: [{ inlineData: { mimeType: 'image/png', data: 'abc' } } as any] },
+    } as GeminiRequest);
+
+    expect(internal.systemInstruction).toBeUndefined();
   });
 });
