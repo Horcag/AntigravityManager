@@ -2080,34 +2080,53 @@ describe('ProxyService Protocol Parity Fixtures', () => {
     expect(output).toContain('data: [DONE]');
   });
 
-  it('fails a Chat Completions stream on malformed function arguments without emitting same-part text', async () => {
-    const service = new TestableProxyService();
-    const stream = new EventEmitter();
-    const observable = (service as any).processStreamResponse(stream, 'gpt-4o-mini');
-    const chunks: string[] = [];
-    const outcome = await new Promise<{ completed: boolean; error?: Error }>((resolve) => {
-      observable.subscribe({
-        next: (chunk: string) => chunks.push(chunk),
-        error: (error: unknown) =>
-          resolve({
-            completed: false,
-            error: error instanceof Error ? error : new Error(String(error)),
-          }),
-        complete: () => resolve({ completed: true }),
-      });
-      stream.emit(
-        'data',
-        Buffer.from(
-          'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":[],"name":"invalid"},"text":"partial"}]}}]}\n',
-        ),
+  it.each([
+    ['Chat Completions', undefined],
+    ['legacy Completions', { variant: 'text', includeUsage: false }],
+  ])(
+    'fails a %s stream on malformed function arguments without emitting later text or [DONE]',
+    async (_variant, streamOptions) => {
+      const service = new TestableProxyService();
+      const stream = new EventEmitter();
+      const observable = (service as any).processStreamResponse(
+        stream,
+        'gpt-4o-mini',
+        undefined,
+        streamOptions,
       );
-    });
+      const chunks: string[] = [];
+      const outcome = await new Promise<{ completed: boolean; error?: Error }>((resolve) => {
+        observable.subscribe({
+          next: (chunk: string) => chunks.push(chunk),
+          error: (error: unknown) =>
+            resolve({
+              completed: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            }),
+          complete: () => resolve({ completed: true }),
+        });
+        stream.emit(
+          'data',
+          Buffer.from(
+            'data: {"candidates":[{"content":{"parts":[{"functionCall":{"args":[],"name":"invalid"},"text":"partial"}]}}]}\n',
+          ),
+        );
+        stream.emit(
+          'data',
+          Buffer.from(
+            'data: {"candidates":[{"content":{"parts":[{"text":"later text"}]},"finishReason":"STOP"}]}\n',
+          ),
+        );
+        stream.emit('end');
+      });
 
-    expect(outcome.completed).toBe(false);
-    expect(outcome.error?.message).toContain('functionCall.args');
-    expect(chunks.join('')).not.toContain('partial');
-    expect(chunks.join('')).not.toContain('[DONE]');
-  });
+      expect(outcome.completed).toBe(false);
+      expect(outcome.error?.message).toContain('functionCall.args');
+      expect(chunks.join('')).not.toContain('partial');
+      expect(chunks.join('')).not.toContain('later text');
+      expect(chunks.join('')).not.toContain('[DONE]');
+    },
+  );
 
   it('prepends legacy Cloud Code metadata only when explicitly enabled', async () => {
     setServerConfig(

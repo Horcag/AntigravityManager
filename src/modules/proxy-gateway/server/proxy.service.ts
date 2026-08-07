@@ -1886,12 +1886,22 @@ export class ProxyService {
 
         {
           const candidate = json?.candidates?.[0];
-          const parts = Array.isArray(candidate?.content?.parts)
-            ? candidate.content.parts.flatMap((part: unknown) => {
-                const normalizedPart = this.normalizeGeminiPart(part);
-                return normalizedPart ? [normalizedPart] : [];
-              })
-            : [];
+          let parts: InternalGeminiPart[] = [];
+          try {
+            parts = Array.isArray(candidate?.content?.parts)
+              ? candidate.content.parts.flatMap((part: unknown) => {
+                  const normalizedPart = this.normalizeGeminiPart(part);
+                  return normalizedPart ? [normalizedPart] : [];
+                })
+              : [];
+          } catch (error) {
+            failStream(
+              error instanceof Error
+                ? error
+                : new Error('Malformed Gemini function call arguments'),
+            );
+            return;
+          }
           groundingMetadata = this.mergeGroundingMetadata(
             groundingMetadata,
             candidate?.groundingMetadata,
