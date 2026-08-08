@@ -25,6 +25,10 @@ import {
   resumeObservableUpstream,
 } from '../../common/stream-backpressure';
 import { createModelRouteHeaders, getModelRouteMetadata } from '../../common/model-route-metadata';
+import {
+  createUpstreamResponseHeaders,
+  getUpstreamResponseMetadata,
+} from '../../common/upstream-response-metadata';
 import { resolveCountTokensContents } from '../shared/services/count-tokens.service';
 
 type GeminiModelMetadata = {
@@ -171,7 +175,10 @@ export class GeminiController {
 
       if (action === 'generateContent') {
         const result = await this.proxyService.handleGeminiGenerateContent(model, body);
-        this.applyResponseHeaders(res, createModelRouteHeaders(getModelRouteMetadata(result)));
+        this.applyResponseHeaders(res, {
+          ...createModelRouteHeaders(getModelRouteMetadata(result)),
+          ...createUpstreamResponseHeaders(getUpstreamResponseMetadata(result)),
+        });
         res.status(HttpStatus.OK).send(result);
         return;
       }

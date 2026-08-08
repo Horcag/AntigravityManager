@@ -33,6 +33,7 @@ describe('decodeInternalSseData', () => {
         modelVersion: 'gemini-3-flash',
         responseId: 'xmJrapmCPdC5vdIP1t_bwA8',
       },
+      envelope: JSON.parse(raw),
     });
   });
 
@@ -46,7 +47,7 @@ describe('decodeInternalSseData', () => {
 
     const result = decodeInternalSseData(JSON.stringify(bare));
 
-    expect(result).toEqual({ kind: 'response', response: bare });
+    expect(result).toEqual({ kind: 'response', response: bare, envelope: bare });
   });
 
   it('does not double-unwrap a payload carrying both response and top-level candidates', () => {
@@ -59,7 +60,7 @@ describe('decodeInternalSseData', () => {
 
     const result = decodeInternalSseData(JSON.stringify(payload));
 
-    expect(result).toEqual({ kind: 'response', response: payload });
+    expect(result).toEqual({ kind: 'response', response: payload, envelope: payload });
   });
 
   it('keeps valid response metadata when a chunk has no candidates', () => {
@@ -72,6 +73,7 @@ describe('decodeInternalSseData', () => {
     expect(decodeInternalSseData(JSON.stringify(payload))).toEqual({
       kind: 'response',
       response: payload,
+      envelope: payload,
     });
   });
 
@@ -241,6 +243,34 @@ describe('createGeminiSseObservable', () => {
       'Empty response stream (2 malformed frame(s) skipped)',
     );
     expect(diagnostics).toEqual([{ skippedFrames: 2 }]);
+  });
+
+  it('surfaces the v1internal envelope fields as stream diagnostics', async () => {
+    const streamContent =
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}]},"traceId":"trace-1","remainingCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"500"}]}\n\n' +
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"b"}]}}]},"traceId":"trace-2","consumedCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"3"}],"remainingCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"497"}]}\n\n';
+
+    const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
+
+    const chunks = await lastValueFrom(
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).pipe(toArray()),
+    );
+
+    expect(chunks).toHaveLength(2);
+    expect(JSON.parse(chunks[1].replace(/^data: /, '').trim())).not.toHaveProperty('traceId');
+    expect(diagnostics).toEqual([
+      {
+        skippedFrames: 0,
+        upstreamMetadata: {
+          traceId: 'trace-2',
+          consumedCredits: [{ creditType: 'GOOGLE_ONE_AI', creditAmount: '3' }],
+          remainingCredits: [{ creditType: 'GOOGLE_ONE_AI', creditAmount: '497' }],
+        },
+      },
+    ]);
   });
 
   it('destroys the exact upstream stream on unsubscribe', () => {

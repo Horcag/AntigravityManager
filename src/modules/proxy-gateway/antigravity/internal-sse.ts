@@ -5,6 +5,12 @@ export type InternalSseDecodeResult =
   | {
       kind: 'response';
       response: GeminiResponse;
+      /**
+       * The parsed top-level payload before unwrapping, so callers can read the `v1internal`
+       * envelope fields (`traceId`, `consumedCredits`, `remainingCredits`) that the bare response
+       * does not carry. Equals `response` for already-bare payloads.
+       */
+      envelope: Record<string, unknown>;
     }
   | {
       kind: 'ignored';
@@ -65,11 +71,13 @@ export function decodeInternalSseData(rawData: string): InternalSseDecodeResult 
     return {
       kind: 'response',
       response: envelope as GeminiResponse,
+      envelope: payload as Record<string, unknown>,
     };
   }
 
   return {
     kind: 'response',
     response: payload,
+    envelope: payload as Record<string, unknown>,
   };
 }

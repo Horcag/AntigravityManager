@@ -10,6 +10,7 @@ import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
 import { attachModelRouteMetadata } from '../../modules/proxy-gateway/server/common/model-route-metadata';
+import { attachUpstreamResponseMetadata } from '../../modules/proxy-gateway/server/common/upstream-response-metadata';
 import type { CatalogModelRoleIndex } from '../../modules/proxy-gateway/antigravity/ModelMapping';
 
 describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
@@ -152,6 +153,36 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     expect(res.headers['x-antigravity-resolved-model']).toBe('gemini-3-flash');
     expect(res.headers['x-antigravity-served-model']).toBe('gemini-3-flash-001');
     expect(res.headers['x-antigravity-fallback-policy']).toBe('none');
+  });
+
+  it('returns the upstream traceId as a correlation header', async () => {
+    mockProxyService.handleGeminiGenerateContent.mockResolvedValueOnce(
+      attachUpstreamResponseMetadata(
+        attachModelRouteMetadata(
+          { candidates: [], modelVersion: 'gemini-3-flash-001' },
+          {
+            requestedModel: 'models/gemini-3-flash',
+            resolvedModel: 'gemini-3-flash',
+            servedModel: 'gemini-3-flash-001',
+            routeSource: 'configured',
+          },
+        ),
+        { traceId: 'trace-abc123', remainingCredits: [] },
+      ),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:generateContent',
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-antigravity-trace-id']).toBe('trace-abc123');
+    expect(res.headers['x-antigravity-resolved-model']).toBe('gemini-3-flash');
+    expect(res.json()).not.toHaveProperty('traceId');
   });
 
   it('returns a Google-shaped unknown model error', async () => {

@@ -4,12 +4,21 @@ import { decodeInternalSseData } from '../../../antigravity/internal-sse';
 import { sanitizeGeminiResponse } from './gemini-wire';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 import { attachUpstreamBackpressure } from '../../common/stream-backpressure';
+import {
+  parseUpstreamResponseMetadata,
+  type UpstreamResponseMetadata,
+} from '../../common/upstream-response-metadata';
 
 const logger = new Logger('GeminiSseDecoder');
 
 export interface GeminiSseDiagnostics {
   /** Frames whose payload could not be decoded and were skipped. */
   skippedFrames: number;
+  /**
+   * Envelope fields from the last frame that carried them. The response headers are long gone by
+   * the time a stream ends, so this is the only place a streamed `traceId` can surface.
+   */
+  upstreamMetadata?: UpstreamResponseMetadata;
 }
 
 export interface GeminiSseObservableOptions {
@@ -46,6 +55,7 @@ export function createGeminiSseObservable(
       let streamEnded = false;
       let skippedFrames = 0;
       let diagnosticsReported = false;
+      let upstreamMetadata: UpstreamResponseMetadata | undefined;
       let idleTimer: NodeJS.Timeout | null = null;
 
       const reportDiagnostics = () => {
@@ -56,7 +66,7 @@ export function createGeminiSseObservable(
         if (skippedFrames > 0) {
           logger.warn(`Skipped ${skippedFrames} malformed Gemini SSE frame(s) on this stream.`);
         }
-        options.onDiagnostics?.({ skippedFrames });
+        options.onDiagnostics?.({ skippedFrames, upstreamMetadata });
       };
 
       const clearIdleTimer = () => {
@@ -124,6 +134,9 @@ export function createGeminiSseObservable(
 
         if (decoded.kind === 'response') {
           hasEmittedData = true;
+          // Credits and traceId arrive per frame; the last frame that carries them wins, matching
+          // how gemini-cli treats `remainingCredits` as the current balance.
+          upstreamMetadata = parseUpstreamResponseMetadata(decoded.envelope) ?? upstreamMetadata;
           const sanitized = sanitizeGeminiResponse(decoded.response);
           subscriber.next(`data: ${JSON.stringify(sanitized)}\n\n`);
         }

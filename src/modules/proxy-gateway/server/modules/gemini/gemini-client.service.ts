@@ -17,6 +17,10 @@ import {
 } from './explicit-context-cache.store';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 import { extractGoogleErrorDetails } from '../../common/google-error-details';
+import {
+  attachUpstreamResponseMetadata,
+  parseUpstreamResponseMetadata,
+} from '../../common/upstream-response-metadata';
 import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
 
 interface PreparedInternalRequest {
@@ -154,10 +158,15 @@ export class GeminiClient {
       deadlineAt,
     );
     const payload = response.data;
-    if (isObjectLike(payload) && 'response' in payload) {
-      return (payload as { response: GeminiResponse }).response;
-    }
-    return payload as GeminiResponse;
+    const metadata = parseUpstreamResponseMetadata(payload);
+    const unwrapped =
+      isObjectLike(payload) && 'response' in payload
+        ? (payload as { response: GeminiResponse }).response
+        : (payload as GeminiResponse);
+
+    return metadata && isObjectLike(unwrapped)
+      ? attachUpstreamResponseMetadata(unwrapped, metadata)
+      : unwrapped;
   }
 
   /**

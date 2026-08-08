@@ -12,7 +12,14 @@ import {
 } from './modules/shared/services/count-tokens.service';
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
-import { createGeminiSseObservable } from './modules/gemini/gemini-sse-decoder';
+import {
+  createGeminiSseObservable,
+  type GeminiSseDiagnostics,
+} from './modules/gemini/gemini-sse-decoder';
+import {
+  attachUpstreamResponseMetadata,
+  getUpstreamResponseMetadata,
+} from './common/upstream-response-metadata';
 import { sanitizeGeminiResponse } from './modules/gemini/gemini-wire';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
 import { transformResponse } from '../antigravity/ClaudeResponseMapper';
@@ -567,10 +574,11 @@ export class ProxyService extends BaseProxyService {
         );
 
         this.markUpstreamSuccess(token.id, effectiveTargetModel);
-        const normalizedResponse = this.normalizeGeminiGenerateResponse({
-          ...response,
-          modelVersion: response.modelVersion ?? effectiveTargetModel,
-        });
+        const normalizedResponse = this.normalizeGeminiGenerateResponse(
+          token.id,
+          response,
+          effectiveTargetModel,
+        );
         return this.attachRouteMetadata(
           normalizedResponse,
           model,
@@ -603,10 +611,11 @@ export class ProxyService extends BaseProxyService {
               deadlineAt,
             );
             this.markUpstreamSuccess(token.id, effectiveTargetModel);
-            const normalizedResponse = this.normalizeGeminiGenerateResponse({
-              ...response,
-              modelVersion: response.modelVersion ?? effectiveTargetModel,
-            });
+            const normalizedResponse = this.normalizeGeminiGenerateResponse(
+              token.id,
+              response,
+              effectiveTargetModel,
+            );
             return this.attachRouteMetadata(
               normalizedResponse,
               model,
@@ -688,7 +697,7 @@ export class ProxyService extends BaseProxyService {
         );
         this.markUpstreamSuccess(token.id, effectiveTargetModel);
         return this.attachRouteMetadata(
-          this.passthroughSseStream(stream),
+          this.passthroughSseStream(stream, token.id),
           model,
           targetModel,
           effectiveTargetModel,
@@ -718,7 +727,7 @@ export class ProxyService extends BaseProxyService {
             );
             this.markUpstreamSuccess(token.id, effectiveTargetModel);
             return this.attachRouteMetadata(
-              this.passthroughSseStream(stream),
+              this.passthroughSseStream(stream, token.id),
               model,
               targetModel,
               effectiveTargetModel,
@@ -741,8 +750,36 @@ export class ProxyService extends BaseProxyService {
     throw lastError || new Error('Gemini stream request failed after retries');
   }
 
-  private passthroughSseStream(upstreamStream: NodeJS.ReadableStream): Observable<string> {
-    return createGeminiSseObservable(upstreamStream);
+  private passthroughSseStream(
+    upstreamStream: NodeJS.ReadableStream,
+    accountId?: string,
+  ): Observable<string> {
+    return createGeminiSseObservable(upstreamStream, undefined, {
+      onDiagnostics: (diagnostics) => this.recordGeminiStreamDiagnostics(accountId, diagnostics),
+    });
+  }
+
+  /**
+   * The response headers are already on the wire by the time a stream ends, so the streamed
+   * `traceId` goes to the log instead and the credit fields go where quota lives.
+   */
+  private recordGeminiStreamDiagnostics(
+    accountId: string | undefined,
+    diagnostics: GeminiSseDiagnostics,
+  ): void {
+    const upstreamMetadata = diagnostics.upstreamMetadata;
+    if (!upstreamMetadata) {
+      return;
+    }
+
+    if (accountId) {
+      this.accountLeaseService.recordUpstreamCredits(accountId, upstreamMetadata);
+    }
+    if (upstreamMetadata.traceId) {
+      this.logger.debug(
+        `Gemini stream upstream traceId=${upstreamMetadata.traceId}, skippedFrames=${diagnostics.skippedFrames}`,
+      );
+    }
   }
 
   private normalizeGeminiModel(model: string): string {
@@ -777,8 +814,27 @@ export class ProxyService extends BaseProxyService {
     return internalRequest;
   }
 
-  private normalizeGeminiGenerateResponse(response: GeminiResponse): GeminiResponse {
-    return sanitizeGeminiResponse(response);
+  /**
+   * Strips transport metadata from the wire payload but keeps the `v1internal` envelope fields on
+   * the carrier, so the controller can still emit `traceId` and the account's credit balance stays
+   * current between quota refreshes.
+   */
+  private normalizeGeminiGenerateResponse(
+    accountId: string,
+    response: GeminiResponse,
+    fallbackModelVersion: string,
+  ): GeminiResponse {
+    const upstreamMetadata = getUpstreamResponseMetadata(response);
+    const normalized = sanitizeGeminiResponse({
+      ...response,
+      modelVersion: response.modelVersion ?? fallbackModelVersion,
+    });
+    if (!upstreamMetadata) {
+      return normalized;
+    }
+
+    this.accountLeaseService.recordUpstreamCredits(accountId, upstreamMetadata);
+    return attachUpstreamResponseMetadata(normalized, upstreamMetadata);
   }
 
   async handleChatCompletions(
