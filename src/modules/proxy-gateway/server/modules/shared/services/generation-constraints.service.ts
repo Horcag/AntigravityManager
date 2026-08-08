@@ -41,13 +41,15 @@ export class GenerationConstraintsService {
       if (registered.thinkingBudget === 0) {
         delete generationConfig.thinkingConfig;
       } else {
-        generationConfig.thinkingConfig = {
-          includeThoughts: registered.includeThoughts,
-          thinkingBudget: Math.min(
-            registered.thinkingBudget,
-            Math.max(0, generationConfig.maxOutputTokens - 1),
-          ),
-        };
+        if (generationConfig.thinkingConfig) {
+          generationConfig.thinkingConfig = {
+            includeThoughts: registered.includeThoughts,
+            thinkingBudget: Math.min(
+              registered.thinkingBudget,
+              Math.max(0, generationConfig.maxOutputTokens - 1),
+            ),
+          };
+        }
       }
       return;
     }

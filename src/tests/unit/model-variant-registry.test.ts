@@ -196,17 +196,8 @@ describe('resolveModelVariant', () => {
     ]);
   });
 
-  it('uses the registered Claude fallback budget when the client omits one', () => {
-    expect(resolveModelVariant({ model: 'claude-sonnet-4-6' })).toEqual({
-      canonicalModel: 'claude-sonnet-4-6',
-      model: 'claude-sonnet-4-6',
-      tier: 'high',
-      thinkingBudget: 1024,
-      maxOutputTokens: 64000,
-      includeThoughts: true,
-      preserveClientBudget: true,
-      supportsTools: true,
-    });
+  it('does not register a Claude fallback for Sonnet now that explicit sonnet variants are removed', () => {
+    expect(resolveModelVariant({ model: 'claude-sonnet-4-6' })).toBeNull();
   });
 
   it('rebinds all registered parameters when account availability forces a different tier', () => {
