@@ -108,36 +108,49 @@ export function resolveCompletionModelFlags(
 }
 
 /**
- * Ids withheld without provider evidence, as a last resort.
+ * Ids withheld without provider evidence, as a last resort. Empty since
+ * kanban-40 r6, and kept as a mechanism for an id the rule cannot read.
  *
- * 2026-08-08 (live, 0.19.17-local1, kanban-37): the provider's discovery
- * response lists these next to real chat models, but chat_20706/chat_23310
- * answer 400 "Request contains an invalid argument." to every /v1/messages and
- * /v1/chat/completions call, and the tab_* ids answer 200 while being the IDE's
- * internal tab-completion functions.
+ * Why it existed: the parsed discovery response carried no discriminator. The
+ * provider lists its editor-internal ids next to real chat models, and the only
+ * thing separating them was behaviour someone had to go and observe — 2026-08-08
+ * (live, 0.19.17-local1, kanban-37): chat_20706/chat_23310 answer 400 "Request
+ * contains an invalid argument." to every /v1/messages and /v1/chat/completions
+ * call, and the tab_* ids answer 200 while being the IDE's internal
+ * tab-completion functions. So the four ids were listed here by hand.
  *
- * chat_20706 and tab_flash_lite_preview were removed from this table in
- * kanban-40 r4: both were probed individually and both carry every
- * {@link COMPLETION_MODEL_FLAGS} marker, so the rule now withholds them with a
- * stated reason. The two that remain were never probed individually, so there
- * is no measurement saying the rule reaches them:
- *  - chat_23310 -> shares the 400 behaviour of chat_20706, flags unmeasured.
- *  - tab_jump_flash_lite_preview -> shares the tab-completion behaviour of
- *    tab_flash_lite_preview, flags unmeasured.
- * When a probe shows either one carries the markers, delete it here; the rule
- * already covers it and the entry is then dead weight.
+ * What did not work: a rule over the provider's role arrays. kanban-40 shipped
+ * one and reverted it — it hid `gemini-3-flash`, `gemini-3.1-flash-lite` and
+ * `gemini-3.1-flash-image`, all real chat models (published 19 -> 16 live).
+ * `agentModelSorts` is the model picker's grouping, 11 of 24 advertised ids, and
+ * role membership is not exclusive, so "in a tool role and absent from the agent
+ * list" does not mean "not a chat model". That rule MUST NOT be rebuilt; see
+ * {@link resolveCatalogWithholdReason} for the measurement that refutes it.
  *
- * DO NOT replace this table with a rule over the provider's role arrays. That
- * was tried in kanban-40 and reverted: see {@link resolveCatalogWithholdReason}
- * for the live measurement that refutes it.
+ * What works: the editor-family markers on the id's own `ModelDetails`
+ * ({@link COMPLETION_MODEL_FLAGS}). Verified live on 0.19.28-local1 (2026-08-08,
+ * kanban-40 r6; published 19 | discovered 23):
+ *
+ *  | id                          | flags | roles   |
+ *  | --------------------------- | ----- | ------- |
+ *  | chat_20706                  |     3 | ["tab"] |
+ *  | chat_23310                  |     3 | ["tab"] |
+ *  | tab_flash_lite_preview      |     3 | []      |
+ *  | tab_jump_flash_lite_preview |     3 | []      |
+ *
+ * Every id this table ever held carries all three markers, including the two
+ * that had never been probed individually, so the rule reaches all four and the
+ * entries were dead weight. The condition this comment used to state is met:
+ * deleting an entry requires seeing `reason: 'completion_model'` in live
+ * diagnostics, not a passing unit test.
+ *
+ * Add an id here only when the rule cannot read it: with the date, the observed
+ * behaviour, and delete it again once the markers show up in live diagnostics.
  *
  * Withheld ids stay visible, unfiltered, in GET /v1/model-routes so it stays
  * evident the provider advertised them.
  */
-export const NON_CHAT_CATALOG_MODEL_IDS: ReadonlySet<string> = new Set([
-  'chat_23310',
-  'tab_jump_flash_lite_preview',
-]);
+export const NON_CHAT_CATALOG_MODEL_IDS: ReadonlySet<string> = new Set<string>([]);
 
 export function isNonChatCatalogModelId(modelId: string): boolean {
   return NON_CHAT_CATALOG_MODEL_IDS.has(modelId.trim().toLowerCase());
@@ -173,7 +186,7 @@ export interface UnpublishedCatalogModelId {
    * `completion_model`: the provider's own `ModelDetails` marks the id as part
    * of the editor completion loop ({@link COMPLETION_MODEL_FLAGS}).
    * `override`: no provider evidence, withheld by the dated
-   * {@link NON_CHAT_CATALOG_MODEL_IDS} table.
+   * {@link NON_CHAT_CATALOG_MODEL_IDS} table, which is empty today.
    */
   reason: 'completion_model' | 'override';
   /**
@@ -192,8 +205,9 @@ export interface UnpublishedCatalogModelId {
  * Why an advertised id is kept out of the published catalog, or undefined when
  * it is publishable. Two reasons, in order: the id's own `ModelDetails` carries
  * an editor-family marker ({@link COMPLETION_MODEL_FLAGS}), or the dated
- * {@link NON_CHAT_CATALOG_MODEL_IDS} table still lists it. An id with no marker
- * and no table entry is published even when it carries no scalar flags at all —
+ * {@link NON_CHAT_CATALOG_MODEL_IDS} table lists it — which no id does today,
+ * the markers reach every id that table ever held. An id with no marker and no
+ * table entry is published even when it carries no scalar flags at all —
  * `gemini-3.1-flash-image` is exactly that, and it is a real model.
  *
  * Role membership MUST NOT withhold; it is reported as corroboration only.

@@ -6,6 +6,7 @@ import {
   getPublishedCatalogModelIds,
   getUnpublishedCatalogModelIds,
   isNonChatCatalogModelId,
+  NON_CHAT_CATALOG_MODEL_IDS,
   resolveCatalogWithholdReason,
   resolveCompletionModelFlags,
 } from '@/modules/proxy-gateway/antigravity/ModelMapping';
@@ -15,6 +16,20 @@ const ALL_COMPLETION_FLAGS: CompletionModelFlag[] = [
   'supportsCumulativeContext',
   'supportsEstimateTokenCounter',
 ];
+
+/**
+ * The table ships empty, so the escape hatch it exists for is only observable
+ * with an entry put there for the duration of one test.
+ */
+function withOverrideEntry(modelId: string, run: () => void): void {
+  const table = NON_CHAT_CATALOG_MODEL_IDS as Set<string>;
+  table.add(modelId);
+  try {
+    run();
+  } finally {
+    table.delete(modelId);
+  }
+}
 
 function roleIndex(overrides: Partial<CatalogModelRoleIndex> = {}): CatalogModelRoleIndex {
   return {
@@ -78,14 +93,33 @@ describe('getPublishedCatalogModelIds', () => {
     ]);
   });
 
-  it('still drops the unprobed ids the dated table names', () => {
+  it('withholds the last two table ids on the markers measured live on them', () => {
+    // 0.19.28-local1: both carry all three, which is why the table is empty.
+    const index = roleIndex({
+      completionFlags: new Map([
+        ['chat_23310', ALL_COMPLETION_FLAGS],
+        ['tab_jump_flash_lite_preview', ALL_COMPLETION_FLAGS],
+      ]),
+    });
     const discovered = ['gemini-3-flash', 'chat_23310', 'tab_jump_flash_lite_preview'];
 
-    expect(getPublishedCatalogModelIds({}, discovered)).toEqual(['gemini-3-flash']);
+    expect(getPublishedCatalogModelIds({}, discovered, index)).toEqual(['gemini-3-flash']);
   });
 
-  it('is case-insensitive and does not affect the raw routing engine list', () => {
-    expect(isNonChatCatalogModelId('Chat_23310')).toBe(true);
+  it('publishes those same ids when no marker reaches them', () => {
+    // The emptied table withholds nothing on its own.
+    const discovered = ['gemini-3-flash', 'chat_23310', 'tab_jump_flash_lite_preview'];
+
+    expect(getPublishedCatalogModelIds({}, discovered)).toEqual([
+      'chat_23310',
+      'gemini-3-flash',
+      'tab_jump_flash_lite_preview',
+    ]);
+  });
+
+  it('ships an empty table and does not affect the raw routing engine list', () => {
+    expect(NON_CHAT_CATALOG_MODEL_IDS.size).toBe(0);
+    expect(isNonChatCatalogModelId('Chat_23310')).toBe(false);
     expect(isNonChatCatalogModelId('gemini-3-flash')).toBe(false);
 
     expect(getAllDynamicModels({}, ['chat_23310', 'gemini-3-flash'])).toEqual([
@@ -95,12 +129,17 @@ describe('getPublishedCatalogModelIds', () => {
   });
 
   it('still applies configured aliases on top of the filtered discovery list', () => {
+    const index = roleIndex({
+      completionFlags: new Map([['chat_23310', ALL_COMPLETION_FLAGS]]),
+    });
+
     expect(
       getPublishedCatalogModelIds(
         {
           'custom-fast': 'gemini-3.1-flash-lite',
         },
         ['chat_23310', 'gemini-3-flash'],
+        index,
       ),
     ).toEqual(['custom-fast', 'gemini-3-flash']);
   });
@@ -236,11 +275,30 @@ describe('getUnpublishedCatalogModelIds', () => {
     ]);
   });
 
-  it('names the dated table for an id no marker classifies', () => {
+  it('reports nothing for an id no marker classifies, now the table is empty', () => {
     const index = roleIndex({ chatModelIds: new Set(['gemini-3-flash']) });
 
-    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'chat_23310'], index)).toEqual([
-      { id: 'chat_23310', reason: 'override', flags: [], roles: [] },
-    ]);
+    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'chat_23310'], index)).toEqual([]);
+  });
+
+  it('still names the table for an injected id, case-insensitively', () => {
+    // The escape hatch for an id the marker rule cannot read: emptying the
+    // table must not silently delete it.
+    const index = roleIndex({ chatModelIds: new Set(['gemini-3-flash']) });
+
+    withOverrideEntry('probe_pending_id', () => {
+      expect(isNonChatCatalogModelId('Probe_Pending_Id')).toBe(true);
+      expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'probe_pending_id'], index)).toEqual([
+        { id: 'probe_pending_id', reason: 'override', flags: [], roles: [] },
+      ]);
+      expect(
+        getPublishedCatalogModelIds({}, ['gemini-3-flash', 'probe_pending_id'], index),
+      ).toEqual(['gemini-3-flash']);
+    });
+
+    expect(isNonChatCatalogModelId('probe_pending_id')).toBe(false);
+    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'probe_pending_id'], index)).toEqual(
+      [],
+    );
   });
 });
