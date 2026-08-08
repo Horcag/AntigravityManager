@@ -1,8 +1,21 @@
+import { Logger } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { decodeInternalSseData } from '../../../antigravity/internal-sse';
 import { sanitizeGeminiResponse } from './gemini-wire';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 import { attachUpstreamBackpressure } from '../../common/stream-backpressure';
+
+const logger = new Logger('GeminiSseDecoder');
+
+export interface GeminiSseDiagnostics {
+  /** Frames whose payload could not be decoded and were skipped. */
+  skippedFrames: number;
+}
+
+export interface GeminiSseObservableOptions {
+  /** Invoked once when the stream finishes, successfully or not. */
+  onDiagnostics?: (diagnostics: GeminiSseDiagnostics) => void;
+}
 
 /**
  * Creates an Observable that incrementally decodes an upstream UTF-8 byte stream into bare Gemini SSE events (`data: <json>\n\n`).
@@ -15,13 +28,15 @@ import { attachUpstreamBackpressure } from '../../common/stream-backpressure';
  * - Ignoring comment lines starting with `:` and irrelevant SSE fields (`event:`, `id:`, etc.)
  * - Unwrapping `v1internal` wrapped `{ response: ... }` payloads and bare payloads via `decodeInternalSseData`
  * - Sanitizing response fields (`sanitizeGeminiResponse`)
- * - Emitting a deterministic error if malformed non-empty data is encountered
+ * - Skipping (and counting) malformed frames rather than aborting: the SSE handshake has already
+ *   been answered by this point, so failing here costs the whole response with no chance to retry
  * - Empty-stream error if no valid response was emitted before completion
  * - Cleaning up and calling `.destroy()` on the upstream stream upon unsubscribe or idle timeout
  */
 export function createGeminiSseObservable(
   upstreamStream: NodeJS.ReadableStream,
   idleTimeoutMs = 300000,
+  options: GeminiSseObservableOptions = {},
 ): Observable<string> {
   return attachUpstreamBackpressure(
     new Observable<string>((subscriber) => {
@@ -29,7 +44,20 @@ export function createGeminiSseObservable(
       let buffer = '';
       let hasEmittedData = false;
       let streamEnded = false;
+      let skippedFrames = 0;
+      let diagnosticsReported = false;
       let idleTimer: NodeJS.Timeout | null = null;
+
+      const reportDiagnostics = () => {
+        if (diagnosticsReported) {
+          return;
+        }
+        diagnosticsReported = true;
+        if (skippedFrames > 0) {
+          logger.warn(`Skipped ${skippedFrames} malformed Gemini SSE frame(s) on this stream.`);
+        }
+        options.onDiagnostics?.({ skippedFrames });
+      };
 
       const clearIdleTimer = () => {
         if (idleTimer) {
@@ -61,7 +89,7 @@ export function createGeminiSseObservable(
 
       resetIdleTimer();
 
-      const processEventBlock = (block: string): boolean => {
+      const processEventBlock = (block: string): void => {
         const lines = block.split(/\r?\n/);
         const dataLines: string[] = [];
 
@@ -78,35 +106,27 @@ export function createGeminiSseObservable(
         }
 
         if (dataLines.length === 0) {
-          return true;
+          return;
         }
 
         const combinedData = dataLines.join('\n');
         const decoded = decodeInternalSseData(combinedData);
 
         if (decoded.kind === 'ignored') {
-          return true;
+          return;
         }
 
         if (decoded.kind === 'invalid') {
-          destroyUpstream();
-          subscriber.error(
-            new UpstreamRequestError({
-              message: 'Stream parse error: invalid Gemini SSE payload',
-              status: 502,
-            }),
-          );
-          return false;
+          // Deliberately logged without the payload, which may carry user content.
+          skippedFrames += 1;
+          return;
         }
 
         if (decoded.kind === 'response') {
           hasEmittedData = true;
           const sanitized = sanitizeGeminiResponse(decoded.response);
           subscriber.next(`data: ${JSON.stringify(sanitized)}\n\n`);
-          return true;
         }
-
-        return true;
       };
 
       const onData = (chunk: Buffer | string) => {
@@ -120,16 +140,14 @@ export function createGeminiSseObservable(
 
         for (const block of blocks) {
           if (block.trim().length > 0) {
-            const ok = processEventBlock(block);
-            if (!ok) {
-              return;
-            }
+            processEventBlock(block);
           }
         }
       };
 
       const onError = (err: unknown) => {
         destroyUpstream();
+        reportDiagnostics();
         if (!subscriber.closed) {
           subscriber.error(err);
         }
@@ -147,17 +165,22 @@ export function createGeminiSseObservable(
           const remainingBlocks = buffer.split(/\r?\n\r?\n/);
           for (const block of remainingBlocks) {
             if (block.trim().length > 0) {
-              const ok = processEventBlock(block);
-              if (!ok) {
-                return;
-              }
+              processEventBlock(block);
             }
           }
         }
 
+        reportDiagnostics();
+
         if (!hasEmittedData) {
           if (!subscriber.closed) {
-            subscriber.error(new Error('Empty response stream'));
+            subscriber.error(
+              new Error(
+                skippedFrames > 0
+                  ? `Empty response stream (${skippedFrames} malformed frame(s) skipped)`
+                  : 'Empty response stream',
+              ),
+            );
           }
           return;
         }
@@ -185,6 +208,7 @@ export function createGeminiSseObservable(
       upstreamStream.on('close', onClose);
 
       return () => {
+        reportDiagnostics();
         upstreamStream.removeListener('data', onData);
         upstreamStream.removeListener('error', onError);
         upstreamStream.removeListener('end', onEnd);

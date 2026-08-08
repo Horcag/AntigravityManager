@@ -4,7 +4,10 @@ import { lastValueFrom, toArray } from 'rxjs';
 
 import { decodeInternalSseData } from '@/modules/proxy-gateway/antigravity/internal-sse';
 import { UpstreamRequestError } from '@/modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
-import { createGeminiSseObservable } from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
+import {
+  createGeminiSseObservable,
+  type GeminiSseDiagnostics,
+} from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
 import { sanitizeGeminiResponse } from '@/modules/proxy-gateway/server/modules/gemini/gemini-wire';
 
 describe('decodeInternalSseData', () => {
@@ -194,36 +197,50 @@ describe('createGeminiSseObservable', () => {
     expect(candidate.customField).toBe(42);
   });
 
-  it('emits error on malformed JSON after a valid event', async () => {
+  it('skips a malformed frame and still completes the response', async () => {
     const streamContent =
       'data: {"response":{"candidates":[{"content":{"parts":[{"text":"valid"}]}}]}}\n\n' +
-      'data: {malformed json\n\n';
+      'data: {malformed json\n\n' +
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"after"}]}}]}}\n\n';
 
     const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
 
-    let emittedChunks = 0;
+    const chunks = await lastValueFrom(
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).pipe(toArray()),
+    );
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toContain('valid');
+    expect(chunks[1]).toContain('after');
+    expect(diagnostics).toEqual([{ skippedFrames: 1 }]);
+  });
+
+  it('fails only when every frame was malformed, reporting the skipped count', async () => {
+    const upstreamStream = Readable.from([
+      Buffer.from('data: {malformed json\n\ndata: also not json\n\n'),
+    ]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
     let caughtError: unknown = null;
 
-    try {
-      await new Promise<void>((resolve, reject) => {
-        createGeminiSseObservable(upstreamStream).subscribe({
-          next: () => {
-            emittedChunks++;
-          },
-          error: (err) => {
-            caughtError = err;
-            reject(err);
-          },
-          complete: () => resolve(),
-        });
+    await new Promise<void>((resolve) => {
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).subscribe({
+        error: (error) => {
+          caughtError = error;
+          resolve();
+        },
+        complete: () => resolve(),
       });
-    } catch {
-      // Expected rejection
-    }
+    });
 
-    expect(emittedChunks).toBe(1);
-    expect(caughtError).toBeDefined();
-    expect((caughtError as Error).message).toContain('Stream parse error');
+    expect((caughtError as Error).message).toBe(
+      'Empty response stream (2 malformed frame(s) skipped)',
+    );
+    expect(diagnostics).toEqual([{ skippedFrames: 2 }]);
   });
 
   it('destroys the exact upstream stream on unsubscribe', () => {
