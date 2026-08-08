@@ -658,6 +658,64 @@ const fr = {
       recent_misses_last_seen: 'Vu pour la dernière fois {{time}}',
       create_miss_alias: 'Créer un alias depuis cet élément',
       clear_misses: 'Effacer les éléments non trouvés',
+      target_placeholder: 'Choisissez un modèle canonique',
+      issue_empty_alias: "L'alias est vide. Cette ligne n'est pas enregistrée tant qu'il manque.",
+      issue_empty_target:
+        "La cible est vide. Cette ligne n'est pas enregistrée tant qu'aucun modèle canonique n'est choisi.",
+      issue_duplicate_alias:
+        'Cet alias est déjà utilisé par une autre ligne. Les alias sont comparés sans tenir compte de la casse.',
+      issue_shadows_canonical_model:
+        'Cet alias correspond à un vrai ID de modèle du catalogue actuel et le masquerait.',
+      presets_title: 'Packs prédéfinis',
+      presets_description:
+        'Créez les alias que les clients codent en dur, tous pointant vers une cible que vous choisissez. Chaque alias devient une ligne ordinaire, modifiable et supprimable.',
+      presets_target: 'Cible du pack',
+      presets_target_placeholder: 'Choisissez un modèle cible',
+      presets_pack_openai: 'OpenAI',
+      presets_pack_anthropic: 'Anthropic',
+      presets_pack_gemini: 'Gemini',
+      presets_preview_title: 'Appliquer le pack {{pack}}',
+      presets_preview_description:
+        'Les nouveaux alias pointeront vers {{target}}. Les alias existants restent inchangés.',
+      presets_preview_additions: 'Seront ajoutés',
+      presets_preview_conflicts: 'Existent déjà, inchangés',
+      presets_preview_nothing: 'Tous les alias de ce pack existent déjà. Rien ne sera ajouté.',
+      presets_cancel: 'Annuler',
+      presets_apply: 'Ajouter les alias',
+      transfer_title: 'Import et export',
+      transfer_description:
+        'Écrivez les lignes d’alias dans un fichier JSON, ou fusionnez un fichier existant. Seuls l’alias, la cible et l’état activé sont écrits — jamais la clé API, les identifiants de compte ou les ports.',
+      transfer_export: 'Exporter les alias',
+      transfer_exported: '{{count}} alias exporté(s)',
+      transfer_import: 'Importer des alias',
+      transfer_read_failed: 'Le fichier n’a pas pu être lu. Rien n’a été modifié.',
+      transfer_preview_title: 'Import depuis {{file}}',
+      transfer_preview_description:
+        'Le fichier est fusionné : les nouveaux alias sont ajoutés, ceux qui existent déjà restent inchangés.',
+      transfer_preview_additions: 'Sera ajouté',
+      transfer_preview_nothing: 'Rien ne sera ajouté depuis ce fichier.',
+      transfer_preview_collisions: 'Existe déjà, laissé inchangé',
+      transfer_preview_rejections: 'Rejeté, non importé',
+      transfer_preview_warnings: 'Ajouté avec un avertissement',
+      transfer_preview_entry: 'Entrée {{entry}} ({{alias}})',
+      transfer_cancel: 'Annuler',
+      transfer_apply: 'Ajouter les alias',
+      transfer_applied:
+        '{{added}} alias ajouté(s), {{skipped}} existaient déjà, {{rejected}} rejeté(s)',
+      transfer_envelope_invalid_json: 'Ce fichier n’est pas du JSON valide. Rien n’a été modifié.',
+      transfer_envelope_not_an_object:
+        'Ce fichier n’est pas un objet d’export d’alias. Rien n’a été modifié.',
+      transfer_envelope_unknown_format:
+        'Ce fichier n’a pas été produit par l’export du mappage de modèles. Rien n’a été modifié.',
+      transfer_envelope_unsupported_version:
+        'Ce fichier utilise une version d’export que cette build ne sait pas lire. Rien n’a été modifié.',
+      transfer_envelope_aliases_not_an_array:
+        'Le champ « aliases » de ce fichier n’est pas une liste. Rien n’a été modifié.',
+      transfer_reject_entry_not_an_object: 'Cette entrée n’est pas un objet.',
+      transfer_reject_alias_not_a_string: 'Le champ « alias » est absent ou n’est pas du texte.',
+      transfer_reject_target_not_a_string: 'Le champ « target » est absent ou n’est pas du texte.',
+      transfer_reject_enabled_not_a_boolean: 'Le champ « enabled » ne vaut ni true ni false.',
+      presets_applied: '{{added}} alias ajouté(s), {{skipped}} déjà existant(s)',
       maps_to: 'Mappe vers',
       restore: 'Restaurer les valeurs par defaut',
       empty: 'Aucun alias configuré. Aucune substitution cachée.',

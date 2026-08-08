@@ -628,6 +628,64 @@ const vi = {
       recent_misses_last_seen: 'Lần cuối thấy: {{time}}',
       create_miss_alias: 'Tạo bí danh từ lần khớp thất bại',
       clear_misses: 'Xóa nhật ký không khớp',
+      target_placeholder: 'Chọn model chuẩn',
+      issue_empty_alias: 'Bí danh đang trống. Hàng này chưa được lưu cho tới khi bạn đặt tên.',
+      issue_empty_target:
+        'Đích đang trống. Hàng này chưa được lưu cho tới khi bạn chọn model chuẩn.',
+      issue_duplicate_alias:
+        'Bí danh này đã được một hàng khác dùng. Bí danh được so sánh không phân biệt hoa thường.',
+      issue_shadows_canonical_model:
+        'Bí danh này trùng với một ID model thật trong danh mục hiện tại và sẽ che khuất model đó.',
+      presets_title: 'Gói bí danh dựng sẵn',
+      presets_description:
+        'Tạo nhanh các bí danh mà client thường gắn cứng, tất cả trỏ tới một đích do bạn chọn. Mỗi bí danh là một hàng bình thường, có thể sửa hoặc xóa.',
+      presets_target: 'Đích của gói',
+      presets_target_placeholder: 'Chọn model đích',
+      presets_pack_openai: 'OpenAI',
+      presets_pack_anthropic: 'Anthropic',
+      presets_pack_gemini: 'Gemini',
+      presets_preview_title: 'Áp dụng gói {{pack}}',
+      presets_preview_description:
+        'Bí danh mới sẽ trỏ tới {{target}}. Các bí danh đã có được giữ nguyên.',
+      presets_preview_additions: 'Sẽ được thêm',
+      presets_preview_conflicts: 'Đã tồn tại, giữ nguyên',
+      presets_preview_nothing: 'Mọi bí danh trong gói này đều đã tồn tại. Sẽ không thêm gì cả.',
+      presets_cancel: 'Hủy',
+      presets_apply: 'Thêm bí danh',
+      transfer_title: 'Nhập và xuất',
+      transfer_description:
+        'Ghi các dòng bí danh ra tệp JSON, hoặc hợp nhất một tệp trở lại. Tệp chỉ chứa bí danh, đích và trạng thái bật — không bao giờ chứa khóa API, ID tài khoản hay cổng.',
+      transfer_export: 'Xuất bí danh',
+      transfer_exported: 'Đã xuất {{count}} bí danh',
+      transfer_import: 'Nhập bí danh',
+      transfer_read_failed: 'Không đọc được tệp. Không có gì thay đổi.',
+      transfer_preview_title: 'Nhập từ {{file}}',
+      transfer_preview_description:
+        'Tệp được hợp nhất: bí danh mới được thêm, bí danh đã có được giữ nguyên.',
+      transfer_preview_additions: 'Sẽ được thêm',
+      transfer_preview_nothing: 'Không có gì trong tệp này được thêm.',
+      transfer_preview_collisions: 'Đã tồn tại, giữ nguyên',
+      transfer_preview_rejections: 'Bị từ chối, không nhập',
+      transfer_preview_warnings: 'Đã thêm kèm cảnh báo',
+      transfer_preview_entry: 'Mục {{entry}} ({{alias}})',
+      transfer_cancel: 'Hủy',
+      transfer_apply: 'Thêm bí danh',
+      transfer_applied:
+        'Đã thêm {{added}} bí danh, {{skipped}} đã tồn tại, {{rejected}} bị từ chối',
+      transfer_envelope_invalid_json: 'Tệp này không phải JSON hợp lệ. Không có gì thay đổi.',
+      transfer_envelope_not_an_object:
+        'Tệp này không phải đối tượng xuất bí danh. Không có gì thay đổi.',
+      transfer_envelope_unknown_format:
+        'Tệp này không do chức năng xuất của Ánh xạ mô hình tạo ra. Không có gì thay đổi.',
+      transfer_envelope_unsupported_version:
+        'Tệp này dùng phiên bản xuất mà bản dựng này không đọc được. Không có gì thay đổi.',
+      transfer_envelope_aliases_not_an_array:
+        'Trường “aliases” trong tệp này không phải danh sách. Không có gì thay đổi.',
+      transfer_reject_entry_not_an_object: 'Mục này không phải đối tượng.',
+      transfer_reject_alias_not_a_string: 'Trường “alias” bị thiếu hoặc không phải văn bản.',
+      transfer_reject_target_not_a_string: 'Trường “target” bị thiếu hoặc không phải văn bản.',
+      transfer_reject_enabled_not_a_boolean: 'Trường “enabled” không phải true hoặc false.',
+      presets_applied: 'Đã thêm {{added}} bí danh, {{skipped}} bí danh đã tồn tại',
       maps_to: 'Ánh xạ tới',
       restore: 'Khôi phục mặc định',
       empty: 'Chưa cấu hình bí danh. Không có thay thế mô hình ẩn.',

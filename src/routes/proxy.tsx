@@ -6,7 +6,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import { ipc } from '@/ipc/manager';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
 import { useAppConfig } from '@/modules/config/hooks/useAppConfig';
 import { useCloudAccounts } from '@/modules/cloud-account/hooks/useCloudAccounts';
 import { ProxyConfig } from '@/modules/config/types';
@@ -21,6 +21,24 @@ import {
   buildProxyExampleModels,
   isImageProxyExampleModel,
 } from '@/modules/proxy-gateway/components/proxy-example-models';
+import {
+  MODEL_ALIAS_PRESETS,
+  applyModelAliasPresetPlan,
+  planModelAliasPreset,
+  type ModelAliasPreset,
+  type ModelAliasPresetPlan,
+} from '@/modules/proxy-gateway/components/model-alias-presets';
+import {
+  hasBlockingModelAliasIssues,
+  validateModelAliasRows,
+} from '@/modules/proxy-gateway/components/model-alias-validation';
+import {
+  applyModelAliasImportPlan,
+  planModelAliasImport,
+  serializeModelAliasExport,
+  type ModelAliasImportPlan,
+  type ModelAliasImportRejection,
+} from '@/modules/proxy-gateway/components/model-alias-transfer';
 import {
   Select,
   SelectContent,
@@ -44,6 +62,8 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Download,
+  Upload,
 } from 'lucide-react';
 import {
   Dialog,
@@ -141,6 +161,11 @@ function ProxyPage() {
   // Local state for proxyConfig editing
   const [proxyConfig, setProxyConfig] = useState<ProxyConfig | undefined>(undefined);
   const [isRegenerateDialogOpen, setIsRegenerateDialogOpen] = useState(false);
+  const [presetTarget, setPresetTarget] = useState('');
+  const [presetPlan, setPresetPlan] = useState<ModelAliasPresetPlan | null>(null);
+  const [aliasImportPlan, setAliasImportPlan] = useState<ModelAliasImportPlan | null>(null);
+  const [aliasImportFileName, setAliasImportFileName] = useState('');
+  const aliasImportInputRef = useRef<HTMLInputElement>(null);
   const [showKey, setShowKey] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
@@ -245,6 +270,15 @@ function ProxyPage() {
     return [...targetIds].sort((left, right) => left.localeCompare(right));
   }, [exampleModels, modelRouteDiagnostics.data?.canonical_models, proxyConfig?.model_aliases]);
 
+  const modelAliasValidations = useMemo(
+    () =>
+      validateModelAliasRows(
+        proxyConfig?.model_aliases ?? [],
+        modelRouteDiagnostics.data?.canonical_models ?? [],
+      ),
+    [proxyConfig?.model_aliases, modelRouteDiagnostics.data?.canonical_models],
+  );
+
   const updateModelAlias = (
     index: number,
     patch: Partial<ProxyConfig['model_aliases'][number]>,
@@ -256,10 +290,12 @@ function ProxyPage() {
       routeIndex === index ? { ...route, ...patch } : route,
     );
     const nextConfig = { ...proxyConfig, model_aliases: modelAliases };
-    if (modelAliases.every((route) => route.alias.trim() && route.target.trim())) {
-      updateProxyConfig(nextConfig);
-    } else {
+    // A row with a blocking issue stays in local state so the edit is not lost, and the row itself
+    // says why it is not persisted yet.
+    if (hasBlockingModelAliasIssues(validateModelAliasRows(modelAliases))) {
       setProxyConfig(nextConfig);
+    } else {
+      updateProxyConfig(nextConfig);
     }
   };
 
@@ -295,6 +331,105 @@ function ProxyPage() {
     });
   };
 
+  const previewModelAliasPreset = (preset: ModelAliasPreset) => {
+    if (!proxyConfig || !presetTarget.trim()) {
+      return;
+    }
+    setPresetPlan(planModelAliasPreset(preset, presetTarget, proxyConfig.model_aliases));
+  };
+
+  const applyPresetPlan = () => {
+    if (!proxyConfig || !presetPlan || presetPlan.additions.length === 0) {
+      return;
+    }
+    updateProxyConfig({
+      ...proxyConfig,
+      model_aliases: applyModelAliasPresetPlan(proxyConfig.model_aliases, presetPlan),
+    });
+    toast({
+      title: t('proxy.mapping.presets_applied', {
+        added: presetPlan.additions.length,
+        skipped: presetPlan.conflicts.length,
+      }),
+    });
+    setPresetPlan(null);
+  };
+
+  const exportModelAliases = () => {
+    if (!proxyConfig || proxyConfig.model_aliases.length === 0) {
+      return;
+    }
+    const exportedAt = new Date().toISOString();
+    const blob = new Blob([serializeModelAliasExport(proxyConfig.model_aliases, exportedAt)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `model-aliases-${exportedAt.slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      toast({
+        title: t('proxy.mapping.transfer_exported', { count: proxyConfig.model_aliases.length }),
+      });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const selectAliasImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Cleared so picking the same file twice still fires a change event.
+    event.target.value = '';
+    if (!proxyConfig || !file) {
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch (error) {
+      toast({
+        title: t('proxy.mapping.transfer_read_failed'),
+        description: error instanceof Error ? error.message : undefined,
+        variant: 'destructive',
+      });
+      return;
+    }
+    setAliasImportFileName(file.name);
+    setAliasImportPlan(
+      planModelAliasImport(
+        text,
+        proxyConfig.model_aliases,
+        modelRouteDiagnostics.data?.canonical_models ?? [],
+      ),
+    );
+  };
+
+  const applyAliasImportPlan = () => {
+    if (!proxyConfig || !aliasImportPlan || aliasImportPlan.additions.length === 0) {
+      return;
+    }
+    updateProxyConfig({
+      ...proxyConfig,
+      model_aliases: applyModelAliasImportPlan(proxyConfig.model_aliases, aliasImportPlan),
+    });
+    toast({
+      title: t('proxy.mapping.transfer_applied', {
+        added: aliasImportPlan.additions.length,
+        skipped: aliasImportPlan.collisions.length,
+        rejected: aliasImportPlan.rejections.length,
+      }),
+    });
+    setAliasImportPlan(null);
+  };
+
+  const aliasImportRejectionLabel = (rejection: ModelAliasImportRejection) =>
+    rejection.kind === 'structure'
+      ? t(`proxy.mapping.transfer_reject_${rejection.code}`)
+      : t(`proxy.mapping.issue_${rejection.code}`);
+
   const createAliasFromMiss = (model: string) => {
     if (!proxyConfig) {
       return;
@@ -307,6 +442,10 @@ function ProxyPage() {
       proxyConfig.model_aliases.map((route) => route.alias.trim().toLowerCase()),
     );
     if (existingAliases.has(normalizedAlias)) {
+      toast({
+        title: t('proxy.mapping.issue_duplicate_alias'),
+        variant: 'destructive',
+      });
       return;
     }
     updateProxyConfig({
@@ -678,19 +817,35 @@ print(response.choices[0].message.content)`;
                 const availableAccounts =
                   diagnostic?.accounts.filter((account) => account.status === 'available').length ??
                   0;
+                const validation = modelAliasValidations[index];
+                const issues = validation?.issues ?? [];
+                const aliasHasError = issues.some(
+                  (issue) =>
+                    issue.severity === 'error' &&
+                    (issue.code === 'empty_alias' || issue.code === 'duplicate_alias'),
+                );
+                const targetHasError = issues.some((issue) => issue.code === 'empty_target');
                 return (
-                  <div key={`${route.alias}-${index}`} className="rounded-lg border p-4">
+                  <div
+                    key={`${route.alias}-${index}`}
+                    className={
+                      validation?.hasError
+                        ? 'rounded-lg border border-red-400 p-4 dark:border-red-500'
+                        : 'rounded-lg border p-4'
+                    }
+                  >
                     <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
                       <div className="space-y-2">
                         <Label>{t('proxy.mapping.alias')}</Label>
                         <Input
                           value={route.alias}
                           placeholder="my-model"
+                          aria-invalid={aliasHasError}
                           onChange={(event) =>
                             updateModelAlias(index, { alias: event.target.value })
                           }
                           onBlur={() => {
-                            if (route.alias.trim() && route.target.trim()) {
+                            if (!hasBlockingModelAliasIssues(modelAliasValidations)) {
                               updateProxyConfig(proxyConfig);
                             }
                           }}
@@ -702,8 +857,8 @@ print(response.choices[0].message.content)`;
                           value={route.target}
                           onValueChange={(target) => updateModelAlias(index, { target })}
                         >
-                          <SelectTrigger className="w-full">
-                            <SelectValue />
+                          <SelectTrigger className="w-full" aria-invalid={targetHasError}>
+                            <SelectValue placeholder={t('proxy.mapping.target_placeholder')} />
                           </SelectTrigger>
                           <SelectContent>
                             {modelAliasTargets.map((target) => (
@@ -745,11 +900,102 @@ print(response.choices[0].message.content)`;
                       ) : null}
                       {diagnostic?.wildcard ? <span>· {t('proxy.mapping.wildcard')}</span> : null}
                     </div>
+                    {issues.length > 0 ? (
+                      <ul className="mt-2 space-y-1 text-xs" role="alert">
+                        {issues.map((issue) => (
+                          <li
+                            key={issue.code}
+                            className={
+                              issue.severity === 'error'
+                                ? 'text-red-600 dark:text-red-400'
+                                : 'text-amber-600 dark:text-amber-400'
+                            }
+                          >
+                            {t(`proxy.mapping.issue_${issue.code}`)}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </div>
                 );
               })}
             </div>
           )}
+
+          <div className="space-y-3 rounded-lg border p-4">
+            <div>
+              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {t('proxy.mapping.presets_title')}
+              </div>
+              <div className="text-xs text-gray-500">{t('proxy.mapping.presets_description')}</div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-2">
+                <Label>{t('proxy.mapping.presets_target')}</Label>
+                <Select value={presetTarget} onValueChange={setPresetTarget}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder={t('proxy.mapping.presets_target_placeholder')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelAliasTargets.map((target) => (
+                      <SelectItem key={target} value={target}>
+                        {target}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {MODEL_ALIAS_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.id}
+                    variant="outline"
+                    size="sm"
+                    disabled={!presetTarget || modelAliasTargets.length === 0}
+                    onClick={() => previewModelAliasPreset(preset)}
+                  >
+                    <Plus size={14} className="mr-2" />
+                    {t(`proxy.mapping.presets_pack_${preset.id}`)} ({preset.aliases.length})
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-3 rounded-lg border p-4">
+            <div>
+              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {t('proxy.mapping.transfer_title')}
+              </div>
+              <div className="text-xs text-gray-500">{t('proxy.mapping.transfer_description')}</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={proxyConfig.model_aliases.length === 0}
+                onClick={exportModelAliases}
+              >
+                <Download size={14} className="mr-2" />
+                {t('proxy.mapping.transfer_export')}
+              </Button>
+              <input
+                ref={aliasImportInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={selectAliasImportFile}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => aliasImportInputRef.current?.click()}
+              >
+                <Upload size={14} className="mr-2" />
+                {t('proxy.mapping.transfer_import')}
+              </Button>
+            </div>
+          </div>
 
           <div className="space-y-2">
             <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -857,6 +1103,188 @@ print(response.choices[0].message.content)`;
               </Button>
             </div>
           </div>
+
+          <Dialog
+            open={presetPlan !== null}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPresetPlan(null);
+              }
+            }}
+          >
+            <DialogContent>
+              {presetPlan ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>
+                      {t('proxy.mapping.presets_preview_title', {
+                        pack: t(`proxy.mapping.presets_pack_${presetPlan.presetId}`),
+                      })}
+                    </DialogTitle>
+                    <DialogDescription>
+                      {t('proxy.mapping.presets_preview_description', {
+                        target: presetPlan.target,
+                      })}
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4 text-sm">
+                    <div className="space-y-1">
+                      <div className="font-medium text-gray-800 dark:text-gray-100">
+                        {t('proxy.mapping.presets_preview_additions')} (
+                        {presetPlan.additions.length})
+                      </div>
+                      {presetPlan.additions.length > 0 ? (
+                        <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                          {presetPlan.additions.map((row) => (
+                            <li key={row.alias}>
+                              {row.alias} → {row.target}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-gray-500">
+                          {t('proxy.mapping.presets_preview_nothing')}
+                        </div>
+                      )}
+                    </div>
+                    {presetPlan.conflicts.length > 0 ? (
+                      <div className="space-y-1">
+                        <div className="font-medium text-gray-800 dark:text-gray-100">
+                          {t('proxy.mapping.presets_preview_conflicts')} (
+                          {presetPlan.conflicts.length})
+                        </div>
+                        <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                          {presetPlan.conflicts.map((conflict) => (
+                            <li key={conflict.alias}>
+                              {conflict.alias} → {conflict.existingTarget}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setPresetPlan(null)}>
+                      {t('proxy.mapping.presets_cancel')}
+                    </Button>
+                    <Button disabled={presetPlan.additions.length === 0} onClick={applyPresetPlan}>
+                      {t('proxy.mapping.presets_apply')}
+                    </Button>
+                  </DialogFooter>
+                </>
+              ) : null}
+            </DialogContent>
+          </Dialog>
+
+          <Dialog
+            open={aliasImportPlan !== null}
+            onOpenChange={(open) => {
+              if (!open) {
+                setAliasImportPlan(null);
+              }
+            }}
+          >
+            <DialogContent>
+              {aliasImportPlan ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>
+                      {t('proxy.mapping.transfer_preview_title', { file: aliasImportFileName })}
+                    </DialogTitle>
+                    <DialogDescription>
+                      {aliasImportPlan.envelopeError
+                        ? t(`proxy.mapping.transfer_envelope_${aliasImportPlan.envelopeError}`)
+                        : t('proxy.mapping.transfer_preview_description')}
+                    </DialogDescription>
+                  </DialogHeader>
+                  {aliasImportPlan.envelopeError ? null : (
+                    <div className="max-h-[50vh] space-y-4 overflow-y-auto text-sm">
+                      <div className="space-y-1">
+                        <div className="font-medium text-gray-800 dark:text-gray-100">
+                          {t('proxy.mapping.transfer_preview_additions')} (
+                          {aliasImportPlan.additions.length})
+                        </div>
+                        {aliasImportPlan.additions.length > 0 ? (
+                          <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                            {aliasImportPlan.additions.map((row) => (
+                              <li key={row.alias}>
+                                {row.alias} → {row.target}
+                                {row.enabled ? null : ` · ${t('proxy.mapping.disabled')}`}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-gray-500">
+                            {t('proxy.mapping.transfer_preview_nothing')}
+                          </div>
+                        )}
+                      </div>
+                      {aliasImportPlan.collisions.length > 0 ? (
+                        <div className="space-y-1">
+                          <div className="font-medium text-gray-800 dark:text-gray-100">
+                            {t('proxy.mapping.transfer_preview_collisions')} (
+                            {aliasImportPlan.collisions.length})
+                          </div>
+                          <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                            {aliasImportPlan.collisions.map((collision) => (
+                              <li key={collision.alias}>
+                                {collision.alias} → {collision.existingTarget}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {aliasImportPlan.rejections.length > 0 ? (
+                        <div className="space-y-1">
+                          <div className="font-medium text-gray-800 dark:text-gray-100">
+                            {t('proxy.mapping.transfer_preview_rejections')} (
+                            {aliasImportPlan.rejections.length})
+                          </div>
+                          <ul className="space-y-1 text-red-600 dark:text-red-400">
+                            {aliasImportPlan.rejections.map((rejection) => (
+                              <li key={`${rejection.entry}-${rejection.code}`}>
+                                {t('proxy.mapping.transfer_preview_entry', {
+                                  entry: rejection.entry,
+                                  alias: rejection.alias ?? '—',
+                                })}{' '}
+                                · {aliasImportRejectionLabel(rejection)}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {aliasImportPlan.warnings.length > 0 ? (
+                        <div className="space-y-1">
+                          <div className="font-medium text-gray-800 dark:text-gray-100">
+                            {t('proxy.mapping.transfer_preview_warnings')} (
+                            {aliasImportPlan.warnings.length})
+                          </div>
+                          <ul className="space-y-1 text-amber-600 dark:text-amber-400">
+                            {aliasImportPlan.warnings.map((warning) => (
+                              <li key={`${warning.entry}-${warning.code}`}>
+                                {warning.alias} · {t(`proxy.mapping.issue_${warning.code}`)}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setAliasImportPlan(null)}>
+                      {t('proxy.mapping.transfer_cancel')}
+                    </Button>
+                    <Button
+                      disabled={aliasImportPlan.additions.length === 0}
+                      onClick={applyAliasImportPlan}
+                    >
+                      {t('proxy.mapping.transfer_apply')}
+                    </Button>
+                  </DialogFooter>
+                </>
+              ) : null}
+            </DialogContent>
+          </Dialog>
         </CardContent>
       </Card>
 
