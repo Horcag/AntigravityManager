@@ -59,6 +59,7 @@ import {
   buildOpenAIUrlCitationAnnotations,
 } from '../antigravity/openai-web-search';
 import { OpenAIChatWebSearchStream } from './modules/openai/chat/openai-chat-web-search-stream';
+import { applyOpenAIJsonObjectFence } from './modules/openai/chat/openai-json-object-fence';
 import { convertOpenAIToolsToAnthropicTools } from './modules/openai/chat/openai-tool-conversion';
 import {
   extractCustomToolInput,
@@ -946,9 +947,24 @@ export class ProxyService extends BaseProxyService {
     return attachUpstreamResponseMetadata(normalized, upstreamMetadata);
   }
 
+  /**
+   * `response_format: {"type":"json_object"}` reaches upstream as
+   * `responseMimeType: "application/json"`, which still answers inside a
+   * markdown fence. The fence is removed on the way out, under the proof
+   * obligation documented in `openai-json-object-fence.ts`; every other request
+   * is returned exactly as generated.
+   */
   async handleChatCompletions(
     request: OpenAIChatRequest,
     outputProtocol: OpenAIOutputProtocol = 'chat-completions',
+  ): Promise<OpenAIChatResponse | Observable<string>> {
+    const result = await this.generateOpenAIChatCompletion(request, outputProtocol);
+    return applyOpenAIJsonObjectFence(request, result, outputProtocol);
+  }
+
+  private async generateOpenAIChatCompletion(
+    request: OpenAIChatRequest,
+    outputProtocol: OpenAIOutputProtocol,
   ): Promise<OpenAIChatResponse | Observable<string>> {
     const route = this.modelRoutingPolicy.resolveModelRoute(request.model);
     const appliedVariantRequest = applyOpenAIModelVariant({
