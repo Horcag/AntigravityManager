@@ -146,6 +146,40 @@ export class AccountLeaseModelPolicy {
     return { nonChatRoles, chatModelIds, hasChatRoleData, completionFlags };
   }
 
+  /**
+   * Lists the catalog ids the provider assigned to one non-chat surface, in the
+   * order the provider listed them.
+   *
+   * Surfaces such as web search and image generation are ordinary generate
+   * calls whose model id is drawn from the matching role array, so a caller
+   * that names no model can be routed to a real id instead of a guessed one.
+   * Order is the provider's: the first entry is the id the IDE itself reaches
+   * for. An empty list means no account reported the role, which callers must
+   * treat as "cannot serve" rather than as a licence to substitute.
+   */
+  getModelIdsForRole(role: CloudModelRoleId): string[] {
+    const modelIds: string[] = [];
+    for (const tokenData of this.options.getTokenCache().values()) {
+      const roleModelIds = tokenData.quota?.model_roles?.[role];
+      if (!Array.isArray(roleModelIds)) {
+        continue;
+      }
+
+      const catalogIdByProviderId = this.buildCatalogIdIndex(tokenData);
+      for (const modelId of roleModelIds) {
+        const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
+        if (!normalizedModelId) {
+          continue;
+        }
+        const catalogId = catalogIdByProviderId.get(normalizedModelId) ?? normalizedModelId;
+        if (!modelIds.includes(catalogId)) {
+          modelIds.push(catalogId);
+        }
+      }
+    }
+    return modelIds;
+  }
+
   /** Maps a token's raw provider model ids to the ids the catalog publishes. */
   private buildCatalogIdIndex(tokenData: AccountLeaseTokenData): Map<string, string> {
     const catalogIdByProviderId = new Map<string, string>();

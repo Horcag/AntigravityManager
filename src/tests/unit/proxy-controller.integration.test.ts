@@ -18,6 +18,18 @@ const generatedPng = Buffer.concat([
   Buffer.alloc(16),
 ]).toString('base64');
 
+/**
+ * Account lease reporting an `image_generation` role, which is what the image
+ * endpoints resolve their model from when the caller names none.
+ */
+function imageRoleLease() {
+  return {
+    getModelIdsForRole: vi.fn((role: string) =>
+      role === 'image_generation' ? ['gemini-3.1-flash-image'] : [],
+    ),
+  };
+}
+
 function createReplyMock() {
   const reply: Record<string, any> = {};
   reply.status = vi.fn(() => reply);
@@ -1414,7 +1426,11 @@ describe('ProxyController Integration', () => {
       }),
     };
     const imageQuotaRefresh = vi.fn().mockResolvedValue(undefined);
-    const controller = new ProxyController(proxyService as any, undefined, imageQuotaRefresh);
+    const controller = new ProxyController(
+      proxyService as any,
+      imageRoleLease() as any,
+      imageQuotaRefresh,
+    );
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1465,7 +1481,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
@@ -1523,7 +1539,7 @@ describe('ProxyController Integration', () => {
         choices: [{ message: { content: '![img](data:image/png;base64,QUJDRA==)' } }],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a dog' }, reply as any);
@@ -1558,7 +1574,11 @@ describe('ProxyController Integration', () => {
       }),
     };
     const imageQuotaRefresh = vi.fn().mockResolvedValue(undefined);
-    const controller = new ProxyController(proxyService as any, undefined, imageQuotaRefresh);
+    const controller = new ProxyController(
+      proxyService as any,
+      imageRoleLease() as any,
+      imageQuotaRefresh,
+    );
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1626,7 +1646,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a fox' }, reply as any);
@@ -1651,7 +1671,7 @@ describe('ProxyController Integration', () => {
         candidates: [],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1676,7 +1696,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
     const mainImage = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),

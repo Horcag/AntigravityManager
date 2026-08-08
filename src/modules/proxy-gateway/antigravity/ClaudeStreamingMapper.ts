@@ -1,4 +1,9 @@
-import { GeminiPart, Usage, UsageMetadata } from './types';
+import { GeminiPart, GroundingChunk, GroundingMetadata, Usage, UsageMetadata } from './types';
+import {
+  accumulateGroundingMetadata,
+  createGroundingAccumulator,
+  renderGroundingMarkdown,
+} from './grounding-citations';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
@@ -49,9 +54,10 @@ export class StreamingState {
   private latestResponseSignature: string | null = null;
   public trailingSignature: string | null = null;
 
-  // Web Search / Grounding buffers
+  // Web Search / Grounding buffers, filled by captureGrounding as frames arrive
   public webSearchQuery: string | null = null;
-  public groundingChunks: any[] | null = null;
+  public groundingChunks: GroundingChunk[] | null = null;
+  private readonly grounding = createGroundingAccumulator();
 
   private parseErrorCount: number = 0;
 
@@ -59,6 +65,24 @@ export class StreamingState {
     public readonly signatureState?: StreamingSignatureState,
     private readonly fallbackModel: string = '',
   ) {}
+
+  /**
+   * Records the grounding a streamed candidate carried.
+   *
+   * Web search grounding rides on the ordinary generate call, so citations
+   * arrive as `candidates[].groundingMetadata` on the SSE frames rather than as
+   * content parts. Without this the buffers above stay empty and the trailing
+   * source list `emitFinish` renders never has anything to render.
+   */
+  public captureGrounding(grounding: GroundingMetadata | undefined | null): void {
+    accumulateGroundingMetadata(this.grounding, grounding);
+    if (this.grounding.webSearchQueries.length > 0) {
+      this.webSearchQuery = this.grounding.webSearchQueries.join(', ');
+    }
+    if (this.grounding.groundingChunks.length > 0) {
+      this.groundingChunks = this.grounding.groundingChunks;
+    }
+  }
 
   public emit(eventType: string, data: any): string {
     return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -194,24 +218,14 @@ export class StreamingState {
       this.blockIndex++;
     }
 
-    // Process grounding (web search) -> convert to Markdown text block
-    let groundingText = '';
-    if (this.webSearchQuery) {
-      groundingText += `\n\n---\n**🔍 Searched for you:** ${this.webSearchQuery}`;
-    }
-    if (this.groundingChunks && this.groundingChunks.length > 0) {
-      const links: string[] = [];
-      this.groundingChunks.forEach((chunk, i) => {
-        if (chunk.web) {
-          const title = chunk.web.title || 'Web source';
-          const uri = chunk.web.uri || '#';
-          links.push(`[${i + 1}] [${title}](${uri})`);
-        }
-      });
-      if (links.length > 0) {
-        groundingText += `\n\n**🌐 Citations:**\n` + links.join('\n');
-      }
-    }
+    // Process grounding (web search) -> convert to Markdown text block.
+    // Inline `[n]` markers are deliberately not attempted here: the prose they
+    // annotate has already been streamed to the client by the time grounding
+    // arrives, so only the trailing source list can still be emitted.
+    const groundingText = renderGroundingMarkdown(
+      this.webSearchQuery ? [this.webSearchQuery] : null,
+      this.groundingChunks,
+    );
 
     if (groundingText) {
       chunks.push(

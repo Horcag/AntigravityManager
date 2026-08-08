@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
-import { CloudAccount } from '@/modules/cloud-account/types';
+import { CloudAccount, type CloudModelRoleId } from '@/modules/cloud-account/types';
 import { RateLimitTrackerService } from '../shared/services/rate-limit-tracker.service';
 import {
   ACCOUNT_LEASE_ACCOUNT_STORE,
@@ -438,6 +438,10 @@ export class AccountLeaseService implements OnModuleInit {
 
   getCatalogModelRoleIndex(): CatalogModelRoleIndex {
     return this.modelPolicy.getCatalogModelRoleIndex();
+  }
+
+  getModelIdsForRole(role: CloudModelRoleId): string[] {
+    return this.modelPolicy.getModelIdsForRole(role);
   }
 
   getModelCatalogStatus(model: string): ModelCatalogStatus {

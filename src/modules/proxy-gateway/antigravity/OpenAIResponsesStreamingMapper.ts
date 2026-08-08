@@ -6,6 +6,7 @@ import { resolveShellToolName } from './ShellToolName';
 import { splitNamespaceToolName } from './ToolNamespace';
 import type { OpenAIResponsesUsage } from './OpenAIUsageMapper';
 import { normalizeFunctionCallArgs } from './function-call-args';
+import { renderGroundingMarkdown } from './grounding-citations';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface GeminiResponsesStreamPart {
@@ -203,24 +204,10 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   public processGrounding(grounding: GeminiResponsesGroundingMetadata): string[] {
-    let groundingText = '';
-    if (grounding.webSearchQueries && grounding.webSearchQueries.length > 0) {
-      groundingText += `\n\n---\n**🔍 Searched for you:** ${grounding.webSearchQueries.join(', ')}`;
-    }
-
-    if (grounding.groundingChunks) {
-      const links = grounding.groundingChunks.flatMap((chunk, index) => {
-        if (!chunk.web) {
-          return [];
-        }
-        const title = chunk.web.title || 'Web source';
-        const uri = chunk.web.uri || '#';
-        return [`[${index + 1}] [${title}](${uri})`];
-      });
-      if (links.length > 0) {
-        groundingText += `\n\n**🌐 Citations:**\n${links.join('\n')}`;
-      }
-    }
+    const groundingText = renderGroundingMarkdown(
+      grounding.webSearchQueries,
+      grounding.groundingChunks,
+    );
 
     return groundingText ? this.processText(groundingText) : [];
   }

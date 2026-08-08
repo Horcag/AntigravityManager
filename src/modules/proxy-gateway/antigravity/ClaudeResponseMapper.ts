@@ -7,6 +7,7 @@ import {
   Usage,
   GroundingMetadata,
 } from './types';
+import { applyGroundingCitations, renderGroundingMarkdown } from './grounding-citations';
 import { decodeSignature } from './signature-utils';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { normalizeFunctionCallArgs } from './function-call-args';
@@ -190,32 +191,52 @@ class NonStreamingProcessor {
   }
 
   private processGrounding(grounding: GroundingMetadata) {
-    let groundingText = '';
+    // Inline `[n]` markers first: the answer text is complete here, so the
+    // byte offsets in `groundingSupports` still address it. They must be
+    // applied before the trailing block below is appended, or every offset
+    // past the end of the prose would be clamped onto the source list.
+    this.applyInlineCitations(grounding);
 
-    if (grounding.webSearchQueries && grounding.webSearchQueries.length > 0) {
-      groundingText += `\n\n---\n**🔍 Searched for you:** ${grounding.webSearchQueries.join(', ')}`;
-    }
-
-    if (grounding.groundingChunks) {
-      const links: string[] = [];
-      grounding.groundingChunks.forEach((chunk, index) => {
-        if (chunk.web) {
-          const title = chunk.web.title || 'Web source';
-          const uri = chunk.web.uri || '#';
-          links.push(`[${index + 1}] [${title}](${uri})`);
-        }
-      });
-
-      if (links.length > 0) {
-        groundingText += `\n\n**🌐 Citations:**\n` + links.join('\n');
-      }
-    }
+    const groundingText = renderGroundingMarkdown(
+      grounding.webSearchQueries,
+      grounding.groundingChunks,
+    );
 
     if (groundingText) {
       this.flushThinking();
       this.flushText();
       this.textBuilder += groundingText;
       this.flushText();
+    }
+  }
+
+  /**
+   * Splices the `[n]` markers `groundingSupports` describes into the answer.
+   *
+   * The grounded prose is normally still unflushed in `textBuilder`, which is
+   * exactly the string the offsets were computed against. When a function call
+   * or inline image forced an early flush, the last emitted text block holds it
+   * instead. If neither carries text there is nothing to annotate and the
+   * trailing source list alone is emitted, as before.
+   */
+  private applyInlineCitations(grounding: GroundingMetadata) {
+    const supports = grounding.groundingSupports;
+    const sourceCount = grounding.groundingChunks?.length ?? 0;
+    if (!supports?.length || sourceCount === 0) {
+      return;
+    }
+
+    if (this.textBuilder) {
+      this.textBuilder = applyGroundingCitations(this.textBuilder, supports, sourceCount);
+      return;
+    }
+
+    for (let i = this.contentBlocks.length - 1; i >= 0; i--) {
+      const block = this.contentBlocks[i];
+      if (block.type === 'text' && block.text) {
+        block.text = applyGroundingCitations(block.text, supports, sourceCount);
+        return;
+      }
     }
   }
 
