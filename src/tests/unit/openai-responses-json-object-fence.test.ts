@@ -8,9 +8,9 @@
 import { describe, expect, it } from 'vitest';
 import { lastValueFrom, Observable, of, toArray } from 'rxjs';
 
-import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
 import { OpenAIResponsesStreamingMapper } from '@/modules/proxy-gateway/antigravity/OpenAIResponsesStreamingMapper';
 import { applyOpenAIJsonObjectFence } from '@/modules/proxy-gateway/server/modules/openai/chat/openai-json-object-fence';
+import { prepareResponsesRequest } from '@/modules/proxy-gateway/server/modules/openai/responses/openai-responses-chat-request';
 import type { OpenAIChatRequest } from '@/modules/proxy-gateway/server/common/interfaces/request-interfaces';
 
 const JSON_OBJECT_REQUEST: OpenAIChatRequest = {
@@ -204,15 +204,16 @@ describe('/v1/responses json_object fence', () => {
   });
 
   it('reads the Responses spelling of the request', () => {
-    const controller = new ProxyController({} as never, {} as never);
-    const build: unknown = Reflect.get(controller, 'buildResponsesChatRequest');
-    if (typeof build !== 'function') {
-      throw new Error('buildResponsesChatRequest is unavailable');
-    }
-    const request = Reflect.apply(build, controller, [
+    // The fence gate keys off `response_format`, which only ever gets set by the
+    // Responses request builder translating `text.format`. Pinning that
+    // translation here is what makes the coupling break loudly instead of the
+    // fence quietly never engaging. The builder moved out of ProxyController into
+    // its own module in kanban #52; this asserts the same property at its new home.
+    const prepared = prepareResponsesRequest(
       { input: 'return json', model: 'gemini-3-flash', text: { format: { type: 'json_object' } } },
-    ]) as OpenAIChatRequest;
+      { get: () => undefined, set: () => undefined } as never,
+    );
 
-    expect(request.response_format).toEqual({ type: 'json_object' });
+    expect(prepared?.request.response_format).toEqual({ type: 'json_object' });
   });
 });
