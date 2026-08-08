@@ -192,4 +192,87 @@ describe('AccountLeaseModelPolicy', () => {
     expect(policy.getModelOutputLimitForAccount('acc-1', 'models/gemini-3-pro')).toBe(8192);
     expect(policy.getModelThinkingBudgetForAccount('acc-1', 'gemini-3-pro')).toBe(32768);
   });
+
+  it('projects provider model roles onto published catalog ids', () => {
+    const tokenCache = new Map([
+      [
+        'acc-1',
+        createToken({
+          quota: {
+            models: {
+              'gemini-3-flash-agent': {
+                percentage: 80,
+                resetTime: '',
+                display_name: 'Gemini 3.5 Flash (High)',
+              },
+              'MODELS/TAB_LITE': { percentage: 80, resetTime: '' },
+            },
+            model_roles: {
+              agent: ['gemini-3-flash-agent'],
+              tab: ['MODELS/TAB_LITE'],
+              commit_message: ['models/tab_lite', 'gemini-3-flash-agent'],
+            },
+          },
+        }),
+      ],
+    ]);
+    const { policy } = createPolicy(tokenCache);
+
+    const index = policy.getCatalogModelRoleIndex();
+
+    expect(index.hasChatRoleData).toBe(true);
+    expect(index.chatModelIds).toEqual(new Set(['gemini-3.5-flash-high']));
+    expect([...index.nonChatRoles]).toEqual([
+      ['tab_lite', ['commit_message', 'tab']],
+      ['gemini-3.5-flash-high', ['commit_message']],
+    ]);
+  });
+
+  it('reports no role information when the provider omitted the role arrays', () => {
+    const tokenCache = new Map([
+      [
+        'acc-1',
+        createToken({
+          quota: { models: { 'gemini-3-flash': { percentage: 80, resetTime: '' } } },
+        }),
+      ],
+    ]);
+    const { policy } = createPolicy(tokenCache);
+
+    const index = policy.getCatalogModelRoleIndex();
+
+    expect(index.hasChatRoleData).toBe(false);
+    expect(index.nonChatRoles.size).toBe(0);
+    expect(index.chatModelIds.size).toBe(0);
+  });
+
+  it('keeps a model publishable when any account offers it on the chat surface', () => {
+    const tokenCache = new Map([
+      [
+        'acc-1',
+        createToken({
+          quota: {
+            models: { 'gemini-3-flash': { percentage: 80, resetTime: '' } },
+            model_roles: { command: ['gemini-3-flash'] },
+          },
+        }),
+      ],
+      [
+        'acc-2',
+        createToken({
+          account_id: 'acc-2',
+          quota: {
+            models: { 'gemini-3-flash': { percentage: 80, resetTime: '' } },
+            model_roles: { agent: ['gemini-3-flash'] },
+          },
+        }),
+      ],
+    ]);
+    const { policy } = createPolicy(tokenCache);
+
+    const index = policy.getCatalogModelRoleIndex();
+
+    expect(index.chatModelIds.has('gemini-3-flash')).toBe(true);
+    expect(index.nonChatRoles.get('gemini-3-flash')).toEqual(['command']);
+  });
 });

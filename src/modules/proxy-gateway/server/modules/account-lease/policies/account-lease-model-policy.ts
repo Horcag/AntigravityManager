@@ -1,9 +1,19 @@
 import { isNumber } from 'lodash-es';
-import { getPublicModelIdForDisplayName } from '../../../../antigravity/ModelMapping';
+import type { CloudModelRoleId } from '@/modules/cloud-account/types';
+import {
+  type CatalogModelRoleIndex,
+  getPublicModelIdForDisplayName,
+} from '../../../../antigravity/ModelMapping';
 import {
   type AccountLeaseTokenData,
   normalizeModelId,
 } from '../interfaces/account-lease-token-types';
+
+/**
+ * `agent` is the provider's chat surface; every other role in
+ * `FetchAvailableModelsResponse` drives a non-chat IDE function.
+ */
+const CHAT_MODEL_ROLE: CloudModelRoleId = 'agent';
 
 interface AccountLeaseModelLogger {
   log(message: string): void;
@@ -26,24 +36,99 @@ export class AccountLeaseModelPolicy {
   getAllCollectedModels(): Set<string> {
     const allModels = new Set<string>();
     for (const tokenData of this.options.getTokenCache().values()) {
-      const describedModels = new Set<string>();
-      for (const [modelId, modelInfo] of Object.entries(tokenData.quota?.models ?? {})) {
-        const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
-        if (!normalizedModelId) {
-          continue;
-        }
-        describedModels.add(normalizedModelId);
-        allModels.add(getPublicModelIdForDisplayName(modelInfo.display_name) ?? normalizedModelId);
+      const catalogIdByProviderId = this.buildCatalogIdIndex(tokenData);
+      for (const catalogId of catalogIdByProviderId.values()) {
+        allModels.add(catalogId);
       }
 
       for (const modelId of Object.keys(tokenData.model_quotas ?? {})) {
         const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
-        if (normalizedModelId && !describedModels.has(normalizedModelId)) {
+        if (normalizedModelId && !catalogIdByProviderId.has(normalizedModelId)) {
           allModels.add(normalizedModelId);
         }
       }
     }
     return allModels;
+  }
+
+  /**
+   * Projects the provider's surface partitioning onto the catalog ids that
+   * {@link getAllCollectedModels} publishes, so the catalog filter can decide
+   * with provider facts instead of an id table.
+   *
+   * 1. Role ids arrive as raw provider ids, catalog ids may have been rewritten
+   *    to a public preset id, so each role id is translated the same way.
+   * 2. Roles are unioned across accounts: a model any account offers for chat
+   *    stays publishable even if another account only lists it for a tool role.
+   * 3. `hasChatRoleData` stays false when no account reported an `agent` role,
+   *    which is the signal that non-chat membership alone cannot be trusted.
+   */
+  getCatalogModelRoleIndex(): CatalogModelRoleIndex {
+    const nonChatRoles = new Map<string, string[]>();
+    const chatModelIds = new Set<string>();
+    let hasChatRoleData = false;
+
+    for (const tokenData of this.options.getTokenCache().values()) {
+      const modelRoles = tokenData.quota?.model_roles;
+      if (!modelRoles) {
+        continue;
+      }
+
+      const catalogIdByProviderId = this.buildCatalogIdIndex(tokenData);
+      for (const [role, modelIds] of Object.entries(modelRoles) as [
+        CloudModelRoleId,
+        string[] | undefined,
+      ][]) {
+        if (!Array.isArray(modelIds) || modelIds.length === 0) {
+          continue;
+        }
+
+        if (role === CHAT_MODEL_ROLE) {
+          hasChatRoleData = true;
+        }
+
+        for (const modelId of modelIds) {
+          const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
+          if (!normalizedModelId) {
+            continue;
+          }
+
+          const catalogId = catalogIdByProviderId.get(normalizedModelId) ?? normalizedModelId;
+          if (role === CHAT_MODEL_ROLE) {
+            chatModelIds.add(catalogId);
+            continue;
+          }
+
+          const roles = nonChatRoles.get(catalogId);
+          if (!roles) {
+            nonChatRoles.set(catalogId, [role]);
+            continue;
+          }
+          if (!roles.includes(role)) {
+            roles.push(role);
+            roles.sort();
+          }
+        }
+      }
+    }
+
+    return { nonChatRoles, chatModelIds, hasChatRoleData };
+  }
+
+  /** Maps a token's raw provider model ids to the ids the catalog publishes. */
+  private buildCatalogIdIndex(tokenData: AccountLeaseTokenData): Map<string, string> {
+    const catalogIdByProviderId = new Map<string, string>();
+    for (const [modelId, modelInfo] of Object.entries(tokenData.quota?.models ?? {})) {
+      const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
+      if (!normalizedModelId) {
+        continue;
+      }
+      catalogIdByProviderId.set(
+        normalizedModelId,
+        getPublicModelIdForDisplayName(modelInfo.display_name) ?? normalizedModelId,
+      );
+    }
+    return catalogIdByProviderId;
   }
 
   getAvailableModelsFromToken(tokenData: AccountLeaseTokenData): Set<string> {
