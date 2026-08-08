@@ -8,7 +8,7 @@ const pngData = Buffer.concat([
 ]).toString('base64');
 
 describe('Anthropic request mapper fidelity', () => {
-  it('forwards caller stop sequences instead of replacing them with proxy sentinels', () => {
+  it('keeps caller stop sequences off the wire so the fired one stays reportable', () => {
     const result = transformClaudeRequestIn(
       {
         model: 'gemini-3-flash',
@@ -21,7 +21,12 @@ describe('Anthropic request mapper fidelity', () => {
       'gemini-3-flash',
     );
 
-    expect(result.request.generationConfig?.stopSequences).toEqual(['CUSTOM_STOP', 'SECOND_STOP']);
+    // The provider strips the matched sequence and reports the same finish
+    // reason as a natural ending, so forwarding these would make
+    // `stop_reason: "stop_sequence"` unreportable. `ClaudeResponseMapper` cuts
+    // the answer instead. No proxy sentinel is substituted either.
+    expect(result.request.generationConfig?.stopSequences).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('CUSTOM_STOP');
   });
 
   it('preserves parallel tool calls and maps successful and failed results distinctly', () => {

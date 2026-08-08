@@ -364,7 +364,10 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     expect(resEmbed.json()).toEqual({
       error: {
         code: 501,
-        message: 'embedContent is not implemented by this provider',
+        // Names the transport as the reason: there is no embedding RPC to
+        // implement against, so this is not a "not yet" answer.
+        message:
+          'embedContent is unavailable on this transport: the Antigravity endpoint this proxy fronts exposes no embedding RPC, so no embedding can be produced for any model.',
         status: 'UNIMPLEMENTED',
       },
     });

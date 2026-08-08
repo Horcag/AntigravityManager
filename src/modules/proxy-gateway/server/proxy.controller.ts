@@ -101,6 +101,10 @@ import { ModelRoutingService } from './modules/shared/services/model-routing.ser
 import { ModelAvailabilityService } from './modules/shared/services/model-availability.service';
 import { ModelRouteError } from './common/exceptions/model-route-exception';
 import {
+  classifyUpstreamParameterRejection,
+  resolveOpenAIErrorType,
+} from './common/upstream-error-taxonomy';
+import {
   inheritUpstreamBackpressure,
   pauseObservableUpstream,
   resumeObservableUpstream,
@@ -1372,11 +1376,14 @@ export class ProxyController {
           res.raw.end();
           return;
         }
+        const status = this.resolveErrorHttpStatus(message, error);
+        const rejection = classifyUpstreamParameterRejection(status, message);
         res.raw.write(
           `data: ${JSON.stringify({
             error: {
               message,
-              type: 'server_error',
+              type: resolveOpenAIErrorType(status),
+              ...(rejection ? { param: rejection.param, code: rejection.code } : {}),
             },
           })}\n\n`,
         );
@@ -1787,11 +1794,13 @@ export class ProxyController {
       return;
     }
     const status = this.resolveErrorHttpStatus(message, error);
+    const rejection = classifyUpstreamParameterRejection(status, message);
     this.logProxyEndpointError(endpoint, status, message, error);
     res.status(status).send({
       error: {
         message,
-        type: 'server_error',
+        type: resolveOpenAIErrorType(status),
+        ...(rejection ? { param: rejection.param, code: rejection.code } : {}),
       },
     });
   }

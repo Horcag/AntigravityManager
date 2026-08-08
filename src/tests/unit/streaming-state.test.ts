@@ -172,7 +172,7 @@ describe('StreamingState', () => {
       expect(payload).toContain('"stop_reason":"tool_use"');
     });
 
-    it('balances the synthetic thinking block that carries a text signature', () => {
+    it('emits no thinking block for a text part that only carries a signature', () => {
       const processor = new PartProcessor(state);
       const signature = Buffer.from('opaque-signature').toString('base64');
       const payload = [
@@ -180,14 +180,14 @@ describe('StreamingState', () => {
         ...state.emitFinish('STOP'),
       ].join('');
 
-      expect(payload.match(/event: content_block_start/g)).toHaveLength(2);
-      expect(payload.match(/event: content_block_stop/g)).toHaveLength(2);
-      expect(payload).toContain('"index":0');
-      expect(payload).toContain('"index":1');
-      expect(payload).toContain('"type":"signature_delta","signature":"opaque-signature"');
+      expect(payload.match(/event: content_block_start/g)).toHaveLength(1);
+      expect(payload.match(/event: content_block_stop/g)).toHaveLength(1);
+      expect(payload).toContain('"content_block":{"type":"text","text":""}');
+      expect(payload).not.toContain('"type":"thinking"');
+      expect(payload).not.toContain('signature_delta');
     });
 
-    it('balances a trailing signature before the following function call', () => {
+    it('hands a banked signature to the following function call, not to a new block', () => {
       const processor = new PartProcessor(state);
       const signature = Buffer.from('trailing-signature').toString('base64');
       const payload = [
@@ -196,10 +196,11 @@ describe('StreamingState', () => {
         ...state.emitFinish('STOP'),
       ].join('');
 
-      expect(payload.match(/event: content_block_start/g)).toHaveLength(2);
-      expect(payload.match(/event: content_block_stop/g)).toHaveLength(2);
-      expect(payload).toContain('"type":"signature_delta","signature":"trailing-signature"');
+      expect(payload.match(/event: content_block_start/g)).toHaveLength(1);
+      expect(payload.match(/event: content_block_stop/g)).toHaveLength(1);
+      expect(payload).not.toContain('"type":"thinking"');
       expect(payload).toContain('"type":"tool_use","id":"toolu_1"');
+      expect(payload).toContain('"signature":"trailing-signature"');
     });
   });
 });

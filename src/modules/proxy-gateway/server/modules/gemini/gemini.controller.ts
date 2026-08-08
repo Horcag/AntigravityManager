@@ -20,6 +20,7 @@ import { GeminiRequest } from '../../common/interfaces/request-interfaces';
 import { getPublishedCatalogModelIds } from '../../../antigravity/ModelMapping';
 import { AccountLeaseService } from '../account-lease/account-lease.service';
 import { validateGeminiSystemInstruction, sanitizeUpstreamError } from './gemini-wire';
+import { EMBEDDINGS_UNAVAILABLE_REASON } from '../../common/unimplemented-route';
 import {
   pauseObservableUpstream,
   resumeObservableUpstream,
@@ -155,15 +156,24 @@ export class GeminiController {
       return;
     }
 
-    if (
-      action === 'embedContent' ||
-      action === 'batchEmbedContents' ||
-      action === 'batchGenerateContent'
-    ) {
+    if (action === 'embedContent' || action === 'batchEmbedContents') {
+      // Not "not yet implemented": there is no embedding RPC on this transport
+      // to implement against. See `unimplemented-route.ts`.
       res.status(HttpStatus.NOT_IMPLEMENTED).send({
         error: {
           code: HttpStatus.NOT_IMPLEMENTED,
-          message: `${action} is not implemented by this provider`,
+          message: `${action} ${EMBEDDINGS_UNAVAILABLE_REASON}.`,
+          status: 'UNIMPLEMENTED',
+        },
+      });
+      return;
+    }
+
+    if (action === 'batchGenerateContent') {
+      res.status(HttpStatus.NOT_IMPLEMENTED).send({
+        error: {
+          code: HttpStatus.NOT_IMPLEMENTED,
+          message: `${action} is not supported by this transport: the Antigravity endpoint this proxy fronts has no equivalent operation.`,
           status: 'UNIMPLEMENTED',
         },
       });

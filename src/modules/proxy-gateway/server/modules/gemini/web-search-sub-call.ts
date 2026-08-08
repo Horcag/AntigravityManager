@@ -127,7 +127,6 @@ export interface WebSearchSubCallParams {
   getRoleModelIds: () => readonly string[];
   projectId?: string;
   userAgent?: string;
-  sessionId?: string;
   /** Performs the unary `generateContent`, normally `GeminiClient.generateInternal`. */
   generate: (body: GeminiInternalRequest) => Promise<GeminiResponse>;
 }
@@ -164,7 +163,6 @@ export async function runWebSearchSubCall(
       model,
       projectId: params.projectId,
       userAgent: params.userAgent,
-      sessionId: params.sessionId,
     }),
   );
 

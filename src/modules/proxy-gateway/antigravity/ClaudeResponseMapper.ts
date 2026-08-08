@@ -18,6 +18,7 @@ import { toWebSearchResultSet, type WebSearchResultSet } from './web-search-resu
 import { decodeSignature } from './signature-utils';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { normalizeFunctionCallArgs } from './function-call-args';
+import { StopSequenceScanner } from './stop-sequences';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface ResponseSignatureState extends SignatureContext {
@@ -25,6 +26,11 @@ export interface ResponseSignatureState extends SignatureContext {
 }
 
 export interface ResponseMappingOptions {
+  /**
+   * The caller's `stop_sequences`. Enforced here rather than upstream so the
+   * sequence that fired can be named; see `stop-sequences.ts`.
+   */
+  stopSequences?: readonly string[];
   /**
    * The caller declared the `web_search_20250305` server tool, so grounding is
    * reported as Anthropic's search blocks and citations. Without it grounding
@@ -43,24 +49,40 @@ class NonStreamingProcessor {
   private textBuilder: string = '';
   private thinkingBuilder: string = '';
   private thinkingSignature: string | null = null;
-  private trailingSignature: string | null = null;
+  /**
+   * A `thoughtSignature` seen on a part that carries no thought text.
+   *
+   * It is held so the next block that may legally carry a signature — a real
+   * thinking block, or a `tool_use` — can adopt it. It is never materialised
+   * into a block of its own: an empty `thinking` string with a signature is not
+   * a valid Anthropic block, it appears after the text rather than before it,
+   * and a client echoing the turn back feeds the fabrication upstream.
+   */
+  private pendingSignature: string | null = null;
   private hasToolCall: boolean = false;
   private responseSignature: string | null = null;
   private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private webSearchResultSet: WebSearchResultSet | null = null;
   private pendingCitations: AnthropicWebSearchCitation[] | null = null;
+  private readonly stopScanner: StopSequenceScanner;
 
   constructor(
     private readonly signatureState?: ResponseSignatureState,
     private readonly options: ResponseMappingOptions = {},
-  ) {}
+  ) {
+    this.stopScanner = new StopSequenceScanner(options.stopSequences ?? []);
+  }
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
     const candidate = geminiResponse.candidates?.[0];
     const parts = candidate?.content?.parts || [];
 
-    // 1. Process all parts
+    // 1. Process all parts. Nothing the model produced after a stop sequence
+    // fired is part of the answer the caller asked for.
     for (const part of parts) {
+      if (this.stopScanner.stopped) {
+        break;
+      }
       this.processPart(part);
     }
 
@@ -73,15 +95,8 @@ class NonStreamingProcessor {
     this.flushThinking();
     this.flushText();
 
-    // 4. Handle trailingSignature
-    if (this.trailingSignature) {
-      this.contentBlocks.push({
-        type: 'thinking',
-        thinking: '',
-        signature: this.trailingSignature,
-      });
-      this.trailingSignature = null; // Consumed
-    }
+    // 4. An unattached signature is dropped: nothing in this turn can carry it.
+    this.pendingSignature = null;
 
     // 5. Search blocks, once the text they precede exists
     this.insertWebSearchBlocks();
@@ -101,15 +116,10 @@ class NonStreamingProcessor {
       this.flushThinking();
       this.flushText();
 
-      // Handle trailing signature logic
-      if (this.trailingSignature) {
-        this.contentBlocks.push({
-          type: 'thinking',
-          thinking: '',
-          signature: this.trailingSignature,
-        });
-        this.trailingSignature = null;
-      }
+      // A signature the model left on a text-only part belongs to the call it
+      // preceded, so the tool_use block carries it instead of a fabricated one.
+      const carriedSignature = signature ?? this.pendingSignature;
+      this.pendingSignature = null;
 
       this.hasToolCall = true;
 
@@ -117,7 +127,7 @@ class NonStreamingProcessor {
       const functionArgs = normalizeFunctionCallArgs(fc);
       const integrity = this.toolCallIdIntegrity.record(fc.id, fc.name, functionArgs);
       const toolId = fc.id || `${fc.name}-${uuidv4()}`;
-      const capturedSignature = signature ?? this.responseSignature;
+      const capturedSignature = carriedSignature ?? this.responseSignature;
       if (capturedSignature && this.signatureState) {
         this.signatureState.store.store(
           {
@@ -137,7 +147,7 @@ class NonStreamingProcessor {
         id: toolId,
         name: fc.name,
         input: functionArgs,
-        signature: signature || undefined,
+        signature: carriedSignature || undefined,
       };
 
       this.contentBlocks.push(toolUse);
@@ -151,54 +161,32 @@ class NonStreamingProcessor {
         // Thinking Part
         this.flushText();
 
-        // Handle trailing signature before thinking
-        if (this.trailingSignature) {
-          this.flushThinking(); // Ensure previous thinking is flushed
-          this.contentBlocks.push({
-            type: 'thinking',
-            thinking: '',
-            signature: this.trailingSignature,
-          });
-          this.trailingSignature = null;
-        }
-
         this.thinkingBuilder += text;
-        if (signature) {
-          this.thinkingSignature = signature;
+        // A signature banked from an earlier text-only part belongs to the
+        // thought block being built, which is a block that may carry one.
+        const thoughtSignature = signature ?? this.pendingSignature;
+        this.pendingSignature = null;
+        if (thoughtSignature) {
+          this.thinkingSignature = thoughtSignature;
         }
       } else {
         // Normal Text
         if (text === '') {
-          // Empty text with signature -> store as trailing
+          // Empty text carrying only a signature: bank it, emit nothing.
           if (signature) {
-            this.trailingSignature = signature;
+            this.pendingSignature = signature;
           }
           return;
         }
 
         this.flushThinking();
+        this.textBuilder += this.stopScanner.push(text);
 
-        // Handle trailing signature
-        if (this.trailingSignature) {
-          this.flushText();
-          this.contentBlocks.push({
-            type: 'thinking',
-            thinking: '',
-            signature: this.trailingSignature,
-          });
-          this.trailingSignature = null;
-        }
-
-        this.textBuilder += text;
-
-        // Non-empty text with signature -> flush immediately empty thinking block with sig
+        // A text part's signature is banked, not turned into a block: Anthropic
+        // has no signature on a text block, and a synthesised thinking block
+        // would land after the text it is supposed to precede.
         if (signature) {
-          this.flushText();
-          this.contentBlocks.push({
-            type: 'thinking',
-            thinking: '',
-            signature: signature,
-          });
+          this.pendingSignature = signature;
         }
       }
     }
@@ -325,6 +313,9 @@ class NonStreamingProcessor {
   }
 
   private flushText() {
+    // Text held back as a possible stop-sequence head belongs to the block being
+    // closed; a sequence never straddles a block boundary.
+    this.textBuilder += this.stopScanner.flush();
     if (!this.textBuilder) return;
     const citations = this.pendingCitations;
     this.pendingCitations = null;
@@ -336,8 +327,21 @@ class NonStreamingProcessor {
     this.textBuilder = '';
   }
 
+  /**
+   * Emits the accumulated thought, if there is one.
+   *
+   * A signature without any thought text is banked rather than emitted: the
+   * request never asked for thinking in that case, and Anthropic has no block
+   * shape for a thought that has no content.
+   */
   private flushThinking() {
-    if (!this.thinkingBuilder && !this.thinkingSignature) return;
+    if (!this.thinkingBuilder) {
+      if (this.thinkingSignature) {
+        this.pendingSignature = this.thinkingSignature;
+        this.thinkingSignature = null;
+      }
+      return;
+    }
 
     this.contentBlocks.push({
       type: 'thinking',
@@ -366,8 +370,13 @@ class NonStreamingProcessor {
         ? `Response blocked by upstream policy (finishReason: ${finishReason})`
         : undefined;
 
+    const firedStopSequence = this.stopScanner.sequence;
     let stopReason = 'end_turn';
-    if (this.hasToolCall) {
+    if (firedStopSequence !== null) {
+      // Takes precedence over every other reason: the generation was cut here,
+      // so whatever the upstream would have reported describes a longer answer.
+      stopReason = 'stop_sequence';
+    } else if (this.hasToolCall) {
       stopReason = 'tool_use';
     } else if (finishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
@@ -407,6 +416,7 @@ class NonStreamingProcessor {
       model: geminiResponse.modelVersion || '',
       content: this.contentBlocks,
       stop_reason: stopReason,
+      stop_sequence: firedStopSequence,
       usage: usage,
       refusal,
     };

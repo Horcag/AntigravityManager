@@ -172,7 +172,6 @@ export class ProxyService extends BaseProxyService {
     deadlineAt: number,
     projectId: string,
     userAgent: string,
-    sessionId?: string,
   ): Promise<WebSearchSubCallResult> {
     const outcome = await runWebSearchSubCall({
       claudeRequest,
@@ -180,7 +179,6 @@ export class ProxyService extends BaseProxyService {
       getRoleModelIds: () => this.accountLeaseService.getModelIdsForRole?.(WEB_SEARCH_ROLE) ?? [],
       projectId,
       userAgent,
-      sessionId,
       generate: (body) =>
         this.geminiClient.generateInternal(
           body,
@@ -306,7 +304,6 @@ export class ProxyService extends BaseProxyService {
           deadlineAt,
           projectId,
           requestUserAgent,
-          baseClaudeRequest.metadata?.user_id,
         );
         claudeRequest = searched.request;
         webSearchModel = searched.webSearchModel;
@@ -339,6 +336,7 @@ export class ProxyService extends BaseProxyService {
               this.createSignatureState(token.id, geminiBody.model),
               geminiBody.model,
               webSearch,
+              claudeRequest.stop_sequences,
             ),
             request.model,
             targetModel,
@@ -358,6 +356,7 @@ export class ProxyService extends BaseProxyService {
           const anthropicResponse = this.toAnthropicChatResponse(
             transformResponse(response, this.createSignatureState(token.id, geminiBody.model), {
               webSearch,
+              stopSequences: claudeRequest.stop_sequences,
             }),
             geminiBody.model,
           );
@@ -405,6 +404,7 @@ export class ProxyService extends BaseProxyService {
                   this.createSignatureState(token.id, fallbackBody.model),
                   fallbackBody.model,
                   webSearch,
+                  (claudeRequest ?? baseClaudeRequest).stop_sequences,
                 ),
                 request.model,
                 targetModel,
@@ -425,7 +425,10 @@ export class ProxyService extends BaseProxyService {
                 transformResponse(
                   response,
                   this.createSignatureState(token.id, fallbackBody.model),
-                  { webSearch },
+                  {
+                    webSearch,
+                    stopSequences: (claudeRequest ?? baseClaudeRequest).stop_sequences,
+                  },
                 ),
                 fallbackBody.model,
               );
@@ -462,13 +465,17 @@ export class ProxyService extends BaseProxyService {
     signatureState: StreamingSignatureState,
     fallbackModel: string,
     webSearch = false,
+    stopSequences?: readonly string[],
   ): Observable<string> {
     return attachUpstreamBackpressure(
       new Observable<string>((subscriber) => {
         const decoder = new TextDecoder();
         let buffer = '';
 
-        const state = new StreamingState(signatureState, fallbackModel, { webSearch });
+        const state = new StreamingState(signatureState, fallbackModel, {
+          webSearch,
+          stopSequences,
+        });
         const processor = new PartProcessor(state);
 
         let lastFinishReason: string | undefined;
@@ -1015,7 +1022,6 @@ export class ProxyService extends BaseProxyService {
           deadlineAt,
           projectId,
           requestUserAgent,
-          baseClaudeRequest.metadata?.user_id,
         );
         searchedClaudeRequest = searched.request;
         webSearchModel = searched.webSearchModel;

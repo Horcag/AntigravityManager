@@ -808,7 +808,9 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       responseLogprobs: true,
       logprobs: 2,
     });
-    expect(mockGeminiClient.generateInternal.mock.calls[0][0].sessionId).toBe('stable-user');
+    // `user` is no longer forwarded: the provider answers `Unknown name
+    // "sessionId"` with a 400 on the whole request.
+    expect(mockGeminiClient.generateInternal.mock.calls[0][0]).not.toHaveProperty('sessionId');
   });
 
   it('maps Gemini policy finishes to the standard content_filter reason', async () => {

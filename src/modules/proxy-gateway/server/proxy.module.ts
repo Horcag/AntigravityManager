@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_FILTER } from '@nestjs/core';
 import { ProxyController } from './proxy.controller';
 import { ProxyService } from './proxy.service';
 import { AccountLeaseService } from './modules/account-lease/account-lease.service';
@@ -25,6 +26,7 @@ import { FILE_STORE_OPTIONS, FileContentStore } from './modules/files/file-conte
 import { resolveFileStoreOptions } from './modules/files/file-store-location';
 import { GeminiFilesController } from './modules/files/gemini-files.controller';
 import { ClientFilesController } from './modules/files/client-files.controller';
+import { UnimplementedRouteFilter } from './common/unimplemented-route.filter';
 
 @Module({
   imports: [],
@@ -36,6 +38,12 @@ import { ClientFilesController } from './modules/files/client-files.controller';
     ClientFilesController,
   ],
   providers: [
+    // Answers an unrouted `/v1...` or `/v1beta...` request in the error shape of
+    // the surface it was addressed to, instead of the framework's own 404.
+    {
+      provide: APP_FILTER,
+      useClass: UnimplementedRouteFilter,
+    },
     {
       provide: FILE_STORE_OPTIONS,
       useFactory: resolveFileStoreOptions,
