@@ -23,7 +23,73 @@ interface ModelVariantFamily {
   canonicalModel: string;
   variants: Record<ModelVariantTier, Omit<ResolvedModelVariant, 'canonicalModel' | 'tier'>>;
   aliases: Record<string, AliasPolicy>;
+  minimumThinkingBudget?: number;
+  preserveClientThinkingBudget?: boolean;
 }
+
+const CLAUDE_OPUS_4_6_THINKING_BUDGET = 1024;
+const CLAUDE_SONNET_4_6_THINKING_BUDGET = 1024;
+
+const CLAUDE_OPUS_4_6_MIN_THINKING_BUDGET = CLAUDE_OPUS_4_6_THINKING_BUDGET;
+const CLAUDE_OPUS_4_6_VARIANTS: Record<
+  ModelVariantTier,
+  Omit<ResolvedModelVariant, 'canonicalModel' | 'tier'>
+> = {
+  low: {
+    model: 'claude-opus-4-6-thinking',
+    thinkingBudget: CLAUDE_OPUS_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+  medium: {
+    model: 'claude-opus-4-6-thinking',
+    thinkingBudget: CLAUDE_OPUS_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+  high: {
+    model: 'claude-opus-4-6-thinking',
+    thinkingBudget: CLAUDE_OPUS_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+};
+
+const CLAUDE_SONNET_4_6_VARIANTS: Record<
+  ModelVariantTier,
+  Omit<ResolvedModelVariant, 'canonicalModel' | 'tier'>
+> = {
+  low: {
+    model: 'claude-sonnet-4-6',
+    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+  medium: {
+    model: 'claude-sonnet-4-6',
+    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+  high: {
+    model: 'claude-sonnet-4-6',
+    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
+    maxOutputTokens: 64000,
+    includeThoughts: true,
+    preserveClientBudget: true,
+    supportsTools: true,
+  },
+};
 
 const GEMINI_35_FLASH_VARIANTS: Record<
   ModelVariantTier,
@@ -105,6 +171,24 @@ const MODEL_VARIANT_FAMILIES: ModelVariantFamily[] = [
       'gemini-3.1-pro-low': 'low',
     },
   },
+  {
+    canonicalModel: 'claude-opus-4-6-thinking',
+    variants: CLAUDE_OPUS_4_6_VARIANTS,
+    aliases: {
+      'claude-opus-4-6-thinking': 'tier',
+      'claude-opus-4-6': 'tier',
+    },
+    minimumThinkingBudget: CLAUDE_OPUS_4_6_MIN_THINKING_BUDGET,
+    preserveClientThinkingBudget: true,
+  },
+  {
+    canonicalModel: 'claude-sonnet-4-6',
+    variants: CLAUDE_SONNET_4_6_VARIANTS,
+    aliases: {
+      'claude-sonnet-4-6-thinking': 'tier',
+      'claude-sonnet-4-6': 'tier',
+    },
+  },
 ];
 
 function inferTier(budgetTokens: number | undefined): ModelVariantTier {
@@ -131,32 +215,6 @@ function resolveNonVariantModel(
   tier: ModelVariantTier,
   budgetTokens: number | undefined,
 ): ResolvedModelVariant | null {
-  if (model === 'claude-opus-4-6' || model === 'claude-opus-4-6-thinking') {
-    return {
-      canonicalModel: 'claude-opus-4-6-thinking',
-      model: 'claude-opus-4-6-thinking',
-      tier,
-      thinkingBudget: budgetTokens ?? 1024,
-      maxOutputTokens: 64000,
-      includeThoughts: true,
-      preserveClientBudget: true,
-      supportsTools: true,
-    };
-  }
-
-  if (model === 'claude-sonnet-4-6') {
-    return {
-      canonicalModel: 'claude-sonnet-4-6',
-      model: 'claude-sonnet-4-6',
-      tier,
-      thinkingBudget: budgetTokens ?? 1024,
-      maxOutputTokens: 64000,
-      includeThoughts: true,
-      preserveClientBudget: true,
-      supportsTools: true,
-    };
-  }
-
   if (model === 'gpt-oss-120b-medium') {
     return {
       canonicalModel: 'gpt-oss-120b-medium',
@@ -171,6 +229,17 @@ function resolveNonVariantModel(
   }
 
   return null;
+}
+
+export function getMinimumThinkingBudgetForModel(model: string): number {
+  const normalizedModel = model.trim().toLowerCase();
+  const family = MODEL_VARIANT_FAMILIES.find(
+    (candidate) =>
+      candidate.canonicalModel === normalizedModel ||
+      Object.prototype.hasOwnProperty.call(candidate.aliases, normalizedModel),
+  );
+
+  return family?.minimumThinkingBudget ?? 0;
 }
 
 export function resolveModelVariant(input: ResolveModelVariantInput): ResolvedModelVariant | null {
@@ -191,6 +260,10 @@ export function resolveModelVariant(input: ResolveModelVariantInput): ResolvedMo
     canonicalModel: family.canonicalModel,
     tier,
     ...family.variants[tier],
+    thinkingBudget:
+      family.preserveClientThinkingBudget && input.budgetTokens !== undefined
+        ? input.budgetTokens
+        : family.variants[tier].thinkingBudget,
   };
 }
 

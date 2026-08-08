@@ -1,6 +1,7 @@
 import {
   rebindModelVariant,
   resolveModelVariant,
+  getMinimumThinkingBudgetForModel,
 } from '../../../../antigravity/model-variant-registry';
 import type {
   AnthropicChatRequest,
@@ -27,24 +28,25 @@ export function applyAnthropicModelVariant(
     };
   }
 
+  const adjustedRequest = {
+    ...request,
+    max_tokens: applyAnthropicOutputLimit(request.max_tokens, variant.maxOutputTokens),
+    thinking:
+      request.thinking?.type === 'disabled'
+        ? { type: 'disabled' }
+        : variant.thinkingBudget === 0
+          ? undefined
+          : {
+              type: 'enabled',
+              budget_tokens: variant.thinkingBudget,
+            },
+    tools: variant.supportsTools ? request.tools : undefined,
+    tool_choice: variant.supportsTools ? request.tool_choice : undefined,
+    output_config: undefined,
+  };
+
   return {
-    request: {
-      ...request,
-      model: request.model,
-      max_tokens: applyAnthropicOutputLimit(request.max_tokens, variant.maxOutputTokens),
-      thinking:
-        request.thinking?.type === 'disabled'
-          ? { type: 'disabled' }
-          : variant.thinkingBudget === 0
-            ? undefined
-            : {
-                type: 'enabled',
-                budget_tokens: variant.thinkingBudget,
-              },
-      tools: variant.supportsTools ? request.tools : undefined,
-      tool_choice: variant.supportsTools ? request.tool_choice : undefined,
-      output_config: undefined,
-    },
+    request: normalizeThinkingForModelMinimum(adjustedRequest, variant),
     variant,
   };
 }
@@ -59,22 +61,25 @@ export function rebindAnthropicModelVariant(
   }
 
   return {
-    request: {
-      ...applied.request,
-      model: variant.model,
-      max_tokens: applyAnthropicOutputLimit(applied.request.max_tokens, variant.maxOutputTokens),
-      thinking:
-        applied.request.thinking?.type === 'disabled'
-          ? { type: 'disabled' }
-          : variant.thinkingBudget === 0
-            ? undefined
-            : {
-                type: 'enabled',
-                budget_tokens: variant.thinkingBudget,
-              },
-      tools: variant.supportsTools ? applied.request.tools : undefined,
-      tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
-    },
+    request: normalizeThinkingForModelMinimum(
+      {
+        ...applied.request,
+        model: variant.model,
+        max_tokens: applyAnthropicOutputLimit(applied.request.max_tokens, variant.maxOutputTokens),
+        thinking:
+          applied.request.thinking?.type === 'disabled'
+            ? { type: 'disabled' }
+            : variant.thinkingBudget === 0
+              ? undefined
+              : {
+                  type: 'enabled',
+                  budget_tokens: variant.thinkingBudget,
+                },
+        tools: variant.supportsTools ? applied.request.tools : undefined,
+        tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
+      },
+      variant,
+    ),
     variant,
   };
 }
@@ -102,23 +107,25 @@ export function applyOpenAIModelVariant(request: OpenAIChatRequest): AppliedOpen
     };
   }
 
+  const adjustedRequest = {
+    ...request,
+    model: request.model,
+    ...applyOpenAIOutputLimit(request, variant.maxOutputTokens),
+    thinking: thinkingDisabled
+      ? { type: 'disabled' }
+      : variant.thinkingBudget === 0
+        ? undefined
+        : {
+            type: 'enabled',
+            budget_tokens: variant.thinkingBudget,
+          },
+    tools: variant.supportsTools ? request.tools : undefined,
+    tool_choice: variant.supportsTools ? request.tool_choice : undefined,
+    ...(request.reasoning_effort !== undefined ? { reasoning_effort: variant.tier } : {}),
+  };
+
   return {
-    request: {
-      ...request,
-      model: request.model,
-      ...applyOpenAIOutputLimit(request, variant.maxOutputTokens),
-      thinking: thinkingDisabled
-        ? { type: 'disabled' }
-        : variant.thinkingBudget === 0
-          ? undefined
-          : {
-              type: 'enabled',
-              budget_tokens: variant.thinkingBudget,
-            },
-      tools: variant.supportsTools ? request.tools : undefined,
-      tool_choice: variant.supportsTools ? request.tool_choice : undefined,
-      ...(request.reasoning_effort !== undefined ? { reasoning_effort: variant.tier } : {}),
-    },
+    request: normalizeThinkingForModelMinimum(adjustedRequest, variant),
     variant,
   };
 }
@@ -133,24 +140,52 @@ export function rebindOpenAIModelVariant(
   }
 
   return {
-    request: {
-      ...applied.request,
-      model: variant.model,
-      ...applyOpenAIOutputLimit(applied.request, variant.maxOutputTokens),
-      thinking:
-        applied.request.thinking?.type === 'disabled'
-          ? { type: 'disabled' }
-          : variant.thinkingBudget === 0
-            ? undefined
-            : {
-                type: 'enabled',
-                budget_tokens: variant.thinkingBudget,
-              },
-      tools: variant.supportsTools ? applied.request.tools : undefined,
-      tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
-      ...(applied.request.reasoning_effort !== undefined ? { reasoning_effort: variant.tier } : {}),
-    },
+    request: normalizeThinkingForModelMinimum(
+      {
+        ...applied.request,
+        model: variant.model,
+        ...applyOpenAIOutputLimit(applied.request, variant.maxOutputTokens),
+        thinking:
+          applied.request.thinking?.type === 'disabled'
+            ? { type: 'disabled' }
+            : variant.thinkingBudget === 0
+              ? undefined
+              : {
+                  type: 'enabled',
+                  budget_tokens: variant.thinkingBudget,
+                },
+        tools: variant.supportsTools ? applied.request.tools : undefined,
+        tool_choice: variant.supportsTools ? applied.request.tool_choice : undefined,
+        ...(applied.request.reasoning_effort !== undefined
+          ? { reasoning_effort: variant.tier }
+          : {}),
+      },
+      variant,
+    ),
     variant,
+  };
+}
+
+function normalizeThinkingForModelMinimum<T extends AnthropicChatRequest | OpenAIChatRequest>(
+  request: T,
+  variant: NonNullable<ReturnType<typeof resolveModelVariant>>,
+): T {
+  const minimumBudget = getMinimumThinkingBudgetForModel(variant.canonicalModel);
+  if (minimumBudget <= 0) {
+    return request;
+  }
+
+  if (request.max_tokens === undefined || request.max_tokens > minimumBudget) {
+    return request;
+  }
+
+  if (request.thinking?.type === 'disabled') {
+    return request;
+  }
+
+  return {
+    ...request,
+    thinking: { type: 'disabled' },
   };
 }
 
