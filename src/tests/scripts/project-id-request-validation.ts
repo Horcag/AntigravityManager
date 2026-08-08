@@ -9,6 +9,7 @@ import { GenerationConstraintsService } from '../../modules/proxy-gateway/server
 import { ProxyRetryService } from '../../modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
 import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { ModelAvailabilityService } from '../../modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { ModelRouteMissJournalService } from '../../modules/proxy-gateway/server/modules/shared/services/model-route-miss-journal.service';
 import { SignatureStore } from '../../modules/proxy-gateway/antigravity/SignatureStore';
 
 const mockAccountLease: any = {
@@ -33,6 +34,7 @@ class TestableProxyService extends ProxyService {
       new GenerationConstraintsService(mockAccountLease),
       new ProxyRetryService(mockAccountLease, new ModelAvailabilityService()),
       new ModelRoutingService(),
+      new ModelRouteMissJournalService(),
       new SignatureStore(),
     );
   }
@@ -274,6 +276,7 @@ async function validateRuntimeAnthropicRequestFromRealAccountLease(): Promise<vo
       new GenerationConstraintsService(AccountLeaseProxy as any),
       new ProxyRetryService(AccountLeaseProxy as any, new ModelAvailabilityService()),
       new ModelRoutingService(),
+      new ModelRouteMissJournalService(),
       new SignatureStore(),
     );
     await service.handleAnthropicMessages({

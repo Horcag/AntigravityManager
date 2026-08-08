@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
+import { ModelRouteMissJournalService } from '@/modules/proxy-gateway/server/modules/shared/services/model-route-miss-journal.service';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
 import type { GeminiRequest } from '@/modules/proxy-gateway/server/common/interfaces/request-interfaces';
 import type { GeminiInternalRequest } from '@/modules/proxy-gateway/antigravity/types';
@@ -12,6 +13,7 @@ function toInternalRequest(request: GeminiRequest): GeminiInternalRequest['reque
     {} as never,
     {} as never,
     {} as never,
+    new ModelRouteMissJournalService(),
     new SignatureStore(),
   );
   const method: unknown = Reflect.get(service, 'toInternalGeminiRequest');

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { lastValueFrom, Observable, toArray } from 'rxjs';
 
 import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
+import { ModelRouteMissJournalService } from '@/modules/proxy-gateway/server/modules/shared/services/model-route-miss-journal.service';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
 
 function createProxyService(): ProxyService {
@@ -13,6 +14,7 @@ function createProxyService(): ProxyService {
     {} as never,
     {} as never,
     {} as never,
+    new ModelRouteMissJournalService(),
     new SignatureStore(),
   );
 }
