@@ -45,6 +45,7 @@ import {
 } from './modules/openai/chat/openai-request-contract';
 import {
   AnthropicRequestValidationError,
+  normalizeAnthropicCountTokensRequest,
   normalizeAnthropicMessagesRequest,
 } from './modules/anthropic/anthropic-request-contract';
 import {
@@ -469,6 +470,28 @@ export class ProxyController {
       }
     } catch (error) {
       this.sendAnthropicErrorResponse(res, '/v1/messages', error, undefined, requestId);
+    }
+  }
+
+  @Post('messages/count_tokens')
+  async anthropicCountTokens(@Body() body: unknown, @Res() res: FastifyReply) {
+    const requestId = this.createAnthropicRequestId();
+    try {
+      const request = normalizeAnthropicCountTokensRequest(body);
+      const result = await this.proxyService.handleAnthropicCountTokens(request);
+      this.applyResponseHeaders(res, this.getModelRouteResponseHeaders(result, request.model));
+      res
+        .header('request-id', requestId)
+        .status(HttpStatus.OK)
+        .send({ input_tokens: result.input_tokens });
+    } catch (error) {
+      this.sendAnthropicErrorResponse(
+        res,
+        '/v1/messages/count_tokens',
+        error,
+        undefined,
+        requestId,
+      );
     }
   }
 

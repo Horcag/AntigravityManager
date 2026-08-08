@@ -181,7 +181,8 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 ### Supported Native Capabilities
 - `POST /v1beta/models/{model}:generateContent`: Non-streaming generation preserving candidates, safety ratings, citations, grounding metadata, logprobs, finish reasons, model versions, response IDs, and prompt feedback allow-by-default.
 - `POST /v1beta/models/{model}:streamGenerateContent`: Standard SSE streaming emitting bare `GenerateContentResponse` objects (`data: <json>\n\n`) unwrapped from private transport envelopes.
-- `GET /v1beta/models` & `GET /v1beta/models/{model}`: Dynamic model discovery advertising truthful supported generation methods (`generateContent`, `streamGenerateContent`).
+- `POST /v1beta/models/{model}:countTokens` (also `/countTokens`): Prompt token counting over the upstream `v1internal:countTokens` method, returning the public `{ "totalTokens": N }` envelope.
+- `GET /v1beta/models` & `GET /v1beta/models/{model}`: Dynamic model discovery advertising truthful supported generation methods (`countTokens`, `generateContent`, `streamGenerateContent`).
 - Transport of `contents` (including inline `image/png` and `audio/wav`), `generationConfig`, `tools` declarations, `toolConfig`, `safetySettings`, and text `systemInstruction`.
 - Tool declarations (`tools`), tool configuration (`toolConfig`), and function call/response parts (`functionCall`, `functionResponse`) are transported through the adapter; cross-protocol tool IDs, signature ownership, and full tool lifecycle management remain #18.
 
@@ -198,8 +199,9 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 
 ### Explicit Provider Limitations
 - **Media & File Support**: No native Gemini File API routes (`files/*`) or remote file URI resolution exist. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
-- **CountTokens**: Returns HTTP 501 `UNIMPLEMENTED` with a Google-shaped error envelope. Local token estimation is not performed.
-- **Embeddings & Batches**: `embedContent`, `batchEmbedContents`, and `batchGenerateContent` return HTTP 501 `UNIMPLEMENTED`.
+- **CountTokens Scope**: The upstream method accepts only `{ "request": { "model": "models/<id>", "contents": [...] } }`, so `systemInstruction`, `tools`, and `toolConfig` sent alongside the contents are validated but not counted. Counting is a real upstream call routed like any other request: aliases apply, an unknown model returns 404 `model_not_found`, and no local estimation is performed. If the upstream answer omits `totalTokens`, the proxy reports an upstream failure (502 `INTERNAL` on the Gemini surface, 500 `api_error` on the Anthropic one) rather than substituting a fabricated `0`.
+- **Embeddings**: `embedContent` and `batchEmbedContents` return HTTP 501 `UNIMPLEMENTED`. CodeAssist has no embedding method; Google's own `gemini-cli` client throws unconditionally in `CodeAssistServer.embedContent`.
+- **Batches**: `batchGenerateContent` returns HTTP 501 `UNIMPLEMENTED`.
 - **Public Context Cache CRUD**: Client `cachedContent` references are rejected with HTTP 501 `UNIMPLEMENTED`. Automatic explicit context caching runs internally on Vertex AI without exposing public cache resource APIs (`cachedContents/*`).
 - **Live / Bidi & Interactions**: Gemini Live WebSocket (Bidi) and Interactions APIs are unavailable under this adapter.
 - **Client Tier & Store Parameters**: Top-level `serviceTier` and `store` fields are explicitly rejected with HTTP 501 `UNIMPLEMENTED`.
@@ -257,10 +259,11 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - Stream interruption, parse failure, upstream failure, and idle timeout close any active content block and emit a terminal Anthropic `event: error`. They are not reported as successful `message_stop` events.
 - Client disconnects remove the installed listeners and destroy the exact upstream readable. Messages requests use Anthropic's 32 MiB request limit; each inline image remains limited to 5 MiB by the adapter.
 - Deterministic request failures return Anthropic error types, a `request_id` field, and a `request-id` response header. Upstream overload is exposed as HTTP 529 `overloaded_error`.
+- `POST /v1/messages/count_tokens` accepts the counting subset of the Messages body (`model`, `messages`, `system`, `tools`, `tool_choice`, `thinking`; generation-only fields are rejected) and returns `{"input_tokens": N}`. The body is converted by the same mapper the Messages endpoint uses, so the counted conversation is the one a real completion would send; see the CountTokens scope note in section 7 for what the upstream method does and does not count.
 
 ### Explicit Compatibility Limits
 
-- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, token counting, Files, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable.
+- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, Files, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable.
 - Anthropic prompt-cache controls are accepted as inert compatibility metadata. Usage cannot report genuine Anthropic cache creation; a Gemini implicit-cache hit is not equivalent to Anthropic cache semantics.
 - `redacted_thinking` is rejected because Anthropic ciphertext cannot be converted into a valid Gemini thought signature. `thinking.display` is also unavailable. Supported opaque thought signatures are round-tripped only when the upstream transport supplies compatible signature bytes.
 - Structured output via `output_config.format`, deferred/strict tools, and `disable_parallel_tool_use=true` are rejected instead of being silently weakened. Gemini cannot guarantee those Anthropic execution semantics through this path.

@@ -25,6 +25,7 @@ import {
   resumeObservableUpstream,
 } from '../../common/stream-backpressure';
 import { createModelRouteHeaders, getModelRouteMetadata } from '../../common/model-route-metadata';
+import { resolveCountTokensContents } from '../shared/services/count-tokens.service';
 
 type GeminiModelMetadata = {
   name: string;
@@ -119,8 +120,12 @@ export class GeminiController {
       return;
     }
 
+    if (action === 'countTokens') {
+      await this.respondCountTokens(model, body, res);
+      return;
+    }
+
     if (
-      action === 'countTokens' ||
       action === 'embedContent' ||
       action === 'batchEmbedContents' ||
       action === 'batchGenerateContent'
@@ -187,6 +192,36 @@ export class GeminiController {
     }
   }
 
+  private async respondCountTokens(
+    model: string,
+    body: GeminiRequest,
+    res: FastifyReply,
+  ): Promise<void> {
+    const contents = resolveCountTokensContents(body);
+    if (!contents) {
+      res.status(HttpStatus.BAD_REQUEST).send({
+        error: {
+          code: HttpStatus.BAD_REQUEST,
+          message: 'countTokens requires contents or generateContentRequest.contents',
+          status: 'INVALID_ARGUMENT',
+        },
+      });
+      return;
+    }
+
+    try {
+      const result = await this.proxyService.handleGeminiCountTokens(model, contents);
+      this.applyResponseHeaders(res, createModelRouteHeaders(getModelRouteMetadata(result)));
+      res.status(HttpStatus.OK).send({ totalTokens: result.totalTokens });
+    } catch (error) {
+      const sanitized = sanitizeUpstreamError(error);
+      if (sanitized.retryAfter) {
+        res.header('Retry-After', sanitized.retryAfter);
+      }
+      res.status(sanitized.statusCode).send(sanitized.errorEnvelope);
+    }
+  }
+
   private checkUnsupportedGeminiFields(body: Record<string, unknown>): string | null {
     if (!isObjectLike(body)) {
       return null;
@@ -239,7 +274,7 @@ export class GeminiController {
     return {
       name: modelName,
       displayName,
-      supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+      supportedGenerationMethods: ['countTokens', 'generateContent', 'streamGenerateContent'],
     };
   }
 

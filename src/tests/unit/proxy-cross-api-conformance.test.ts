@@ -11,8 +11,10 @@ import {
 import { parseSseEvents } from '../support/http-payloads';
 
 const proxyService = {
+  handleAnthropicCountTokens: vi.fn(),
   handleAnthropicMessages: vi.fn(),
   handleChatCompletions: vi.fn(),
+  handleGeminiCountTokens: vi.fn(),
   handleGeminiGenerateContent: vi.fn(),
   handleGeminiStreamGenerateContent: vi.fn(),
 };
@@ -261,6 +263,94 @@ describe('assembled proxy cross-API conformance', () => {
     expect(response.headers['content-type']).toContain('text/event-stream');
     expectRouteHeaders(response, testCase.protocol);
     testCase.assertEvents(parseSseEvents(response.body));
+  });
+
+  it.each([
+    {
+      protocol: 'anthropic',
+      configure: () =>
+        proxyService.handleAnthropicCountTokens.mockResolvedValueOnce(
+          attachModelRouteMetadata({ input_tokens: 2095 }, routeMetadata('anthropic')),
+        ),
+      request: {
+        method: 'POST' as const,
+        url: '/v1/messages/count_tokens',
+        payload: {
+          model: 'public-anthropic',
+          messages: [{ role: 'user', content: 'hello' }],
+        },
+      },
+      expectedBody: { input_tokens: 2095 },
+    },
+    {
+      protocol: 'gemini',
+      configure: () =>
+        proxyService.handleGeminiCountTokens.mockResolvedValueOnce(
+          attachModelRouteMetadata({ totalTokens: 2095 }, routeMetadata('gemini')),
+        ),
+      request: {
+        method: 'POST' as const,
+        url: '/v1beta/models/public-gemini:countTokens',
+        payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+      },
+      expectedBody: { totalTokens: 2095 },
+    },
+  ])('$protocol counts tokens in its own envelope', async (testCase) => {
+    testCase.configure();
+    const response = await app.inject(testCase.request);
+
+    expect(response.statusCode).toBe(200);
+    expectRouteHeaders(response, testCase.protocol);
+    expect(response.json()).toEqual(testCase.expectedBody);
+  });
+
+  it.each([
+    {
+      protocol: 'anthropic',
+      configure: (error: ModelRouteError) =>
+        proxyService.handleAnthropicCountTokens.mockRejectedValueOnce(error),
+      request: {
+        method: 'POST' as const,
+        url: '/v1/messages/count_tokens',
+        payload: {
+          model: 'missing-anthropic',
+          messages: [{ role: 'user', content: 'hello' }],
+        },
+      },
+      assertBody: (body: Record<string, unknown>) => {
+        expect(body).toMatchObject({
+          type: 'error',
+          error: { type: 'not_found_error', message: "Unknown model 'missing-anthropic'" },
+        });
+      },
+    },
+    {
+      protocol: 'gemini',
+      configure: (error: ModelRouteError) =>
+        proxyService.handleGeminiCountTokens.mockRejectedValueOnce(error),
+      request: {
+        method: 'POST' as const,
+        url: '/v1beta/models/missing-gemini:countTokens',
+        payload: { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+      },
+      assertBody: (body: Record<string, unknown>) => {
+        expect(body).toEqual({
+          error: { code: 404, message: "Unknown model 'missing-gemini'", status: 'NOT_FOUND' },
+        });
+      },
+    },
+  ])('$protocol count tokens fails closed on an unknown model', async (testCase) => {
+    testCase.configure(
+      new ModelRouteError({
+        message: `Unknown model 'missing-${testCase.protocol}'`,
+        status: 404,
+        code: 'model_not_found',
+      }),
+    );
+    const response = await app.inject(testCase.request);
+
+    expect(response.statusCode).toBe(404);
+    testCase.assertBody(response.json());
   });
 
   it.each([

@@ -15,6 +15,7 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
   let app: NestFastifyApplication;
 
   const mockProxyService = {
+    handleGeminiCountTokens: vi.fn(),
     handleGeminiGenerateContent: vi.fn(),
     handleGeminiStreamGenerateContent: vi.fn(),
   };
@@ -66,7 +67,7 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
       expect.arrayContaining([
         expect.objectContaining({
           name: 'models/gemini-3-flash',
-          supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+          supportedGenerationMethods: ['countTokens', 'generateContent', 'streamGenerateContent'],
         }),
         expect.objectContaining({
           name: 'models/gemini-3.1-pro-high',
@@ -178,32 +179,108 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     });
   });
 
-  it('POST /v1beta/models/:model/countTokens and :countTokens return 501 UNIMPLEMENTED', async () => {
-    const resSlash = await app.inject({
+  it.each([
+    '/v1beta/models/gemini-3-flash/countTokens',
+    '/v1beta/models/gemini-3-flash:countTokens',
+  ])('POST %s returns the public countTokens envelope and route identity', async (url) => {
+    mockProxyService.handleGeminiCountTokens.mockResolvedValueOnce(
+      attachModelRouteMetadata(
+        { totalTokens: 31 },
+        {
+          requestedModel: 'models/gemini-3-flash',
+          resolvedModel: 'gemini-3-flash',
+          servedModel: 'gemini-3-flash-001',
+          routeSource: 'canonical',
+        },
+      ),
+    );
+
+    const res = await app.inject({
       method: 'POST',
-      url: '/v1beta/models/gemini-3-flash/countTokens',
+      url,
       payload: { contents: [{ role: 'user', parts: [{ text: 'count me' }] }] },
     });
-    expect(resSlash.statusCode).toBe(501);
-    expect(resSlash.json()).toEqual({
-      error: {
-        code: 501,
-        message: 'countTokens is not implemented by this provider',
-        status: 'UNIMPLEMENTED',
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ totalTokens: 31 });
+    expect(res.headers['x-antigravity-served-model']).toBe('gemini-3-flash-001');
+    expect(mockProxyService.handleGeminiCountTokens).toHaveBeenCalledWith('models/gemini-3-flash', [
+      { role: 'user', parts: [{ text: 'count me' }] },
+    ]);
+  });
+
+  it('accepts the generateContentRequest wrapper and rejects a body without contents', async () => {
+    mockProxyService.handleGeminiCountTokens.mockResolvedValueOnce({ totalTokens: 9 });
+    const resWrapped = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:countTokens',
+      payload: {
+        generateContentRequest: { contents: [{ role: 'user', parts: [{ text: 'wrapped' }] }] },
       },
     });
+    expect(resWrapped.statusCode).toBe(200);
+    expect(resWrapped.json()).toEqual({ totalTokens: 9 });
 
-    const resColon = await app.inject({
+    const resEmpty = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-3-flash:countTokens',
+      payload: {},
+    });
+    expect(resEmpty.statusCode).toBe(400);
+    expect(resEmpty.json()).toEqual({
+      error: {
+        code: 400,
+        message: 'countTokens requires contents or generateContentRequest.contents',
+        status: 'INVALID_ARGUMENT',
+      },
+    });
+  });
+
+  it('returns 404 NOT_FOUND when countTokens targets an unrouted model', async () => {
+    mockProxyService.handleGeminiCountTokens.mockRejectedValueOnce(
+      new ModelRouteError({
+        message: "Unknown model 'not-a-model'",
+        status: 404,
+        code: 'model_not_found',
+      }),
+    );
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/not-a-model:countTokens',
+      payload: { contents: [{ role: 'user', parts: [{ text: 'count me' }] }] },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({
+      error: {
+        code: 404,
+        message: "Unknown model 'not-a-model'",
+        status: 'NOT_FOUND',
+      },
+    });
+  });
+
+  it('surfaces a missing upstream totalTokens as an error instead of a zero count', async () => {
+    mockProxyService.handleGeminiCountTokens.mockRejectedValueOnce(
+      new UpstreamRequestError({
+        message: 'Upstream countTokens response did not include a usable totalTokens value',
+        status: 502,
+      }),
+    );
+
+    const res = await app.inject({
       method: 'POST',
       url: '/v1beta/models/gemini-3-flash:countTokens',
       payload: { contents: [{ role: 'user', parts: [{ text: 'count me' }] }] },
     });
-    expect(resColon.statusCode).toBe(501);
-    expect(resColon.json()).toEqual({
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({
       error: {
-        code: 501,
-        message: 'countTokens is not implemented by this provider',
-        status: 'UNIMPLEMENTED',
+        code: 502,
+        message: 'Upstream countTokens response did not include a usable totalTokens value',
+        status: 'INTERNAL',
       },
     });
   });
