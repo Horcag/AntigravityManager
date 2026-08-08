@@ -21,11 +21,26 @@ import { CountTokensService } from './modules/shared/services/count-tokens.servi
 import { OpenAIResponsesSessionService } from './modules/openai/responses/openai-responses-session.service';
 import { OpenAIResponsesStoreController } from './modules/openai/responses/openai-responses-store.controller';
 import { SignatureStore } from '../antigravity/SignatureStore';
+import { FILE_STORE_OPTIONS, FileContentStore } from './modules/files/file-content-store.service';
+import { resolveFileStoreOptions } from './modules/files/file-store-location';
+import { GeminiFilesController } from './modules/files/gemini-files.controller';
+import { ClientFilesController } from './modules/files/client-files.controller';
 
 @Module({
   imports: [],
-  controllers: [ProxyController, OpenAIResponsesStoreController, GeminiController],
+  controllers: [
+    ProxyController,
+    OpenAIResponsesStoreController,
+    GeminiController,
+    GeminiFilesController,
+    ClientFilesController,
+  ],
   providers: [
+    {
+      provide: FILE_STORE_OPTIONS,
+      useFactory: resolveFileStoreOptions,
+    },
+    FileContentStore,
     RateLimitTrackerService,
     ModelRoutingService,
     {
@@ -59,6 +74,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     ProxyService,
     CountTokensService,
     OpenAIResponsesSessionService,
+    FileContentStore,
   ],
 })
 export class ProxyModule {}

@@ -2426,6 +2426,30 @@ export class ProxyService extends BaseProxyService {
         } else {
           blocks.push({ type: 'text', text: `[image_url] ${url}` });
         }
+        continue;
+      }
+
+      if (part.type === 'file' && part.file?.file_data) {
+        // Expanded file handles arrive here as a base64 data URL. Images keep
+        // their image block; anything else becomes a document block, which the
+        // Claude mapper turns into the same `inlineData` part either way.
+        const dataUri = part.file.file_data.match(/^data:(?<mime>[^;]+);base64,(?<data>.+)$/);
+        if (dataUri?.groups?.mime && dataUri.groups.data) {
+          const source = {
+            type: 'base64' as const,
+            media_type: dataUri.groups.mime,
+            data: dataUri.groups.data,
+          };
+          blocks.push(
+            dataUri.groups.mime.startsWith('image/')
+              ? { type: 'image', source }
+              : {
+                  type: 'document',
+                  source,
+                  ...(part.file.filename ? { title: part.file.filename } : {}),
+                },
+          );
+        }
       }
     }
     return blocks;

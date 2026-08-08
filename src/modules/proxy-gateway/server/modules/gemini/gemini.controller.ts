@@ -30,6 +30,8 @@ import {
   getUpstreamResponseMetadata,
 } from '../../common/upstream-response-metadata';
 import { resolveCountTokensContents } from '../shared/services/count-tokens.service';
+import { FileContentStore } from '../files/file-content-store.service';
+import { FileReferenceError, expandFileReferences } from '../files/file-reference-expander';
 
 type GeminiModelMetadata = {
   name: string;
@@ -45,6 +47,9 @@ export class GeminiController {
     @Optional()
     @Inject(AccountLeaseService)
     private readonly accountLeaseService?: AccountLeaseService,
+    @Optional()
+    @Inject(FileContentStore)
+    private readonly fileStore?: FileContentStore,
   ) {}
 
   @Get('models')
@@ -107,9 +112,30 @@ export class GeminiController {
   private async handleModelActionDispatch(
     model: string,
     action: string,
-    body: GeminiRequest,
+    requestBody: GeminiRequest,
     res: FastifyReply,
   ): Promise<void> {
+    let body: GeminiRequest;
+    try {
+      // `fileData` parts name handles this proxy issued; they are expanded into
+      // `inlineData` here, before validation, because the provider has no file
+      // plane and would reject the reference. An unknown handle fails here
+      // rather than being forwarded upstream to fail obscurely.
+      body = await expandFileReferences(requestBody, 'gemini', this.fileStore);
+    } catch (error) {
+      if (error instanceof FileReferenceError) {
+        res.status(error.httpStatus).send({
+          error: {
+            code: error.httpStatus,
+            message: error.message,
+            status: error.httpStatus === 404 ? 'NOT_FOUND' : 'INVALID_ARGUMENT',
+          },
+        });
+        return;
+      }
+      throw error;
+    }
+
     const unsupportedField = this.checkUnsupportedGeminiFields(
       body as unknown as Record<string, unknown>,
     );

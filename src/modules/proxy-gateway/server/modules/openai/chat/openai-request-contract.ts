@@ -254,6 +254,25 @@ function validateMessageContentPart(value: unknown, param: string): void {
     }
     return;
   }
+  if (type === 'file') {
+    // A `file_id` is resolved against the local file store before validation,
+    // so anything still carrying one names a handle this proxy never issued.
+    const file = asRecord(part.file, `${param}.file`);
+    if (file.file_id !== undefined && file.file_data === undefined) {
+      invalid(
+        `${param}.file.file_id`,
+        'file_id does not name a file stored by this proxy; upload it to /v1/files first',
+      );
+    }
+    const fileData = requireNonEmptyString(file.file_data, `${param}.file.file_data`);
+    if (!/^data:[\w.+-]+\/[\w.+-]+;base64,/iu.test(fileData)) {
+      unsupported(
+        `${param}.file.file_data`,
+        'file content must be a base64 data URL, or a file_id issued by this proxy',
+      );
+    }
+    return;
+  }
   unsupported(`${param}.type`, `content part type ${type} is not implemented by this proxy`);
 }
 

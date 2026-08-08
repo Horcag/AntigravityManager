@@ -93,10 +93,20 @@ export interface OpenAIMessage {
 }
 
 export interface OpenAIContentPart {
-  type: 'text' | 'image_url';
+  type: 'text' | 'image_url' | 'file';
   text?: string;
   image_url?: {
     url: string;
+  };
+  /**
+   * Non-image document content. `file_id` references are expanded into
+   * `file_data` before validation, so by the time a request reaches the
+   * transport this only ever carries inline base64.
+   */
+  file?: {
+    file_data?: string;
+    file_id?: string;
+    filename?: string;
   };
 }
 
@@ -225,6 +235,12 @@ export type AnthropicContent =
       cache_control?: AnthropicCacheControl;
     }
   | { type: 'image'; source: AnthropicImageSource }
+  | {
+      type: 'document';
+      source: AnthropicImageSource;
+      title?: string;
+      cache_control?: AnthropicCacheControl;
+    }
   | {
       type: 'tool_use';
       id: string;

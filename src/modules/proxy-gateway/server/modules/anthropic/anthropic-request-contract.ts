@@ -261,6 +261,17 @@ function validateContentBlock(
     return value as AnthropicContent;
   }
 
+  if (type === 'document') {
+    validateObjectFields(block, param, ['cache_control', 'context', 'source', 'title', 'type']);
+    if (role !== 'user') {
+      invalid(`${param}.type`, 'document input blocks are only valid in user messages');
+    }
+    validateDocumentSource(block.source, `${param}.source`);
+    validateOptionalString(block.title, `${param}.title`);
+    validateCacheControl(block.cache_control, `${param}.cache_control`);
+    return value as AnthropicContent;
+  }
+
   if (type === 'thinking') {
     validateObjectFields(block, param, ['cache_control', 'signature', 'thinking', 'type']);
     if (role !== 'assistant') {
@@ -380,6 +391,27 @@ function validateToolResultContent(value: unknown, param: string): void {
       `${nestedParam}.type`,
       'tool_result content supports only text and base64 image blocks through this proxy',
     );
+  }
+}
+
+/**
+ * Document sources reaching this point are always inline base64: a
+ * `{"type":"file","file_id":…}` source is resolved against the local file store
+ * before validation runs. URL sources stay unsupported because nothing here
+ * fetches remote content.
+ */
+function validateDocumentSource(value: unknown, param: string): void {
+  const source = asRecord(value, param);
+  validateObjectFields(source, param, ['data', 'media_type', 'type']);
+  if (source.type !== 'base64') {
+    unsupported(
+      `${param}.type`,
+      'document sources must be base64, or a file_id issued by this proxy',
+    );
+  }
+  requireNonEmptyString(source.media_type, `${param}.media_type`);
+  if (!isString(source.data)) {
+    invalid(`${param}.data`, 'base64 document sources require string data');
   }
 }
 

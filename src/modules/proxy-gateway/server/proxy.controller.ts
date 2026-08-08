@@ -111,6 +111,12 @@ import {
   type ModelRouteMetadata,
 } from './common/model-route-metadata';
 import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
+import { FileContentStore } from './modules/files/file-content-store.service';
+import {
+  FileReferenceError,
+  expandFileReferences,
+  type FileReferenceSurface,
+} from './modules/files/file-reference-expander';
 
 export const IMAGE_QUOTA_REFRESH = Symbol('IMAGE_QUOTA_REFRESH');
 export type ImageQuotaRefresh = () => Promise<void>;
@@ -148,6 +154,9 @@ export class ProxyController {
     @Optional()
     @Inject(OpenAIResponsesSessionService)
     private readonly responsesSessionStore?: OpenAIResponsesSessionStoreLike,
+    @Optional()
+    @Inject(FileContentStore)
+    private readonly fileContentStore?: FileContentStore,
   ) {}
 
   /**
@@ -156,6 +165,24 @@ export class ProxyController {
    */
   private get responsesSessions(): OpenAIResponsesSessionStoreLike {
     return this.responsesSessionStore ?? OpenAIResponsesSessionStore;
+  }
+
+  /**
+   * Turns stored file handles into inline content before validation.
+   *
+   * It has to run first because the request contracts reject content parts they
+   * do not recognise, and a `file_id` part is only recognisable once resolved.
+   * The store is local: the bytes still travel upstream inline, because the
+   * provider has no file plane to reference.
+   */
+  private async expandRequestFileReferences<T>(body: T, surface: FileReferenceSurface): Promise<T> {
+    return expandFileReferences(body, surface, this.fileContentStore);
+  }
+
+  private toAnthropicFileReferenceError(error: unknown): unknown {
+    return error instanceof FileReferenceError
+      ? new AnthropicRequestValidationError(error.message, error.param, 'invalid_value')
+      : error;
   }
 
   @Get('models')
@@ -254,8 +281,9 @@ export class ProxyController {
   }
 
   @Post('responses')
-  async responses(@Body() body: ResponsesRequestBody, @Res() res: FastifyReply) {
+  async responses(@Body() rawBody: ResponsesRequestBody, @Res() res: FastifyReply) {
     try {
+      const body = await this.expandRequestFileReferences(rawBody, 'openai-responses');
       const prepared = this.prepareResponsesRequest(body);
       if (!prepared) {
         res
@@ -490,7 +518,9 @@ export class ProxyController {
 
   private async respondOpenAIChatCompletions(body: OpenAIChatRequest, res: FastifyReply) {
     try {
-      const request = normalizeOpenAIChatRequest(body);
+      const request = normalizeOpenAIChatRequest(
+        await this.expandRequestFileReferences(body, 'openai-chat'),
+      );
       const result = await this.proxyService.handleChatCompletions(request);
       const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
 
@@ -510,7 +540,9 @@ export class ProxyController {
   async anthropicMessages(@Body() body: unknown, @Res() res: FastifyReply) {
     const requestId = this.createAnthropicRequestId();
     try {
-      const request = normalizeAnthropicMessagesRequest(body);
+      const request = normalizeAnthropicMessagesRequest(
+        await this.expandRequestFileReferences(body, 'anthropic'),
+      );
       const result = await this.proxyService.handleAnthropicMessages(request);
       const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
 
@@ -525,7 +557,13 @@ export class ProxyController {
         res.header('request-id', requestId).status(HttpStatus.OK).send(result);
       }
     } catch (error) {
-      this.sendAnthropicErrorResponse(res, '/v1/messages', error, undefined, requestId);
+      this.sendAnthropicErrorResponse(
+        res,
+        '/v1/messages',
+        this.toAnthropicFileReferenceError(error),
+        undefined,
+        requestId,
+      );
     }
   }
 
@@ -533,7 +571,9 @@ export class ProxyController {
   async anthropicCountTokens(@Body() body: unknown, @Res() res: FastifyReply) {
     const requestId = this.createAnthropicRequestId();
     try {
-      const request = normalizeAnthropicCountTokensRequest(body);
+      const request = normalizeAnthropicCountTokensRequest(
+        await this.expandRequestFileReferences(body, 'anthropic'),
+      );
       const result = await this.proxyService.handleAnthropicCountTokens(request);
       this.applyResponseHeaders(res, this.getModelRouteResponseHeaders(result, request.model));
       res
@@ -544,7 +584,7 @@ export class ProxyController {
       this.sendAnthropicErrorResponse(
         res,
         '/v1/messages/count_tokens',
-        error,
+        this.toAnthropicFileReferenceError(error),
         undefined,
         requestId,
       );
@@ -1011,6 +1051,22 @@ export class ProxyController {
         const text = this.asString(block.text);
         if (text) {
           textParts.push(text);
+        }
+        continue;
+      }
+
+      if (blockType === 'input_file') {
+        // `input_file` by file_id is resolved into inline base64 upstream of
+        // this call, so only `file_data` can be carried onward.
+        const fileData = this.asString(block.file_data);
+        if (fileData) {
+          imageParts.push({
+            type: 'file',
+            file: {
+              file_data: fileData,
+              ...(this.asString(block.filename) ? { filename: block.filename as string } : {}),
+            },
+          });
         }
         continue;
       }
@@ -1676,6 +1732,18 @@ export class ProxyController {
     overrideMessage?: string,
   ): void {
     const message = overrideMessage ?? this.resolveErrorMessageText(error);
+    if (error instanceof FileReferenceError) {
+      this.logProxyEndpointError(endpoint, error.httpStatus as HttpStatus, message, error);
+      res.status(error.httpStatus).send({
+        error: {
+          message,
+          type: 'invalid_request_error',
+          param: error.param,
+          code: error.httpStatus === HttpStatus.NOT_FOUND ? 'file_not_found' : 'invalid_value',
+        },
+      });
+      return;
+    }
     if (error instanceof OpenAIMediaRequestError) {
       this.logProxyEndpointError(endpoint, error.statusCode, message, error);
       res.status(error.statusCode).send({

@@ -1,5 +1,6 @@
 import { OPENAI_JSON_BODY_LIMIT_BYTES } from '../modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import { ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES } from '../modules/proxy-gateway/server/modules/anthropic/anthropic-request-contract';
+import { DEFAULT_MAX_FILE_BYTES } from '../modules/proxy-gateway/server/modules/files/file-store.types';
 
 interface ProxyRouteOptions {
   bodyLimit?: number;
@@ -29,6 +30,11 @@ export function resolveProxyRouteBodyLimit(
   }
   if (url === '/v1/messages') {
     return ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES;
+  }
+  // File uploads carry raw content, so they get the store's own per-file
+  // ceiling plus a little multipart framing headroom.
+  if (url === '/v1/files' || url === '/upload/v1beta/files') {
+    return DEFAULT_MAX_FILE_BYTES + 1024 * 1024;
   }
   if (LARGE_INLINE_MEDIA_ROUTES.has(url) || url.startsWith('/v1beta/models/')) {
     return OPENAI_JSON_BODY_LIMIT_BYTES;

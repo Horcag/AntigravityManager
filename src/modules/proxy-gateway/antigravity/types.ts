@@ -112,6 +112,7 @@ export type ContentBlock =
   | TextBlock
   | ThinkingBlock
   | ImageBlock
+  | DocumentBlock
   | ToolUseBlock
   | ToolResultBlock
   | RedactedThinkingBlock
@@ -140,6 +141,22 @@ export interface ImageBlock {
     media_type: string;
     data: string;
   };
+}
+
+/**
+ * Non-image document content, e.g. a PDF. Carries the same inline base64 an
+ * {@link ImageBlock} does because the upstream transport has one representation
+ * for both: a Gemini `inlineData` part.
+ */
+export interface DocumentBlock {
+  type: 'document';
+  source: {
+    type: 'base64';
+    media_type: string;
+    data: string;
+  };
+  title?: string;
+  cache_control?: CacheControl;
 }
 
 export interface ToolUseBlock {
