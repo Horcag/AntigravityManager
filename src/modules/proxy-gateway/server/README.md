@@ -58,6 +58,16 @@ server/
 │  │  ├─ gemini-client.service.ts          # Upstream HTTP client, endpoint failover, explicit context cache
 │  │  ├─ explicit-context-cache.store.ts   # Explicit context cache storage
 │  │  └─ gemini.module.ts                  # NestJS Gemini module registration
+│  ├─ files/                               # Local content-addressed file store & the three file surfaces
+│  │  ├─ file-content-store.service.ts     # The store's policy: put/get/stat/list/delete/sweep
+│  │  ├─ file-store-disk.ts                # Every path, atomic rename and index parse
+│  │  ├─ file-store.types.ts               # Handles, limits, errors, handle parsing
+│  │  ├─ file-mime-sniff.ts                # Magic-byte MIME sniffing
+│  │  ├─ file-upload-request.ts            # Multipart & raw-media upload parsing
+│  │  ├─ file-reference-expander.ts        # The single handle -> inline content routine
+│  │  ├─ gemini-files.controller.ts        # /upload/v1beta/files and /v1beta/files
+│  │  ├─ client-files.controller.ts        # /v1/files for both the OpenAI and Anthropic dialects
+│  │  └─ {gemini,openai,anthropic}-file-resource.ts  # Per-dialect shapes, errors and upload rules
 │  └─ account-lease/                       # Account lease and scheduling sub-module
 │     ├─ account-lease.service.ts          # Main Account Lease facade service
 │     ├─ account-lease.module.ts           # Account Lease module assembly
@@ -98,6 +108,7 @@ server/
 | **`modules/openai/`** | Manages OpenAI HTTP controllers and service orchestration; the `responses/` sub-directory handles WebSocket protocol state and session lifecycle. |
 | **`modules/anthropic/`** | Handles Anthropic Messages API parsing, request transformation, stream response mapping, and session management. |
 | **`modules/gemini/`** | Handles native Gemini REST/SSE endpoints; `gemini-client.service.ts` encapsulates upstream Axios calls, multi-endpoint failover, and explicit context caching. |
+| **`modules/files/`** | **Local file store and the three file surfaces**. One `FileContentStore`, one reference expander, and three thin protocol adapters. Nothing outside this directory knows how a handle is spelled. See section 10. |
 | **`modules/account-lease/`**| **Account Lease Core**. Employs a Policy design pattern to decouple selection, quota, hydration, and rate-limiting logic into discrete files under `policies/`, coordinated by `AccountLeaseService`. |
 | **`shared/services/`** | Houses singleton services shared across feature modules (e.g., `RateLimitTrackerService`, `ProxyRetryService`), ensuring consistent global state across the Proxy Gateway. |
 
@@ -118,6 +129,7 @@ The following table defines the single, authoritative Nest DI service or store o
 | **Response Sessions (OpenAI Responses)** | `OpenAIResponsesSessionStore` | Module Singleton Store (`modules/openai/responses`) | Manages `previous_response_id` links, stream states, and WebSocket session lifecycles for OpenAI responses. |
 | **Thought Signatures** | `SignatureStore` | Module Store (`antigravity/SignatureStore`) | Caches, decodes, and verifies thought signatures across multi-turn Anthropic/Gemini messages. |
 | **Explicit Context Cache** | `ExplicitContextCacheStore` | Module Singleton (`modules/gemini/explicit-context-cache`) | Manages cached prompt contexts, TTLs, and explicit context cache resource handles (`explicitContextCacheManager`). |
+| **Uploaded Files** | `FileContentStore` | Nest DI Singleton (`ProxyModule`) | Owns the on-disk content-addressed store under `<userData>/proxy-files`: handles, blobs, the index, size ceilings, TTL and sweeping. The three file controllers and the reference expander are its only clients. |
 
 ---
 
@@ -163,7 +175,7 @@ npm run lint
 For a faster protocol-focused feedback loop, use the scoped suites below before the full test run:
 
 ```powershell
-npm run test:proxy:conformance # assembled public HTTP/SSE contracts across all three APIs
+npm run test:proxy:conformance # assembled public HTTP/SSE contracts across all three APIs, plus the file store and file surfaces
 npm run test:proxy:gemini      # native Gemini REST and SSE wire behavior
 npm run test:proxy:openai      # OpenAI request, response, and streaming contracts
 npm run test:proxy:anthropic   # Anthropic Messages request, response, and thinking contracts
@@ -199,14 +211,14 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - Authenticated `GET /v1/model-routes` keeps aliases out of the standard model catalog while exposing configured routes, canonical targets, per-account availability, recent model-scoped failures, and `unpublished_catalog_ids` for the local UI. Each entry states why: `reason: "completion_model"` when the provider's own `ModelDetails` marks the id as part of the editor completion loop, with `flags` naming the markers that matched, or `reason: "override"` for an id the dated `NON_CHAT_CATALOG_MODEL_IDS` table lists, which today is none. `roles` reports the provider roles the id belongs to when the discovery response mentions it, as corroboration only, as in `{ "id": "chat_20706", "reason": "completion_model", "flags": ["requiresLeadInGeneration", "supportsCumulativeContext", "supportsEstimateTokenCounter"], "roles": ["tab"] }`. Provider role membership never withholds an id — it was measured to hide chat-capable models such as `gemini-3-flash`.
 
 ### Explicit Provider Limitations
-- **Media & File Support**: No native Gemini File API routes (`files/*`) or remote file URI resolution exist. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
+- **Media & File Support**: The provider has **no file plane**. `google.internal.cloud.code.v1internal.*` exposes no upload method, no `files/*` resource, and no `fileUri` fetch, so nothing this proxy does can store a file on Google's side. The `/v1beta/files`, `/v1/files` and `/upload/v1beta/files` routes are a **local** content-addressed store plus reference expansion — see section 10. Remote file URIs are still never fetched: a `fileUri` this proxy did not issue is rejected, not forwarded. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
 - **CountTokens Scope**: The upstream method accepts only `{ "request": { "model": "models/<id>", "contents": [...] } }`, so `systemInstruction`, `tools`, and `toolConfig` sent alongside the contents are validated but not counted. Counting is a real upstream call routed like any other request: aliases apply, an unknown model returns 404 `model_not_found`, and no local estimation is performed. If the upstream answer omits `totalTokens`, the proxy reports an upstream failure (502 `INTERNAL` on the Gemini surface, 500 `api_error` on the Anthropic one) rather than substituting a fabricated `0`.
 - **Embeddings**: `embedContent` and `batchEmbedContents` return HTTP 501 `UNIMPLEMENTED`. CodeAssist has no embedding method; Google's own `gemini-cli` client throws unconditionally in `CodeAssistServer.embedContent`.
 - **Batches**: `batchGenerateContent` returns HTTP 501 `UNIMPLEMENTED`.
 - **Public Context Cache CRUD**: Client `cachedContent` references are rejected with HTTP 501 `UNIMPLEMENTED`. Automatic explicit context caching runs internally on Vertex AI without exposing public cache resource APIs (`cachedContents/*`).
 - **Live / Bidi & Interactions**: Gemini Live WebSocket (Bidi) and Interactions APIs are unavailable under this adapter.
 - **Client Tier & Store Parameters**: Top-level `serviceTier` and `store` fields are explicitly rejected with HTTP 501 `UNIMPLEMENTED`.
-- **Unsupported Resource Families**: All unsupported Gemini resource families (`files`, `tunedModels`, `corpora`, `cachedContents`, `batchJobs`, `operations`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`.
+- **Unsupported Resource Families**: The remaining unsupported Gemini resource families (`tunedModels`, `corpora`, `cachedContents`, `batchJobs`, `operations`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`. `files` is served locally (section 10); resumable uploads within it are not implemented.
 - **Partial Model Resources**: Antigravity does not expose authoritative `baseModelId`, `version`, input/output limits, temperature limits, or defaults. Model list/detail responses deliberately omit those fields instead of fabricating values, so they are a compatibility subset of Google's full `Model` resource.
 - **Capability Freshness**: Antigravity's quota response has no authoritative observation timestamp. `checked_at` reports when diagnostics were assembled, not when Google produced the capability snapshot. A listed model is provider-advertised, not a guarantee that the next generation call will succeed.
 - **Negative Evidence Is Account-Scoped**: A 404 marks only that account-model pair unsupported; quota and rate-limit failures use expiring cooldowns. The proxy does not convert those failures into permanent global removal and never reroutes to a sibling model.
@@ -264,12 +276,69 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 
 ### Explicit Compatibility Limits
 
-- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, Files, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable.
+- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable. The Files API is served by the proxy's own local store (section 10), not by Anthropic.
 - Anthropic prompt-cache controls are accepted as inert compatibility metadata. Usage cannot report genuine Anthropic cache creation; a Gemini implicit-cache hit is not equivalent to Anthropic cache semantics.
 - `redacted_thinking` is rejected because Anthropic ciphertext cannot be converted into a valid Gemini thought signature. `thinking.display` is also unavailable. Supported opaque thought signatures are round-tripped only when the upstream transport supplies compatible signature bytes.
 - Structured output via `output_config.format`, deferred/strict tools, and `disable_parallel_tool_use=true` are rejected instead of being silently weakened. Gemini cannot guarantee those Anthropic execution semantics through this path.
-- Inline images are restricted to verified JPEG, PNG, and WebP base64 sources. Anthropic-supported GIF, URL, and Files API sources are rejected because this proxy has no faithful upstream representation for them.
+- Inline images are restricted to verified JPEG, PNG, and WebP base64 sources. Anthropic-supported GIF and URL sources are rejected because this proxy has no faithful upstream representation for them. A `{"type":"file","file_id":…}` image or document source is accepted and resolved against the proxy's own local file store (section 10); after expansion an image source must still land on one of the three verified image types.
 - Custom stop strings are forwarded, but the internal response does not identify which string matched. Therefore `stop_reason` can be preserved while `stop_sequence` may remain `null` instead of fabricating an attribution.
 - Thinking budget is constrained to fit the effective output-token cap. Some native Anthropic interleaved-thinking combinations allow budgets that this Gemini transport cannot represent and are rejected locally.
 - For special unregistered Claude thinking presets, the upstream-compatible request recipe may still remove stop sequences. Registered model variants retain caller stops and clamp, but never increase, `max_tokens`.
 - `anthropic-version` is accepted by the HTTP compatibility surface but does not select different proxy schemas. Newly introduced Anthropic fields are rejected until the adapter explicitly supports their semantics.
+
+---
+
+## 10. Files API — A Local Store, Not a Provider File Plane
+
+### What this actually is
+
+`google.internal.cloud.code.v1internal.*` on `cloudcode-pa.googleapis.com` has **no file plane**: no upload method, no `files/*` resource, and no `fileUri` fetch. That was read out of the vendor's own protobuf descriptors, not inferred; see `docs/antigravitymanager_api_surface_matrix_2026-08-08.md`. What the generate call does accept is `inlineData { mimeType, data }`.
+
+So the Files API here is a **local content-addressed store plus reference expansion**. A client uploads once and gets a handle; every later request naming that handle has it expanded into an `inlineData` part on the way upstream. That is a real implementation of the client-visible contract — uploads persist across requests and restarts, handles resolve, and a multi-turn conversation stops re-sending megabytes of base64 over the client link.
+
+It is **not** provider-side storage, and it delivers **none of the token savings** a real server-side file cache would give: the bytes still travel to Google inline on every request that references them, exactly as they did before. Anything claiming otherwise would be false.
+
+### The store
+
+`FileContentStore` (`modules/files/file-content-store.service.ts`) is the single owner, protocol-agnostic, with a narrow interface: `put`, `get`, `stat`, `list`, `delete`, `sweep`. It holds policy only; every path, atomic rename and index parse lives in `file-store-disk.ts`. The store lives at `<userData>/proxy-files`.
+
+| Property | Behaviour |
+| :--- | :--- |
+| **Addressing** | Handles are the first 32 hex characters of the content's sha256. Uploading identical bytes twice returns the same handle over one blob; the repeat refreshes the expiry and adopts a newly supplied display name. |
+| **Size ceilings** | 20 MiB per file, 512 MiB per store, both configurable through `FILE_STORE_OPTIONS`. Either ceiling produces a `413`-shaped protocol error in the caller's own dialect. |
+| **TTL** | 48 hours, matching the lifetime Google documents for its own Files API. Expired handles resolve to an explicit *expired* error, never to a silently empty part. Sweeps run at startup, on a 15-minute timer, and before every listing. |
+| **Crash safety** | Content is written to `tmp/` and renamed into place, so a half-written blob is never addressable. The index is a JSON document written the same way; a torn or truncated index starts empty rather than throwing, and orphaned blobs are reclaimed on the next load. |
+| **MIME handling** | The declared type is trusted only after a magic-byte sniff. Both are stored; the sniffed one wins when they disagree, because the upstream call validates the bytes and not the label. A recognised text payload keeps a more specific declared text type (`text/csv` over `text/plain`). |
+| **Path safety** | Handles are opaque ids this proxy generates and are matched against `^[0-9a-f]{32}$`. A client-supplied string never reaches the filesystem; `../` is reported as "never issued" rather than sanitised. |
+| **Privacy** | The store holds user documents. File contents are never logged and filenames never enter telemetry. |
+
+### Routes
+
+| Surface | Routes |
+| :--- | :--- |
+| **Gemini** | `POST /upload/v1beta/files` (simple media and multipart forms; resumable is not implemented), `GET /v1beta/files`, `GET /v1beta/files/{name}`, `DELETE /v1beta/files/{name}`. Returns the documented `File` resource with `state: "ACTIVE"` — there is no processing step, so no `PROCESSING` phase is invented. `uri` names this proxy, because that is where the bytes are. |
+| **OpenAI** | `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `DELETE /v1/files/{id}`. Ids are `file-…`. Only `user_data`, `vision` and `assistants_input` purposes are accepted; `fine-tune`, `batch` and the Assistants output purposes are rejected at upload naming the supported set, rather than stored and left useless. |
+| **Anthropic** | The same five routes, ids `file_…`, gated behind `anthropic-beta: files-api-2025-04-14`. |
+
+**Why one controller serves two dialects.** OpenAI and Anthropic both publish their Files API at exactly `/v1/files`, so a single route table has to answer both. `ClientFilesController` picks the dialect per request: any `anthropic-version` or `anthropic-beta` header means the Anthropic dialect, everything else is OpenAI. Each dialect's shapes, errors and upload rules live in its own adapter module (`openai-file-resource.ts`, `anthropic-file-resource.ts`) beside the controller. **The Anthropic beta header is required** — deliberately, since it is also how a request declares which dialect it wants; the error when it is missing names the header. Gemini has its own controller (`GeminiFilesController`) because its paths do not collide.
+
+All three are views over the same store, so a file uploaded through one surface can be referenced from any of them.
+
+### Reference expansion
+
+`file-reference-expander.ts` is the single resolution routine. It runs on the raw request body **before** validation, because the request contracts reject content parts they do not recognise and a `file_id` part only becomes recognisable once resolved.
+
+| Surface | Accepted reference | Becomes |
+| :--- | :--- | :--- |
+| Gemini | `fileData { fileUri, mimeType }` | `inlineData` |
+| OpenAI Chat | `{"type":"file","file":{"file_id":…}}` | `image_url` data URL for images, `file.file_data` otherwise |
+| OpenAI Responses | `{"type":"input_image","file_id":…}`, `{"type":"input_file","file_id":…}` | inline `image_url` / `file_data` |
+| Anthropic | `{"type":"image"\|"document","source":{"type":"file","file_id":…}}` | base64 source |
+
+Every path converges on a Gemini `inlineData` part. Non-image documents ride an Anthropic-shaped `document` block, which `ClaudeRequestMapper` maps to the same `inlineData` an image block produces.
+
+Expansion is **fail-closed**. A handle this proxy never issued, or one that has expired, is an error in the caller's own dialect; it is never dropped, never forwarded upstream as an opaque URI, and never replaced with an empty part. Handles are accepted in every spelling the surfaces hand out — bare id, `files/{id}`, `file-{id}`, `file_{id}`, and the full `uri`.
+
+### Boot requirements
+
+`src/server/main.ts` registers a buffer content-type parser for the media families so Google's simple upload form (whole body is the file, `Content-Type` names its type) reaches the handler. `application/json` and `multipart/form-data` keep their existing exact-match parsers, so no other route changes behaviour. Upload routes get their own body limit in `src/server/proxy-body-limit.ts`.

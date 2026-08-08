@@ -40,6 +40,31 @@ export type NestServerStartResult =
       message: string;
     };
 
+/**
+ * Lets `POST /upload/v1beta/files` accept Google's simple media form, where the
+ * whole request body is the file and `Content-Type` names its type.
+ *
+ * The parser is registered for media families only. `application/json` and
+ * `multipart/form-data` already have exact-match parsers, and Fastify prefers
+ * an exact match over a matcher, so every existing route keeps its current
+ * behaviour.
+ */
+function registerRawMediaBodyParser(instance: {
+  addContentTypeParser: (
+    matcher: RegExp,
+    options: { parseAs: 'buffer' },
+    handler: (request: unknown, body: Buffer, done: (error: null, body: Buffer) => void) => void,
+  ) => void;
+}): void {
+  instance.addContentTypeParser(
+    /^(?:application|audio|font|image|model|text|video)\//u,
+    { parseAs: 'buffer' },
+    (_request, body, done) => {
+      done(null, body);
+    },
+  );
+}
+
 function isAddressInUseError(error: unknown): boolean {
   if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
     return false;
@@ -86,6 +111,7 @@ export async function bootstrapNestServer(config: ProxyConfig): Promise<NestServ
     });
 
     await app.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
+    registerRawMediaBodyParser(fastifyAdapter.getInstance());
 
     // Enable CORS
     app.enableCors();

@@ -19,11 +19,20 @@ import { ProxyRetryService } from './modules/shared/services/proxy-retry.service
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
 import { CountTokensService } from './modules/shared/services/count-tokens.service';
 import { SignatureStore } from '../antigravity/SignatureStore';
+import { FILE_STORE_OPTIONS, FileContentStore } from './modules/files/file-content-store.service';
+import { resolveFileStoreOptions } from './modules/files/file-store-location';
+import { GeminiFilesController } from './modules/files/gemini-files.controller';
+import { ClientFilesController } from './modules/files/client-files.controller';
 
 @Module({
   imports: [],
-  controllers: [ProxyController, GeminiController],
+  controllers: [ProxyController, GeminiController, GeminiFilesController, ClientFilesController],
   providers: [
+    {
+      provide: FILE_STORE_OPTIONS,
+      useFactory: resolveFileStoreOptions,
+    },
+    FileContentStore,
     RateLimitTrackerService,
     ModelRoutingService,
     {
@@ -55,6 +64,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     SignatureStore,
     ProxyService,
     CountTokensService,
+    FileContentStore,
   ],
 })
 export class ProxyModule {}

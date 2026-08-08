@@ -2,18 +2,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_APP_CONFIG } from '@/modules/config/types';
 import { bootstrapNestServer, getNestServerStatus, stopNestServer } from '@/server/main';
 
-const { mockAddHook, mockAttachResponsesWebSocketServer, mockCreate, mockLogger } = vi.hoisted(
-  () => ({
-    mockAddHook: vi.fn(),
-    mockAttachResponsesWebSocketServer: vi.fn(() => vi.fn()),
-    mockCreate: vi.fn(),
-    mockLogger: {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-  }),
-);
+const {
+  mockAddContentTypeParser,
+  mockAddHook,
+  mockAttachResponsesWebSocketServer,
+  mockCreate,
+  mockLogger,
+} = vi.hoisted(() => ({
+  mockAddContentTypeParser: vi.fn(),
+  mockAddHook: vi.fn(),
+  mockAttachResponsesWebSocketServer: vi.fn(() => vi.fn()),
+  mockCreate: vi.fn(),
+  mockLogger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('@nestjs/core', () => ({
   NestFactory: {
@@ -24,7 +29,10 @@ vi.mock('@nestjs/core', () => ({
 vi.mock('@nestjs/platform-fastify', () => ({
   FastifyAdapter: vi.fn(function MockFastifyAdapter() {
     return {
-      getInstance: () => ({ addHook: mockAddHook }),
+      getInstance: () => ({
+        addContentTypeParser: mockAddContentTypeParser,
+        addHook: mockAddHook,
+      }),
     };
   }),
 }));
@@ -113,6 +121,13 @@ describe('gateway server startup', () => {
     });
     expect(listen).toHaveBeenCalledWith(8123, '0.0.0.0');
     expect(mockAddHook).toHaveBeenCalledWith('onRoute', expect.any(Function));
+    // Google's simple file upload form sends the raw file as the body, so boot
+    // has to register a buffer parser for the media content-type families.
+    expect(mockAddContentTypeParser).toHaveBeenCalledWith(
+      expect.any(RegExp),
+      { parseAs: 'buffer' },
+      expect.any(Function),
+    );
     expect(mockAttachResponsesWebSocketServer).toHaveBeenCalledOnce();
 
     await expect(getNestServerStatus()).resolves.toMatchObject({

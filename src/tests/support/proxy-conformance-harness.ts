@@ -1,6 +1,11 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { Module } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
+import fastifyMultipart from '@fastify/multipart';
 
 import {
   ProxyController,
@@ -13,6 +18,14 @@ import { AccountLeaseService } from '@/modules/proxy-gateway/server/modules/acco
 import type { AccountLeaseTokenData } from '@/modules/proxy-gateway/server/modules/account-lease/interfaces/account-lease-token-types';
 import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { ModelAvailabilityService } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import {
+  FILE_STORE_OPTIONS,
+  FileContentStore,
+} from '@/modules/proxy-gateway/server/modules/files/file-content-store.service';
+import { GeminiFilesController } from '@/modules/proxy-gateway/server/modules/files/gemini-files.controller';
+import { ClientFilesController } from '@/modules/proxy-gateway/server/modules/files/client-files.controller';
+import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
+import type { FileStoreOptions } from '@/modules/proxy-gateway/server/modules/files/file-store.types';
 
 export interface ProxyConformanceService {
   handleAnthropicCountTokens(request: unknown): unknown;
@@ -26,6 +39,8 @@ export interface ProxyConformanceService {
 export interface ProxyConformanceAppOptions {
   proxyService: ProxyConformanceService;
   accountTokens?: AccountLeaseTokenData[];
+  /** Overrides for the local file store; a fresh temp directory by default. */
+  fileStore?: FileStoreOptions;
 }
 
 export function createAccountLeaseTokenFixture(
@@ -100,8 +115,14 @@ export async function createProxyConformanceApp(
     options.accountTokens ?? [createAccountLeaseTokenFixture()],
   );
 
+  const fileStoreOptions: FileStoreOptions = {
+    rootDirectory: mkdtempSync(join(tmpdir(), 'agm-files-')),
+    sweepIntervalMs: 0,
+    ...options.fileStore,
+  };
+
   @Module({
-    controllers: [ProxyController, GeminiController],
+    controllers: [ProxyController, GeminiController, GeminiFilesController, ClientFilesController],
     providers: [
       { provide: ProxyService, useValue: options.proxyService },
       { provide: AccountLeaseService, useValue: accountLeaseService },
@@ -109,15 +130,26 @@ export async function createProxyConformanceApp(
       { provide: IMAGE_QUOTA_REFRESH, useValue: async () => undefined },
       { provide: ModelRoutingService, useValue: { getConfiguredRoutes: () => [] } },
       { provide: ModelAvailabilityService, useValue: { getSnapshot: () => [] } },
+      { provide: FILE_STORE_OPTIONS, useValue: fileStoreOptions },
+      FileContentStore,
     ],
   })
   class ProxyConformanceModule {}
 
-  const app = await NestFactory.create<NestFastifyApplication>(
-    ProxyConformanceModule,
-    new FastifyAdapter(),
-    { logger: false },
-  );
+  const adapter = new FastifyAdapter();
+  // The real server registers both of these at boot; file uploads need them.
+  adapter
+    .getInstance()
+    .addContentTypeParser(
+      /^(?:application|audio|font|image|model|text|video)\//u,
+      { parseAs: 'buffer' },
+      (_request, body, done) => done(null, body),
+    );
+
+  const app = await NestFactory.create<NestFastifyApplication>(ProxyConformanceModule, adapter, {
+    logger: false,
+  });
+  await app.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
   await app.init();
   await app.getHttpAdapter().getInstance().ready();
   return app;
