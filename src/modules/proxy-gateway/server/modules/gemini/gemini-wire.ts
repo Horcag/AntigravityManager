@@ -2,6 +2,10 @@ import { isObjectLike, isNumber, isString, isNil } from 'lodash-es';
 import { HttpStatus } from '@nestjs/common';
 import type { GeminiResponse } from '../../common/interfaces/request-interfaces';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
+import {
+  classifyForbiddenUpstreamError,
+  describeForbiddenUpstreamClassification,
+} from '../../common/google-error-details';
 
 /**
  * Sanitizes a Gemini response by stripping top-level transport metadata fields
@@ -236,6 +240,8 @@ export interface SanitizedGoogleErrorResult {
   googleStatus: string;
   message: string;
   retryAfter?: string;
+  /** Set when a 403 is user-recoverable rather than a dead credential. */
+  validationLink?: string;
   errorEnvelope: {
     error: {
       code: number;
@@ -253,6 +259,8 @@ export function sanitizeUpstreamError(error: unknown): SanitizedGoogleErrorResul
   let rawMessage = error instanceof Error ? error.message : String(error);
   let googleStatus: string | undefined;
   let retryAfter: string | undefined;
+  let recoverableSuffix: string | undefined;
+  let validationLink: string | undefined;
 
   if (error instanceof UpstreamRequestError) {
     if (error.status && error.status >= 400 && error.status <= 599) {
@@ -276,9 +284,22 @@ export function sanitizeUpstreamError(error: unknown): SanitizedGoogleErrorResul
         // Fall back to error.message
       }
     }
+
+    if (statusCode === HttpStatus.FORBIDDEN) {
+      const classification = classifyForbiddenUpstreamError({
+        details: error.details,
+        body: error.body,
+        message: error.message,
+      });
+      // Appended after sanitizing: the verification URL is the whole point of the message and the
+      // credential redactor would otherwise mangle its query string.
+      recoverableSuffix = describeForbiddenUpstreamClassification(classification);
+      validationLink = classification.validationLink;
+    }
   }
 
-  const message = sanitizeErrorMessage(rawMessage);
+  const sanitizedMessage = sanitizeErrorMessage(rawMessage);
+  const message = recoverableSuffix ? `${sanitizedMessage} ${recoverableSuffix}` : sanitizedMessage;
   const finalGoogleStatus = googleStatus || getGoogleStatusForHttpCode(statusCode);
 
   return {
@@ -286,6 +307,7 @@ export function sanitizeUpstreamError(error: unknown): SanitizedGoogleErrorResul
     googleStatus: finalGoogleStatus,
     message,
     retryAfter,
+    validationLink,
     errorEnvelope: {
       error: {
         code: statusCode,

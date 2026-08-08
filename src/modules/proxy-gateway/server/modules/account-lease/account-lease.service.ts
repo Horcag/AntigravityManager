@@ -25,6 +25,10 @@ import {
 } from './policies/account-lease-limit-policy';
 import { AccountLeaseConfigPolicy } from './policies/account-lease-config-policy';
 import { ModelAvailabilityService } from '../shared/services/model-availability.service';
+import {
+  sumGoogleOneAiCredits,
+  type UpstreamResponseMetadata,
+} from '../../common/upstream-response-metadata';
 import type { CatalogModelRoleIndex } from '../../../antigravity/ModelMapping';
 
 interface GetNextTokenOptions {
@@ -200,6 +204,31 @@ export class AccountLeaseService implements OnModuleInit {
 
   markModelSuccess(accountIdOrEmail: string, model: string): void {
     this.limitPolicy.markModelSuccess(accountIdOrEmail, model);
+  }
+
+  /**
+   * Folds the credit fields the upstream reports on every response into the cached quota, so the
+   * balance tracks usage between the periodic quota refreshes instead of only at refresh time.
+   *
+   * In-memory only: the authoritative `ai_credits` value still comes from the quota refresh.
+   */
+  recordUpstreamCredits(accountIdOrEmail: string, metadata: UpstreamResponseMetadata): void {
+    const remaining = sumGoogleOneAiCredits(metadata.remainingCredits);
+    if (remaining === null) {
+      return;
+    }
+
+    const accountId = this.resolveAccountId(accountIdOrEmail) ?? accountIdOrEmail;
+    const tokenData = this.tokens.get(accountId);
+    if (!tokenData) {
+      return;
+    }
+
+    const quota = (tokenData.quota ??= { models: {} });
+    quota.ai_credits = {
+      credits: remaining,
+      expiryDate: quota.ai_credits?.expiryDate ?? '',
+    };
   }
 
   getRemainingRateLimitWait(accountIdOrEmail: string, model?: string): number {

@@ -4,7 +4,10 @@ import { lastValueFrom, toArray } from 'rxjs';
 
 import { decodeInternalSseData } from '@/modules/proxy-gateway/antigravity/internal-sse';
 import { UpstreamRequestError } from '@/modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
-import { createGeminiSseObservable } from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
+import {
+  createGeminiSseObservable,
+  type GeminiSseDiagnostics,
+} from '@/modules/proxy-gateway/server/modules/gemini/gemini-sse-decoder';
 import { sanitizeGeminiResponse } from '@/modules/proxy-gateway/server/modules/gemini/gemini-wire';
 
 describe('decodeInternalSseData', () => {
@@ -30,6 +33,7 @@ describe('decodeInternalSseData', () => {
         modelVersion: 'gemini-3-flash',
         responseId: 'xmJrapmCPdC5vdIP1t_bwA8',
       },
+      envelope: JSON.parse(raw),
     });
   });
 
@@ -43,7 +47,7 @@ describe('decodeInternalSseData', () => {
 
     const result = decodeInternalSseData(JSON.stringify(bare));
 
-    expect(result).toEqual({ kind: 'response', response: bare });
+    expect(result).toEqual({ kind: 'response', response: bare, envelope: bare });
   });
 
   it('does not double-unwrap a payload carrying both response and top-level candidates', () => {
@@ -56,7 +60,7 @@ describe('decodeInternalSseData', () => {
 
     const result = decodeInternalSseData(JSON.stringify(payload));
 
-    expect(result).toEqual({ kind: 'response', response: payload });
+    expect(result).toEqual({ kind: 'response', response: payload, envelope: payload });
   });
 
   it('keeps valid response metadata when a chunk has no candidates', () => {
@@ -69,6 +73,7 @@ describe('decodeInternalSseData', () => {
     expect(decodeInternalSseData(JSON.stringify(payload))).toEqual({
       kind: 'response',
       response: payload,
+      envelope: payload,
     });
   });
 
@@ -194,36 +199,78 @@ describe('createGeminiSseObservable', () => {
     expect(candidate.customField).toBe(42);
   });
 
-  it('emits error on malformed JSON after a valid event', async () => {
+  it('skips a malformed frame and still completes the response', async () => {
     const streamContent =
       'data: {"response":{"candidates":[{"content":{"parts":[{"text":"valid"}]}}]}}\n\n' +
-      'data: {malformed json\n\n';
+      'data: {malformed json\n\n' +
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"after"}]}}]}}\n\n';
 
     const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
 
-    let emittedChunks = 0;
+    const chunks = await lastValueFrom(
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).pipe(toArray()),
+    );
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toContain('valid');
+    expect(chunks[1]).toContain('after');
+    expect(diagnostics).toEqual([{ skippedFrames: 1 }]);
+  });
+
+  it('fails only when every frame was malformed, reporting the skipped count', async () => {
+    const upstreamStream = Readable.from([
+      Buffer.from('data: {malformed json\n\ndata: also not json\n\n'),
+    ]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
     let caughtError: unknown = null;
 
-    try {
-      await new Promise<void>((resolve, reject) => {
-        createGeminiSseObservable(upstreamStream).subscribe({
-          next: () => {
-            emittedChunks++;
-          },
-          error: (err) => {
-            caughtError = err;
-            reject(err);
-          },
-          complete: () => resolve(),
-        });
+    await new Promise<void>((resolve) => {
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).subscribe({
+        error: (error) => {
+          caughtError = error;
+          resolve();
+        },
+        complete: () => resolve(),
       });
-    } catch {
-      // Expected rejection
-    }
+    });
 
-    expect(emittedChunks).toBe(1);
-    expect(caughtError).toBeDefined();
-    expect((caughtError as Error).message).toContain('Stream parse error');
+    expect((caughtError as Error).message).toBe(
+      'Empty response stream (2 malformed frame(s) skipped)',
+    );
+    expect(diagnostics).toEqual([{ skippedFrames: 2 }]);
+  });
+
+  it('surfaces the v1internal envelope fields as stream diagnostics', async () => {
+    const streamContent =
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"a"}]}}]},"traceId":"trace-1","remainingCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"500"}]}\n\n' +
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"b"}]}}]},"traceId":"trace-2","consumedCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"3"}],"remainingCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"497"}]}\n\n';
+
+    const upstreamStream = Readable.from([Buffer.from(streamContent)]);
+    const diagnostics: GeminiSseDiagnostics[] = [];
+
+    const chunks = await lastValueFrom(
+      createGeminiSseObservable(upstreamStream, 300000, {
+        onDiagnostics: (entry) => diagnostics.push(entry),
+      }).pipe(toArray()),
+    );
+
+    expect(chunks).toHaveLength(2);
+    expect(JSON.parse(chunks[1].replace(/^data: /, '').trim())).not.toHaveProperty('traceId');
+    expect(diagnostics).toEqual([
+      {
+        skippedFrames: 0,
+        upstreamMetadata: {
+          traceId: 'trace-2',
+          consumedCredits: [{ creditType: 'GOOGLE_ONE_AI', creditAmount: '3' }],
+          remainingCredits: [{ creditType: 'GOOGLE_ONE_AI', creditAmount: '497' }],
+        },
+      },
+    ]);
   });
 
   it('destroys the exact upstream stream on unsubscribe', () => {
