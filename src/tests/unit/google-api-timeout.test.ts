@@ -702,6 +702,116 @@ describe('GoogleAPIService fetchQuota fallback policy', () => {
     expect(fetchMock.mock.calls[2]?.[1]?.body).toBe(JSON.stringify({}));
   });
 
+  it('captures model roles and descriptor capability fields from fetchAvailableModels', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          models: {
+            'gemini-3-flash': {
+              quotaInfo: { remainingFraction: 0.65, resetTime: '2026-05-05T00:00:00Z' },
+              supportsPdf: true,
+              supportsVideo: false,
+              tokenizerType: 'GEMINI',
+              vertexModelId: 'publishers/google/models/gemini-3-flash',
+              isInternal: false,
+              disabled: false,
+              beta: true,
+              preview: true,
+            },
+            tab_lite_preview: {
+              quotaInfo: { remainingFraction: 1, resetTime: '2026-05-05T00:00:00Z' },
+            },
+          },
+          defaultAgentModelId: 'gemini-3-flash',
+          agentModelSorts: [
+            {
+              groups: [{ modelIds: ['gemini-3-flash'] }, { modelIds: ['gemini-3-flash'] }],
+            },
+          ],
+          tabModelIds: ['tab_lite_preview', ''],
+          commandModelIds: [],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: vi.fn().mockResolvedValue('INVALID_ARGUMENT'),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { ConfigManager } = await import('@/modules/config/ipc/manager');
+    vi.spyOn(ConfigManager, 'loadConfig').mockReturnValue({
+      proxy: { upstream_proxy: { enabled: false } },
+    } as any);
+
+    const { GoogleAPIService } = await import('@/modules/cloud-account/services/GoogleAPIService');
+    vi.spyOn(GoogleAPIService, 'fetchProjectContext').mockResolvedValue({
+      projectId: 'project-1',
+      subscriptionTier: 'free',
+    });
+
+    const quota = await GoogleAPIService.fetchQuota('access-token');
+
+    expect(quota.default_agent_model_id).toBe('gemini-3-flash');
+    expect(quota.model_roles).toEqual({
+      agent: ['gemini-3-flash'],
+      tab: ['tab_lite_preview'],
+    });
+    expect(quota.models['gemini-3-flash']).toMatchObject({
+      supports_pdf: true,
+      supports_video: false,
+      tokenizer_type: 'GEMINI',
+      vertex_model_id: 'publishers/google/models/gemini-3-flash',
+      is_internal: false,
+      disabled: false,
+      beta: true,
+      preview: true,
+    });
+  });
+
+  it('omits role state when the discovery response carries no role arrays', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: vi.fn().mockResolvedValue({
+          models: {
+            'gemini-3-flash': {
+              quotaInfo: { remainingFraction: 0.65, resetTime: '2026-05-05T00:00:00Z' },
+            },
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: vi.fn().mockResolvedValue('INVALID_ARGUMENT'),
+      });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { ConfigManager } = await import('@/modules/config/ipc/manager');
+    vi.spyOn(ConfigManager, 'loadConfig').mockReturnValue({
+      proxy: { upstream_proxy: { enabled: false } },
+    } as any);
+
+    const { GoogleAPIService } = await import('@/modules/cloud-account/services/GoogleAPIService');
+    vi.spyOn(GoogleAPIService, 'fetchProjectContext').mockResolvedValue({
+      projectId: 'project-1',
+      subscriptionTier: 'free',
+    });
+
+    const quota = await GoogleAPIService.fetchQuota('access-token');
+
+    expect(quota.model_roles).toBeUndefined();
+    expect(quota.default_agent_model_id).toBeUndefined();
+  });
+
   it('falls back to sandbox loadCodeAssist when prod returns 429', async () => {
     const fetchMock = vi
       .fn()

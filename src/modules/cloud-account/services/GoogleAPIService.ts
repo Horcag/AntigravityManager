@@ -14,6 +14,7 @@ import {
   type OAuthClientDescriptor,
   OAuthClientRegistryService,
 } from './OAuthClientRegistryService';
+import type { CloudModelRoles } from '@/modules/cloud-account/types';
 
 // --- Constants & Config ---
 const URLS = {
@@ -109,6 +110,8 @@ export interface QuotaData {
   is_forbidden?: boolean;
   ai_credits?: { credits: number; expiryDate: string };
   quota_groups?: QuotaGroup[];
+  model_roles?: CloudModelRoles;
+  default_agent_model_id?: string;
 }
 
 export interface ModelQuotaInfo {
@@ -122,6 +125,14 @@ export interface ModelQuotaInfo {
   max_tokens?: number;
   max_output_tokens?: number;
   supported_mime_types?: Record<string, boolean>;
+  is_internal?: boolean;
+  disabled?: boolean;
+  beta?: boolean;
+  preview?: boolean;
+  supports_video?: boolean;
+  supports_pdf?: boolean;
+  tokenizer_type?: string;
+  vertex_model_id?: string;
 }
 
 export interface QuotaBucket {
@@ -153,6 +164,24 @@ interface ModelInfoRaw {
   maxTokens?: number;
   maxOutputTokens?: number;
   supportedMimeTypes?: Record<string, boolean>;
+  isInternal?: boolean;
+  disabled?: boolean;
+  beta?: boolean;
+  preview?: boolean;
+  supportsVideo?: boolean;
+  supportsPdf?: boolean;
+  tokenizerType?: string;
+  vertexModelId?: string;
+}
+
+/** `ModelGroup` in model_configs.proto: one labelled row of the IDE model picker. */
+interface ModelGroupRaw {
+  modelIds?: string[];
+}
+
+/** `ModelSort` in model_configs.proto. */
+interface ModelSortRaw {
+  groups?: ModelGroupRaw[];
 }
 
 interface DeprecatedModelInfoRaw {
@@ -186,9 +215,25 @@ interface LoadProjectResponse {
   ineligibleTiers?: IneligibleTierRaw[];
 }
 
+/**
+ * `FetchAvailableModelsResponse`
+ * (`google/internal/cloud/code/v1internal/model_configs.proto`). Every field
+ * except `models` is optional on the wire: accounts and provider versions
+ * return different subsets, so absent role arrays must degrade to "no role
+ * information" rather than "no models in that role".
+ */
 interface FetchModelsResponse {
   models?: Record<string, ModelInfoRaw>;
   deprecatedModelIds?: Record<string, DeprecatedModelInfoRaw>;
+  defaultAgentModelId?: string;
+  agentModelSorts?: ModelSortRaw[];
+  commandModelIds?: string[];
+  tabModelIds?: string[];
+  imageGenerationModelIds?: string[];
+  mqueryModelIds?: string[];
+  webSearchModelIds?: string[];
+  commitMessageModelIds?: string[];
+  audioTranscriptionModelIds?: string[];
 }
 
 interface QuotaSummaryBucketRaw {
@@ -281,7 +326,69 @@ function toModelQuotaInfo(modelName: string, info: ModelInfoRaw): ModelQuotaInfo
     max_tokens: info.maxTokens,
     max_output_tokens: info.maxOutputTokens,
     supported_mime_types: info.supportedMimeTypes,
+    is_internal: info.isInternal,
+    disabled: info.disabled,
+    beta: info.beta,
+    preview: info.preview,
+    supports_video: info.supportsVideo,
+    supports_pdf: info.supportsPdf,
+    tokenizer_type: info.tokenizerType,
+    vertex_model_id: info.vertexModelId,
   };
+}
+
+function toModelIdList(modelIds: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(modelIds)) {
+    return undefined;
+  }
+
+  const normalized = modelIds.filter((modelId) => isString(modelId) && modelId.trim() !== '');
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+/**
+ * Flattens `agent_model_sorts` into the flat set of ids the provider offers on
+ * the agent (chat) surface. The grouping is a picker layout concern; only
+ * membership matters to the catalog.
+ */
+function toAgentRoleModelIds(agentModelSorts: ModelSortRaw[] | undefined): string[] | undefined {
+  if (!Array.isArray(agentModelSorts)) {
+    return undefined;
+  }
+
+  const modelIds: string[] = [];
+  for (const sort of agentModelSorts) {
+    for (const group of sort.groups ?? []) {
+      for (const modelId of group.modelIds ?? []) {
+        if (isString(modelId) && modelId.trim() !== '' && !modelIds.includes(modelId)) {
+          modelIds.push(modelId);
+        }
+      }
+    }
+  }
+
+  return modelIds.length > 0 ? modelIds : undefined;
+}
+
+function toModelRoles(data: FetchModelsResponse): CloudModelRoles | undefined {
+  const roles: CloudModelRoles = {
+    agent: toAgentRoleModelIds(data.agentModelSorts),
+    command: toModelIdList(data.commandModelIds),
+    tab: toModelIdList(data.tabModelIds),
+    image_generation: toModelIdList(data.imageGenerationModelIds),
+    mquery: toModelIdList(data.mqueryModelIds),
+    web_search: toModelIdList(data.webSearchModelIds),
+    commit_message: toModelIdList(data.commitMessageModelIds),
+    audio_transcription: toModelIdList(data.audioTranscriptionModelIds),
+  };
+
+  for (const key of Object.keys(roles) as (keyof CloudModelRoles)[]) {
+    if (isUndefined(roles[key])) {
+      delete roles[key];
+    }
+  }
+
+  return Object.keys(roles).length > 0 ? roles : undefined;
 }
 
 function toModelForwardingRules(
@@ -806,6 +913,15 @@ export class GoogleAPIService {
     const modelForwardingRules = toModelForwardingRules(data.deprecatedModelIds);
     if (modelForwardingRules) {
       result.model_forwarding_rules = modelForwardingRules;
+    }
+
+    const modelRoles = toModelRoles(data);
+    if (modelRoles) {
+      result.model_roles = modelRoles;
+    }
+
+    if (isString(data.defaultAgentModelId) && data.defaultAgentModelId.trim() !== '') {
+      result.default_agent_model_id = data.defaultAgentModelId;
     }
 
     return result;

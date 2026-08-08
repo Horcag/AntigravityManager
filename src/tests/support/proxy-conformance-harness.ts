@@ -66,6 +66,7 @@ export function createAccountLeaseServiceFixture(tokens: AccountLeaseTokenData[]
 
   return {
     getAllCollectedModels: () => new Set(collectedModels),
+    getCatalogModelRoleIndex: () => undefined,
     getModelCatalogStatus: (model: string) =>
       [...collectedModels].some(
         (candidate) => normalizeModelId(candidate) === normalizeModelId(model),

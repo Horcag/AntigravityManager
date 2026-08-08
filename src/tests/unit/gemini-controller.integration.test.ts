@@ -10,6 +10,7 @@ import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
 import { attachModelRouteMetadata } from '../../modules/proxy-gateway/server/common/model-route-metadata';
+import type { CatalogModelRoleIndex } from '../../modules/proxy-gateway/antigravity/ModelMapping';
 
 describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
   let app: NestFastifyApplication;
@@ -24,6 +25,7 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     getAllCollectedModels: vi.fn(
       () => new Set(['gemini-3-flash', 'gemini-3.1-pro-high', 'gemini-3.5-flash-extra-low']),
     ),
+    getCatalogModelRoleIndex: vi.fn<() => CatalogModelRoleIndex | undefined>(() => undefined),
   };
 
   beforeAll(async () => {
@@ -97,6 +99,25 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     expect(body.models).not.toContainEqual(
       expect.objectContaining({ name: 'models/tab_flash_lite_preview' }),
     );
+  });
+
+  it('GET /v1beta/models withholds ids the provider assigned to a non-chat role', async () => {
+    mockAccountLeaseService.getAllCollectedModels.mockReturnValueOnce(
+      new Set(['gemini-3-flash', 'tab_lite_preview']),
+    );
+    mockAccountLeaseService.getCatalogModelRoleIndex.mockReturnValueOnce({
+      nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
+      chatModelIds: new Set(['gemini-3-flash']),
+      hasChatRoleData: true,
+    });
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models',
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().models).toEqual([expect.objectContaining({ name: 'models/gemini-3-flash' })]);
   });
 
   it('returns native Gemini model route identity headers', async () => {

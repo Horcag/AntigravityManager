@@ -25,6 +25,7 @@ import {
 } from './policies/account-lease-limit-policy';
 import { AccountLeaseConfigPolicy } from './policies/account-lease-config-policy';
 import { ModelAvailabilityService } from '../shared/services/model-availability.service';
+import type { CatalogModelRoleIndex } from '../../../antigravity/ModelMapping';
 
 interface GetNextTokenOptions {
   sessionKey?: string;
@@ -404,6 +405,10 @@ export class AccountLeaseService implements OnModuleInit {
 
   getAllCollectedModels(): Set<string> {
     return this.modelPolicy.getAllCollectedModels();
+  }
+
+  getCatalogModelRoleIndex(): CatalogModelRoleIndex {
+    return this.modelPolicy.getCatalogModelRoleIndex();
   }
 
   getModelCatalogStatus(model: string): ModelCatalogStatus {

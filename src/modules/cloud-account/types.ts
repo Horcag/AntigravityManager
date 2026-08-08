@@ -32,7 +32,38 @@ export interface CloudQuotaModelInfo {
   max_tokens?: number;
   max_output_tokens?: number;
   supported_mime_types?: Record<string, boolean>;
+  /** `ModelDetails.is_internal`: provider-internal model, not offered in the IDE picker. */
+  is_internal?: boolean;
+  /** `ModelDetails.disabled`: advertised but turned off for this account. */
+  disabled?: boolean;
+  beta?: boolean;
+  preview?: boolean;
+  supports_video?: boolean;
+  supports_pdf?: boolean;
+  tokenizer_type?: string;
+  vertex_model_id?: string;
 }
+
+/**
+ * Surface partitioning carried by `v1internal:fetchAvailableModels`
+ * (`FetchAvailableModelsResponse`, `google/internal/cloud/code/v1internal/model_configs.proto`).
+ * Each entry lists the provider model ids the IDE is allowed to use for that
+ * surface; `agent` is flattened from `agent_model_sorts[].groups[].model_ids`
+ * and is the only chat-shaped role. Every key is optional because different
+ * accounts and provider versions return different subsets.
+ */
+export interface CloudModelRoles {
+  agent?: string[];
+  command?: string[];
+  tab?: string[];
+  image_generation?: string[];
+  mquery?: string[];
+  web_search?: string[];
+  commit_message?: string[];
+  audio_transcription?: string[];
+}
+
+export type CloudModelRoleId = keyof CloudModelRoles;
 
 export interface CloudQuotaData {
   models: Record<string, CloudQuotaModelInfo>;
@@ -42,6 +73,8 @@ export interface CloudQuotaData {
   isForbidden?: boolean;
   ai_credits?: { credits: number; expiryDate: string };
   quota_groups?: CloudQuotaGroup[];
+  model_roles?: CloudModelRoles;
+  default_agent_model_id?: string;
 }
 
 export interface CloudQuotaBucket {
@@ -107,6 +140,25 @@ export const CloudQuotaModelInfoSchema = z.object({
   max_tokens: z.number().optional(),
   max_output_tokens: z.number().optional(),
   supported_mime_types: z.record(z.string(), z.boolean()).optional(),
+  is_internal: z.boolean().optional(),
+  disabled: z.boolean().optional(),
+  beta: z.boolean().optional(),
+  preview: z.boolean().optional(),
+  supports_video: z.boolean().optional(),
+  supports_pdf: z.boolean().optional(),
+  tokenizer_type: z.string().optional(),
+  vertex_model_id: z.string().optional(),
+});
+
+export const CloudModelRolesSchema = z.object({
+  agent: z.array(z.string()).optional(),
+  command: z.array(z.string()).optional(),
+  tab: z.array(z.string()).optional(),
+  image_generation: z.array(z.string()).optional(),
+  mquery: z.array(z.string()).optional(),
+  web_search: z.array(z.string()).optional(),
+  commit_message: z.array(z.string()).optional(),
+  audio_transcription: z.array(z.string()).optional(),
 });
 
 export const CloudQuotaBucketSchema = z.object({
@@ -132,6 +184,8 @@ export const CloudQuotaDataSchema = z.object({
   isForbidden: z.boolean().optional(),
   ai_credits: z.object({ credits: z.number(), expiryDate: z.string() }).optional(),
   quota_groups: z.array(CloudQuotaGroupSchema).optional(),
+  model_roles: CloudModelRolesSchema.optional(),
+  default_agent_model_id: z.string().optional(),
 });
 
 export const CloudAccountSchema = z.object({

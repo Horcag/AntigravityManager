@@ -227,6 +227,7 @@ describe('ProxyController Integration', () => {
             'gemini-imagecraft-chat',
           ]),
       ),
+      getCatalogModelRoleIndex: vi.fn(() => undefined),
     };
     const controller = new ProxyController(proxyService as any, accountLeaseService as any);
     const reply = createReplyMock();
@@ -262,6 +263,7 @@ describe('ProxyController Integration', () => {
             'tab_jump_flash_lite_preview',
           ]),
       ),
+      getCatalogModelRoleIndex: vi.fn(() => undefined),
     };
     const controller = new ProxyController(proxyService as any, accountLeaseService as any);
     const reply = createReplyMock();
@@ -276,6 +278,7 @@ describe('ProxyController Integration', () => {
   it('reports configured routes separately from the standard model list', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash'])),
+      getCatalogModelRoleIndex: vi.fn(() => undefined),
       getModelCatalogStatus: vi.fn(() => 'known'),
       getModelRouteAvailability: vi.fn(() => [
         {
@@ -332,6 +335,7 @@ describe('ProxyController Integration', () => {
       getAllCollectedModels: vi.fn(
         () => new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
       ),
+      getCatalogModelRoleIndex: vi.fn(() => undefined),
       getModelCatalogStatus: vi.fn(() => 'known'),
       getModelRouteAvailability: vi.fn(() => []),
     };
@@ -355,14 +359,77 @@ describe('ProxyController Integration', () => {
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
         canonical_models: ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
-        unpublished_catalog_ids: ['chat_20706', 'tab_flash_lite_preview'],
+        unpublished_catalog_ids: [
+          { id: 'chat_20706', reason: 'override', roles: [] },
+          { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
+        ],
       }),
     );
+  });
+
+  it('names the provider role that withheld an id in model-routes diagnostics', () => {
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(
+        () => new Set(['gemini-3-flash', 'tab_lite_preview', 'commit_helper']),
+      ),
+      getCatalogModelRoleIndex: vi.fn(() => ({
+        nonChatRoles: new Map([
+          ['tab_lite_preview', ['tab']],
+          ['commit_helper', ['commit_message']],
+        ]),
+        chatModelIds: new Set(['gemini-3-flash']),
+        hasChatRoleData: true,
+      })),
+      getModelCatalogStatus: vi.fn(() => 'known'),
+      getModelRouteAvailability: vi.fn(() => []),
+    };
+    const controller = new ProxyController(
+      {} as any,
+      accountLeaseService as any,
+      undefined,
+      { getConfiguredRoutes: vi.fn(() => []) } as any,
+      { getSnapshot: vi.fn(() => []) } as any,
+    );
+    const reply = createReplyMock();
+
+    controller.listModelRoutes(reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canonical_models: ['commit_helper', 'gemini-3-flash', 'tab_lite_preview'],
+        unpublished_catalog_ids: [
+          { id: 'commit_helper', reason: 'role', roles: ['commit_message'] },
+          { id: 'tab_lite_preview', reason: 'role', roles: ['tab'] },
+        ],
+      }),
+    );
+  });
+
+  it('withholds provider role members from the standard model list', () => {
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash', 'tab_lite_preview'])),
+      getCatalogModelRoleIndex: vi.fn(() => ({
+        nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
+        chatModelIds: new Set(['gemini-3-flash']),
+        hasChatRoleData: true,
+      })),
+    };
+    const controller = new ProxyController(
+      { handleChatCompletions: vi.fn(), handleAnthropicMessages: vi.fn() } as any,
+      accountLeaseService as any,
+    );
+    const reply = createReplyMock();
+
+    controller.listModels(reply as any);
+
+    const payload = reply.send.mock.calls[0][0];
+    expect(payload.data.map((model: { id: string }) => model.id)).toEqual(['gemini-3-flash']);
   });
 
   it('returns recent model misses as part of the model routes response', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash'])),
+      getCatalogModelRoleIndex: vi.fn(() => undefined),
       getModelCatalogStatus: vi.fn(() => 'known'),
       getModelRouteAvailability: vi.fn(() => []),
     };

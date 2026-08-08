@@ -264,6 +264,7 @@ export class GeminiController {
     const dynamicModelIds = getPublishedCatalogModelIds(
       {},
       this.accountLeaseService?.getAllCollectedModels(),
+      this.accountLeaseService?.getCatalogModelRoleIndex(),
     );
 
     return dynamicModelIds.map((id) => this.toGeminiModelMetadata(`models/${id}`));
