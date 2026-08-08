@@ -134,8 +134,18 @@ export function resolveCompletionModelFlags(
  * Withheld ids stay visible, unfiltered, in GET /v1/model-routes so it stays
  * evident the provider advertised them.
  */
+// 2026-08-08, measured on 0.19.27-local1: `chat_20706` and `tab_flash_lite_preview` were removed
+// from this table when the completion-flag rule landed, on the assumption the rule would cover
+// them. It does not — across 25 minutes and several provider poll cycles every withheld entry still
+// reported `reason: 'override'` with `flags: []`, so the three ModelDetails markers never reach
+// `resolveCompletionModelFlags`. `chat_20706` returns 400 on every chat call, so it was published
+// and broken. Both entries are restored until the flag capture is fixed and observed firing live;
+// deleting them again requires seeing `reason: 'completion_model'` in GET /v1/model-routes, not a
+// passing unit test.
 export const NON_CHAT_CATALOG_MODEL_IDS: ReadonlySet<string> = new Set([
+  'chat_20706',
   'chat_23310',
+  'tab_flash_lite_preview',
   'tab_jump_flash_lite_preview',
 ]);
 
