@@ -27,16 +27,21 @@ import {
   toOpenAIFileObject,
 } from './openai-file-resource';
 import { normalizeUploadError, parseFileUploadRequest } from './file-upload-request';
+import {
+  readClientHeader,
+  resolveClientDialect,
+  type ClientDialect,
+} from '../../common/client-dialect';
 
-type FilesDialect = 'anthropic' | 'openai';
+type FilesDialect = ClientDialect;
 
 /**
  * OpenAI and Anthropic both publish their Files API at exactly `/v1/files`, so
  * one route table has to serve both. The dialect is chosen per request from the
- * headers — any `anthropic-version` or `anthropic-beta` header means the
- * Anthropic dialect, everything else is OpenAI — and each dialect's resource
- * shapes, error envelopes and upload rules live in its own adapter module
- * beside this one.
+ * headers by the shared rule in `common/client-dialect` — any
+ * `anthropic-version` or `anthropic-beta` header means the Anthropic dialect,
+ * everything else is OpenAI — and each dialect's resource shapes, error
+ * envelopes and upload rules live in its own adapter module beside this one.
  *
  * Both dialects are views over the same content-addressed store, so a file
  * uploaded through one surface can be referenced from any of the three. Its id
@@ -49,7 +54,7 @@ export class ClientFilesController {
 
   @Post()
   async upload(@Req() request: FastifyRequest, @Res() res: FastifyReply): Promise<void> {
-    const dialect = resolveDialect(request);
+    const dialect = resolveClientDialect(request);
     try {
       this.enforceDialectGate(dialect, request);
       const upload = await parseFileUploadRequest(request, { allowRawBody: false });
@@ -74,7 +79,7 @@ export class ClientFilesController {
     @Query('limit') limit?: string,
     @Query('after') after?: string,
   ): Promise<void> {
-    const dialect = resolveDialect(request);
+    const dialect = resolveClientDialect(request);
     try {
       this.enforceDialectGate(dialect, request);
       const result = await this.store.list({
@@ -103,7 +108,7 @@ export class ClientFilesController {
     @Req() request: FastifyRequest,
     @Res() res: FastifyReply,
   ): Promise<void> {
-    const dialect = resolveDialect(request);
+    const dialect = resolveClientDialect(request);
     try {
       this.enforceDialectGate(dialect, request);
       const record = await this.store.stat(requireHandle(id));
@@ -119,7 +124,7 @@ export class ClientFilesController {
     @Req() request: FastifyRequest,
     @Res() res: FastifyReply,
   ): Promise<void> {
-    const dialect = resolveDialect(request);
+    const dialect = resolveClientDialect(request);
     try {
       this.enforceDialectGate(dialect, request);
       const { record, bytes } = await this.store.get(requireHandle(id));
@@ -139,7 +144,7 @@ export class ClientFilesController {
     @Req() request: FastifyRequest,
     @Res() res: FastifyReply,
   ): Promise<void> {
-    const dialect = resolveDialect(request);
+    const dialect = resolveClientDialect(request);
     try {
       this.enforceDialectGate(dialect, request);
       const handle = requireHandle(id);
@@ -160,7 +165,7 @@ export class ClientFilesController {
 
   private enforceDialectGate(dialect: FilesDialect, request: FastifyRequest): void {
     if (dialect === 'anthropic') {
-      requireAnthropicFilesBeta(readHeader(request, 'anthropic-beta'));
+      requireAnthropicFilesBeta(readClientHeader(request, 'anthropic-beta'));
     }
   }
 
@@ -181,20 +186,4 @@ function requireHandle(id: string): string {
     throw FileStoreError.notFound(id);
   }
   return handle;
-}
-
-function readHeader(request: FastifyRequest, name: string): string | undefined {
-  const value = request.headers[name];
-  return Array.isArray(value) ? value.join(',') : value;
-}
-
-/**
- * Anthropic clients always announce themselves with `anthropic-version` (their
- * SDKs send it on every call) or with `anthropic-beta`. Nothing on the OpenAI
- * side sends either header, so this is a signal rather than a guess.
- */
-function resolveDialect(request: FastifyRequest): FilesDialect {
-  return readHeader(request, 'anthropic-version') || readHeader(request, 'anthropic-beta')
-    ? 'anthropic'
-    : 'openai';
 }

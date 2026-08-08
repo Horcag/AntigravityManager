@@ -38,7 +38,9 @@ import { OpenAIBatchesController } from '@/modules/proxy-gateway/server/modules/
 import { AnthropicMessageBatchesController } from '@/modules/proxy-gateway/server/modules/batch/anthropic-message-batches.controller';
 import { GeminiOperationsController } from '@/modules/proxy-gateway/server/modules/batch/gemini-operations.controller';
 import { AnthropicCompleteController } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-complete.controller';
+import { ClientModelsController } from '@/modules/proxy-gateway/server/modules/models/client-models.controller';
 import type { BatchRunnerOptions } from '@/modules/proxy-gateway/server/modules/batch/batch-job.types';
+import { registerProxyBodyParsers } from '@/server/proxy-body-parsers';
 
 export interface ProxyConformanceService {
   handleAnthropicCountTokens(request: unknown): unknown;
@@ -147,6 +149,7 @@ export async function createProxyConformanceApp(
       AnthropicMessageBatchesController,
       GeminiOperationsController,
       AnthropicCompleteController,
+      ClientModelsController,
     ],
     providers: [
       // Registered exactly as ProxyModule does, so conformance tests see the
@@ -173,20 +176,15 @@ export async function createProxyConformanceApp(
   class ProxyConformanceModule {}
 
   const adapter = new FastifyAdapter();
-  // The real server registers both of these at boot; file uploads need them.
-  adapter
-    .getInstance()
-    .addContentTypeParser(
-      /^(?:application|audio|font|image|model|text|video)\//u,
-      { parseAs: 'buffer' },
-      (_request, body, done) => done(null, body),
-    );
 
   const app = await NestFactory.create<NestFastifyApplication>(ProxyConformanceModule, adapter, {
     logger: false,
   });
   await app.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
   await app.init();
+  // Same call `main.ts` makes at the same point in the boot sequence, so a
+  // conformance test parses a request the way the shipped server does.
+  registerProxyBodyParsers(adapter.getInstance());
   await app.getHttpAdapter().getInstance().ready();
   return app;
 }

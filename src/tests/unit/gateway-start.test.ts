@@ -8,9 +8,11 @@ const {
   mockAttachResponsesWebSocketServer,
   mockCreate,
   mockLogger,
+  mockRemoveContentTypeParser,
 } = vi.hoisted(() => ({
   mockAddContentTypeParser: vi.fn(),
   mockAddHook: vi.fn(),
+  mockRemoveContentTypeParser: vi.fn(),
   mockAttachResponsesWebSocketServer: vi.fn(() => vi.fn()),
   mockCreate: vi.fn(),
   mockLogger: {
@@ -34,6 +36,9 @@ vi.mock('@nestjs/platform-fastify', () => ({
       getInstance: () => ({
         addContentTypeParser: mockAddContentTypeParser,
         addHook: mockAddHook,
+        removeContentTypeParser: mockRemoveContentTypeParser,
+        getDefaultJsonParser: () => vi.fn(),
+        initialConfig: {},
       }),
     };
   }),
@@ -69,6 +74,7 @@ describe('gateway server startup', () => {
     mockCreate.mockResolvedValue({
       register: vi.fn().mockResolvedValue(undefined),
       enableCors: vi.fn(),
+      init: vi.fn().mockResolvedValue(undefined),
       listen,
       close,
     });
@@ -103,6 +109,7 @@ describe('gateway server startup', () => {
     mockCreate.mockResolvedValue({
       register: vi.fn().mockResolvedValue(undefined),
       enableCors: vi.fn(),
+      init: vi.fn().mockResolvedValue(undefined),
       listen,
       close: vi.fn().mockResolvedValue(undefined),
       get: vi.fn(() => ({
@@ -128,6 +135,14 @@ describe('gateway server startup', () => {
     expect(mockAddContentTypeParser).toHaveBeenCalledWith(
       expect.any(RegExp),
       { parseAs: 'buffer' },
+      expect.any(Function),
+    );
+    // And it replaces the JSON parser Nest installed during `init()`, so a
+    // bodyless method may carry `Content-Type: application/json` (kanban #54).
+    expect(mockRemoveContentTypeParser).toHaveBeenCalledWith('application/json');
+    expect(mockAddContentTypeParser).toHaveBeenCalledWith(
+      'application/json',
+      expect.objectContaining({ parseAs: 'string' }),
       expect.any(Function),
     );
     expect(mockAttachResponsesWebSocketServer).toHaveBeenCalledOnce();

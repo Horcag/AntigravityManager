@@ -20,6 +20,7 @@ import {
 import { isObservable } from 'rxjs';
 import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '../modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import { applyProxyRouteBodyLimit } from './proxy-body-limit';
+import { registerProxyBodyParsers } from './proxy-body-parsers';
 
 import { ProxyConfig } from '@/modules/config/types';
 import { getServerConfig, setServerConfig } from './server-config';
@@ -40,31 +41,6 @@ export type NestServerStartResult =
       port: number;
       message: string;
     };
-
-/**
- * Lets `POST /upload/v1beta/files` accept Google's simple media form, where the
- * whole request body is the file and `Content-Type` names its type.
- *
- * The parser is registered for media families only. `application/json` and
- * `multipart/form-data` already have exact-match parsers, and Fastify prefers
- * an exact match over a matcher, so every existing route keeps its current
- * behaviour.
- */
-function registerRawMediaBodyParser(instance: {
-  addContentTypeParser: (
-    matcher: RegExp,
-    options: { parseAs: 'buffer' },
-    handler: (request: unknown, body: Buffer, done: (error: null, body: Buffer) => void) => void,
-  ) => void;
-}): void {
-  instance.addContentTypeParser(
-    /^(?:application|audio|font|image|model|text|video)\//u,
-    { parseAs: 'buffer' },
-    (_request, body, done) => {
-      done(null, body);
-    },
-  );
-}
 
 function isAddressInUseError(error: unknown): boolean {
   if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
@@ -112,10 +88,15 @@ export async function bootstrapNestServer(config: ProxyConfig): Promise<NestServ
     });
 
     await app.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
-    registerRawMediaBodyParser(fastifyAdapter.getInstance());
 
     // Enable CORS
     app.enableCors();
+
+    // Explicit, so the proxy's own parsers can replace Nest's — which are
+    // registered during `init()` — before `listen()` freezes the parser table.
+    // `listen()` skips the initialisation it has already seen.
+    await app.init();
+    registerProxyBodyParsers(fastifyAdapter.getInstance());
 
     await app.listen(port, '0.0.0.0');
     const proxyController = app.get(ProxyController);

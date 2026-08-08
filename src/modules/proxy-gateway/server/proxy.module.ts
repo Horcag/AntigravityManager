@@ -33,6 +33,7 @@ import { OpenAIBatchesController } from './modules/batch/openai-batches.controll
 import { AnthropicMessageBatchesController } from './modules/batch/anthropic-message-batches.controller';
 import { GeminiOperationsController } from './modules/batch/gemini-operations.controller';
 import { AnthropicCompleteController } from './modules/anthropic/anthropic-complete.controller';
+import { ClientModelsController } from './modules/models/client-models.controller';
 
 @Module({
   imports: [],
@@ -46,6 +47,7 @@ import { AnthropicCompleteController } from './modules/anthropic/anthropic-compl
     AnthropicMessageBatchesController,
     GeminiOperationsController,
     AnthropicCompleteController,
+    ClientModelsController,
   ],
   providers: [
     // Answers an unrouted `/v1...` or `/v1beta...` request in the error shape of

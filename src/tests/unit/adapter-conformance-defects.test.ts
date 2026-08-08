@@ -361,14 +361,25 @@ describe('adapter conformance defects (kanban #50)', () => {
       // catch-all can never quietly reclaim them.
       const batches = await app.inject({ method: 'GET', url: '/v1/batches' });
       const messageBatches = await app.inject({ method: 'GET', url: '/v1/messages/batches' });
+      // Landed after this suite was written (kanban #54).
+      const retrievedModel = await app.inject({
+        method: 'GET',
+        url: '/v1/models/conformance-model',
+      });
+      const unknownModel = await app.inject({ method: 'GET', url: '/v1/models/not-a-model' });
 
       expect(files.statusCode).toBe(200);
       expect(geminiFiles.statusCode).toBe(200);
       expect(batches.statusCode).toBe(200);
       expect(messageBatches.statusCode).toBe(200);
+      expect(retrievedModel.statusCode).toBe(200);
       // Served by the store controller: a real 404 for a handle it never issued,
       // in the OpenAI shape rather than the catch-all's `unknown_url`.
       expect(storedResponse.json().error?.code).not.toBe('unknown_url');
+      // Same distinction for retrieve-model: the route exists, the model does
+      // not, so the caller must not be told the URL was unknown.
+      expect(unknownModel.statusCode).toBe(404);
+      expect(unknownModel.json().error?.code).toBe('model_not_found');
     });
 
     it('leaves paths outside the API surfaces to the framework', async () => {
