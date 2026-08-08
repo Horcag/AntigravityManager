@@ -38,6 +38,7 @@ class TestableProxyService extends ProxyService {
       new ModelRoutingService(),
       new ModelRouteMissJournalService(),
       new SignatureStore(),
+      {} as never,
     );
   }
 

@@ -4,6 +4,7 @@ import { resolveModelVariant } from '../../../antigravity/model-variant-registry
 import type {
   AnthropicChatRequest,
   AnthropicContent,
+  AnthropicCountTokensRequest,
   AnthropicMessage,
 } from '../../common/interfaces/request-interfaces';
 import {
@@ -59,6 +60,16 @@ const TOP_LEVEL_FIELDS = new Set([
   'top_p',
 ]);
 
+/** `count_tokens` shares the Messages body minus every generation-only field. */
+const COUNT_TOKENS_TOP_LEVEL_FIELDS = new Set([
+  'messages',
+  'model',
+  'system',
+  'thinking',
+  'tool_choice',
+  'tools',
+]);
+
 const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 export function normalizeAnthropicMessagesRequest(request: unknown): AnthropicChatRequest {
@@ -88,6 +99,38 @@ export function normalizeAnthropicMessagesRequest(request: unknown): AnthropicCh
     max_tokens: maxTokens,
     messages,
     ...(stopSequences ? { stop_sequences: stopSequences } : {}),
+  };
+}
+
+/**
+ * Validates `POST /v1/messages/count_tokens`.
+ *
+ * Runs the same block, tool and system validators as the Messages contract so a body that counts
+ * here is a body that would also generate here. `max_tokens` is absent by design, which removes the
+ * only bound `thinking.budget_tokens` is checked against.
+ */
+export function normalizeAnthropicCountTokensRequest(
+  request: unknown,
+): AnthropicCountTokensRequest {
+  const raw = asRecord(request, 'body');
+  const model = requireNonEmptyString(raw.model, 'model');
+  const tools = validateTools(raw.tools);
+  const messages = validateMessages(raw.messages);
+
+  validateSystem(raw.system);
+  const thinkingType = validateThinking(raw.thinking, Number.MAX_SAFE_INTEGER);
+  validateToolChoice(raw.tool_choice, tools, thinkingType);
+  validateModelCapabilities(raw, model);
+  for (const field of Object.keys(raw)) {
+    if (!COUNT_TOKENS_TOP_LEVEL_FIELDS.has(field)) {
+      unsupported(field, `${field} is not part of the Anthropic count_tokens contract`);
+    }
+  }
+
+  return {
+    ...(raw as unknown as AnthropicCountTokensRequest),
+    model,
+    messages,
   };
 }
 

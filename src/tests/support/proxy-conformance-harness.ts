@@ -15,8 +15,10 @@ import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shar
 import { ModelAvailabilityService } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
 
 export interface ProxyConformanceService {
+  handleAnthropicCountTokens(request: unknown): unknown;
   handleAnthropicMessages(request: unknown): unknown;
   handleChatCompletions(request: unknown, outputProtocol?: string): unknown;
+  handleGeminiCountTokens(model: string, contents: unknown): unknown;
   handleGeminiGenerateContent(model: string, request: unknown): unknown;
   handleGeminiStreamGenerateContent(model: string, request: unknown): unknown;
 }

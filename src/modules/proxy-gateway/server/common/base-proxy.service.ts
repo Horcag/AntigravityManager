@@ -15,7 +15,6 @@ import {
   type RegisteredGenerationConstraints,
 } from '@/modules/proxy-gateway/server/modules/shared/services/generation-constraints.service';
 import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shared/services/model-routing.service';
-import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
 import {
   GeminiInternalRequest,
   GeminiPart as InternalGeminiPart,
@@ -34,7 +33,9 @@ interface StreamIdleTimer {
 export abstract class BaseProxyService {
   // 空类即可，方法和属性会通过重构工具自动移进来
   // 先预留构造器参数，和 ProxyService 保持一致
-  protected readonly logger = new Logger(ProxyService.name);
+  // Literal rather than `ProxyService.name`: importing the subclass here makes every sibling
+  // service that extends this base part of an import cycle with it.
+  protected readonly logger = new Logger('ProxyService');
   private readonly streamIdleTimeoutMs = 300_000;
   protected readonly generationConstraints: GenerationConstraintsService;
   protected readonly retryPolicy: ProxyRetryService;

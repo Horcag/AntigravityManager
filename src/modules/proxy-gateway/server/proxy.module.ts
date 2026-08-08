@@ -17,6 +17,7 @@ import {
 } from './modules/shared/services/model-availability.service';
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
+import { CountTokensService } from './modules/shared/services/count-tokens.service';
 import { SignatureStore } from '../antigravity/SignatureStore';
 
 @Module({
@@ -36,6 +37,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     GenerationConstraintsService,
     SignatureStore,
     ProxyService,
+    CountTokensService,
     GeminiClient,
     ProxyGuard,
     {
@@ -52,6 +54,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     GenerationConstraintsService,
     SignatureStore,
     ProxyService,
+    CountTokensService,
   ],
 })
 export class ProxyModule {}

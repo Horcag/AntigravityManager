@@ -1,4 +1,4 @@
-import { HttpStatus, Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { isEmpty, isNil, isNumber, isPlainObject, isString } from 'lodash-es';
 import { AccountLeaseService } from './modules/account-lease/account-lease.service';
 import { GeminiClient } from './modules/gemini/gemini-client.service';
@@ -6,6 +6,10 @@ import { GenerationConstraintsService } from './modules/shared/services/generati
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { ModelRoutingService } from './modules/shared/services/model-routing.service';
 import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
+import {
+  CountTokensService,
+  type GeminiCountTokensResult,
+} from './modules/shared/services/count-tokens.service';
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
 import { createGeminiSseObservable } from './modules/gemini/gemini-sse-decoder';
@@ -31,6 +35,7 @@ import { toOpenAIResponsesId } from '../antigravity/OpenAIResponsesResponseMappe
 import {
   ClaudeRequest,
   ClaudeResponse,
+  type GeminiContent,
   GeminiInternalRequest,
   type UsageMetadata,
 } from '../antigravity/types';
@@ -60,6 +65,8 @@ import {
   AnthropicChatRequest,
   AnthropicChatResponse,
   AnthropicContent,
+  AnthropicCountTokensRequest,
+  AnthropicCountTokensResponse,
   GeminiRequest,
   GeminiResponse,
   GeminiUsageMetadata,
@@ -78,6 +85,7 @@ import {
 import { safeStringifyPacket } from '@/shared/security/sensitiveDataMasking';
 import { BaseProxyService } from '@/modules/proxy-gateway/server/common/base-proxy.service';
 import { ModelRouteError } from './common/exceptions/model-route-exception';
+import { createNoAvailableAccountError } from './common/model-route-errors';
 import { attachUpstreamBackpressure } from './common/stream-backpressure';
 import { attachModelRouteMetadata } from './common/model-route-metadata';
 
@@ -101,6 +109,7 @@ export class ProxyService extends BaseProxyService {
     @Inject(ModelRouteMissJournalService)
     readonly modelRouteMissJournalService: ModelRouteMissJournalService,
     @Inject(SignatureStore) readonly signatureStore: SignatureStore,
+    @Inject(CountTokensService) readonly countTokensService: CountTokensService,
   ) {
     super(
       accountLeaseService,
@@ -112,26 +121,10 @@ export class ProxyService extends BaseProxyService {
   }
 
   private createNoAvailableAccountError(model: string): ModelRouteError {
-    const catalogStatus = this.accountLeaseService.getModelCatalogStatus(model);
-    if (catalogStatus === 'unknown_model') {
-      this.modelRouteMissJournalService.record(model);
-      return new ModelRouteError({
-        message: `The requested model '${model}' is not present in the discovered provider catalog`,
-        status: HttpStatus.NOT_FOUND,
-        code: 'model_not_found',
-      });
-    }
-    if (catalogStatus === 'catalog_unavailable') {
-      return new ModelRouteError({
-        message: `The provider model catalog is currently unavailable while resolving '${model}'`,
-        status: HttpStatus.SERVICE_UNAVAILABLE,
-        code: 'model_catalog_unavailable',
-      });
-    }
-    return new ModelRouteError({
-      message: `No account currently has capacity for model '${model}'`,
-      status: HttpStatus.TOO_MANY_REQUESTS,
-      code: 'model_capacity_exhausted',
+    return createNoAvailableAccountError({
+      accountLeaseService: this.accountLeaseService,
+      missJournal: this.modelRouteMissJournalService,
+      model,
     });
   }
 
@@ -148,6 +141,21 @@ export class ProxyService extends BaseProxyService {
       servedModel,
       routeSource,
     });
+  }
+
+  // --- Token Counting Handlers ---
+
+  handleGeminiCountTokens(
+    model: string,
+    contents: GeminiContent[],
+  ): Promise<GeminiCountTokensResult> {
+    return this.countTokensService.countGeminiTokens(model, contents);
+  }
+
+  handleAnthropicCountTokens(
+    request: AnthropicCountTokensRequest,
+  ): Promise<AnthropicCountTokensResponse> {
+    return this.countTokensService.countAnthropicTokens(request);
   }
 
   // --- Anthropic Handlers ---

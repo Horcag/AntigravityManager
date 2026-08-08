@@ -15,6 +15,7 @@ function toInternalRequest(request: GeminiRequest): GeminiInternalRequest['reque
     {} as never,
     new ModelRouteMissJournalService(),
     new SignatureStore(),
+    {} as never,
   );
   const method: unknown = Reflect.get(service, 'toInternalGeminiRequest');
   if (typeof method !== 'function') {

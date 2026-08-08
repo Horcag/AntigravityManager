@@ -36,6 +36,7 @@ class TestableProxyService extends ProxyService {
       new ModelRoutingService(),
       new ModelRouteMissJournalService(),
       new SignatureStore(),
+      {} as never,
     );
   }
 
@@ -278,6 +279,7 @@ async function validateRuntimeAnthropicRequestFromRealAccountLease(): Promise<vo
       new ModelRoutingService(),
       new ModelRouteMissJournalService(),
       new SignatureStore(),
+      {} as never,
     );
     await service.handleAnthropicMessages({
       model: 'claude-sonnet-4-5',

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AnthropicRequestValidationError,
+  normalizeAnthropicCountTokensRequest,
   normalizeAnthropicMessagesRequest,
 } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-request-contract';
 
@@ -225,5 +226,56 @@ describe('Anthropic Messages request contract', () => {
         tool_choice: { type: 'any' },
       }),
     ).toThrowError(expect.objectContaining({ param: 'tool_choice.type' }));
+  });
+});
+
+describe('Anthropic count_tokens request contract', () => {
+  it('accepts the counting subset without the generation-only fields', () => {
+    expect(
+      normalizeAnthropicCountTokensRequest({
+        model: 'claude-opus-5',
+        system: 'Be terse.',
+        tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+        tool_choice: { type: 'tool', name: 'lookup' },
+        messages: [{ role: 'user', content: 'How many tokens?' }],
+      }),
+    ).toEqual({
+      model: 'claude-opus-5',
+      system: 'Be terse.',
+      tools: [{ name: 'lookup', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: 'lookup' },
+      messages: [{ role: 'user', content: 'How many tokens?' }],
+    });
+  });
+
+  it.each(['max_tokens', 'stream', 'temperature'])(
+    'rejects the generation-only field %s',
+    (field) => {
+      expect(() =>
+        normalizeAnthropicCountTokensRequest({
+          model: 'claude-opus-5',
+          messages: [{ role: 'user', content: 'hello' }],
+          [field]: field === 'stream' ? true : 64,
+        }),
+      ).toThrowError(expect.objectContaining({ param: field, code: 'unsupported_parameter' }));
+    },
+  );
+
+  it('applies the same block validation as the Messages contract', () => {
+    expect(() =>
+      normalizeAnthropicCountTokensRequest({
+        model: 'claude-opus-5',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi', future_control: true }] }],
+      }),
+    ).toThrowError(expect.objectContaining({ param: 'messages.0.content.0.future_control' }));
+  });
+
+  it('requires a model and a non-empty message list', () => {
+    expect(() =>
+      normalizeAnthropicCountTokensRequest({ messages: [{ role: 'user', content: 'hi' }] }),
+    ).toThrowError(expect.objectContaining({ param: 'model' }));
+    expect(() =>
+      normalizeAnthropicCountTokensRequest({ model: 'claude-opus-5', messages: [] }),
+    ).toThrowError(expect.objectContaining({ param: 'messages' }));
   });
 });

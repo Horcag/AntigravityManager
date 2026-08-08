@@ -16,6 +16,7 @@ function createProxyService(): ProxyService {
     {} as never,
     new ModelRouteMissJournalService(),
     new SignatureStore(),
+    {} as never,
   );
 }
 

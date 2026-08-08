@@ -144,6 +144,23 @@ export interface AnthropicChatRequest {
   seed?: number;
 }
 
+/**
+ * `POST /v1/messages/count_tokens` body. Mirrors the hosted Anthropic contract, which omits the
+ * generation-only fields (`max_tokens`, `stream`, sampling parameters).
+ */
+export interface AnthropicCountTokensRequest {
+  model: string;
+  messages: AnthropicMessage[];
+  system?: string | AnthropicSystemBlock[];
+  tools?: AnthropicTool[];
+  tool_choice?: string | AnthropicToolChoice;
+  thinking?: AnthropicThinkingConfig;
+}
+
+export interface AnthropicCountTokensResponse {
+  input_tokens: number;
+}
+
 export interface AnthropicOutputConfig {
   effort?: string;
   format?: unknown;
