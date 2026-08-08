@@ -1,14 +1,17 @@
 import { Observable } from 'rxjs';
 
 import { toOpenAIResponsesResponse } from '../../../antigravity/OpenAIResponsesResponseMapper';
-import { ProxyController, type ResponsesRequestBody } from '../../proxy.controller';
-import type { ProxyService } from '../../proxy.service';
+import type { ResponsesRequestBody } from '../../proxy.controller';
+import { prepareResponsesRequest } from '../openai/responses/openai-responses-chat-request';
 import type { OpenAIChatRequest } from '../../common/interfaces/request-interfaces';
 import { normalizeAnthropicMessagesRequest } from '../anthropic/anthropic-request-contract';
 import { normalizeOpenAIChatRequest } from '../openai/chat/openai-request-contract';
 import { expandFileReferences, type FileReferenceSurface } from '../files/file-reference-expander';
 import type { FileContentStore } from '../files/file-content-store.service';
-import type { OpenAIResponsesSessionStoreLike } from '../openai/responses/openai-responses-session.store';
+import {
+  OpenAIResponsesSessionStore,
+  type OpenAIResponsesSessionStoreLike,
+} from '../openai/responses/openai-responses-session.store';
 import type { BatchJobRecord, BatchRequestError, BatchRequestRecord } from './batch-job.types';
 
 /**
@@ -96,27 +99,20 @@ function expand<T>(surface: FileReferenceSurface, body: T, deps: BatchExecutionD
  * `/v1/responses` inside a batch is prepared by the same code the live endpoint
  * uses.
  *
- * `ProxyController.prepareResponsesRequest` is the only implementation of the
- * Responses-to-Chat conversion, and duplicating ~250 lines of it here would
- * guarantee the two drift. The controller is a plain class whose constructor
- * takes the services it needs, so the batch path constructs one over the same
- * proxy service and the same session store rather than copying its body.
+ * `prepareResponsesRequest` is the only implementation of the Responses-to-Chat
+ * conversion — the live endpoint calls the same function — so the batch path
+ * runs it over its own session store rather than copying its body.
  */
 async function runResponsesRequest(
   request: BatchRequestRecord,
   deps: BatchExecutionDeps,
 ): Promise<unknown> {
   const body = (await expand('openai-responses', request.body, deps)) as ResponsesRequestBody;
-  const controller = new ProxyController(
-    deps.target as unknown as ProxyService,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    deps.responsesSessions,
+  const prepared = prepareResponsesRequest(
+    withoutStream(body) as ResponsesRequestBody,
+    // Same in-memory fallback the controller applies when no durable store is bound.
+    deps.responsesSessions ?? OpenAIResponsesSessionStore,
   );
-  const prepared = controller.prepareResponsesRequest(withoutStream(body) as ResponsesRequestBody);
   if (!prepared) {
     throw new Error(
       `previous_response_id '${String(body.previous_response_id ?? '')}' is not a stored response`,

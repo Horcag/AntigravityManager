@@ -7,10 +7,11 @@ import { APP_FILTER, NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import fastifyMultipart from '@fastify/multipart';
 
+import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
 import {
-  ProxyController,
   IMAGE_QUOTA_REFRESH,
-} from '@/modules/proxy-gateway/server/proxy.controller';
+  OpenAIMediaController,
+} from '@/modules/proxy-gateway/server/modules/openai/media/openai-media.controller';
 import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
 import { ProxyGuard } from '@/modules/proxy-gateway/server/guards/proxy.guard';
 import { GeminiController } from '@/modules/proxy-gateway/server/modules/gemini/gemini.controller';
@@ -141,6 +142,7 @@ export async function createProxyConformanceApp(
   @Module({
     controllers: [
       ProxyController,
+      OpenAIMediaController,
       GeminiController,
       GeminiFilesController,
       ClientFilesController,

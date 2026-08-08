@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { of } from 'rxjs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ProxyController } from '@/modules/proxy-gateway/server/proxy.controller';
+import { OpenAIMediaController } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media.controller';
 import {
   OPENAI_INLINE_MEDIA_BYTES_LIMIT,
   OPENAI_MEDIA_MULTIPART_OPTIONS,
@@ -41,7 +41,10 @@ describe('OpenAI media HTTP wire contract', () => {
       getModelIdsForRole: (role: string) =>
         role === 'image_generation' ? ['gemini-3.1-flash-image'] : [],
     };
-    const controller = new ProxyController(proxyService as never, accountLeaseService as never);
+    const controller = new OpenAIMediaController(
+      proxyService as never,
+      accountLeaseService as never,
+    );
     server.post('/v1/images/generations', async (request, reply) =>
       controller.imageGenerations(request.body as never, reply),
     );
