@@ -9,6 +9,7 @@ import {
   type TokenResponse,
 } from '@/modules/cloud-account/services/GoogleAPIService';
 import { CloudAccount, CloudAccountExportSchema } from '@/modules/cloud-account/types';
+import { notifyQuotaRefreshed } from '@/modules/cloud-account/services/quota-refresh-notifier';
 import { logger } from '@/shared/logging/logger';
 
 import { shell } from 'electron';
@@ -503,6 +504,7 @@ export async function refreshAccountQuota(accountId: string): Promise<CloudAccou
 
     account.quota = quota;
     await CloudAccountRepo.updateQuota(account.id, account.quota);
+    notifyQuotaRefreshed(account.id, account.quota);
     await CloudAccountRepo.updateLastUsed(account.id);
     account.last_used = Math.floor(Date.now() / 1000);
     await clearAccountStatus(account);
@@ -551,6 +553,7 @@ export async function refreshAccountQuota(accountId: string): Promise<CloudAccou
 
         account.quota = quota;
         await CloudAccountRepo.updateQuota(account.id, account.quota);
+        notifyQuotaRefreshed(account.id, account.quota);
         await CloudAccountRepo.updateLastUsed(account.id);
         account.last_used = Math.floor(Date.now() / 1000);
         await clearAccountStatus(account);

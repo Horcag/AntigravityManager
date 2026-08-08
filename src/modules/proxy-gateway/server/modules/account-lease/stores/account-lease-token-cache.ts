@@ -1,4 +1,4 @@
-import type { CloudAccount } from '@/modules/cloud-account/types';
+import type { CloudAccount, CloudQuotaData } from '@/modules/cloud-account/types';
 import type { AccountLeaseAccountStore } from '../interfaces/account-lease-adapters';
 import { buildAccountLeaseQuotaSnapshot } from '../policies/account-lease-quota-policy';
 import {
@@ -65,6 +65,37 @@ export class AccountLeaseTokenCache {
       model_reset_times: extractedState.modelResetTimes,
       model_forwarding_rules: extractedState.modelForwardingRules,
     };
+  }
+
+  /**
+   * Replaces one cached account's quota with a freshly fetched one.
+   *
+   * The cache is otherwise filled only when accounts are (re)loaded, so between
+   * reloads it keeps whatever the account store held at start-up. That snapshot
+   * was written by whichever build ran last, which is how the provider facts a
+   * new build learned to parse — the `ModelDetails` markers the completion-model
+   * rule reads — can be absent from a cache the periodic quota poller has
+   * already refreshed in the store (kanban-40).
+   *
+   * @returns false when the account is not cached, so nothing was updated.
+   */
+  applyQuota(accountId: string, quota: CloudQuotaData): boolean {
+    const tokenCache = this.options.getTokenCache();
+    const tokenData = tokenCache.get(accountId);
+    if (!tokenData) {
+      return false;
+    }
+
+    const extractedState = buildAccountLeaseQuotaSnapshot(quota);
+    tokenCache.set(accountId, {
+      ...tokenData,
+      quota,
+      model_quotas: extractedState.modelQuotas,
+      model_limits: extractedState.modelLimits,
+      model_reset_times: extractedState.modelResetTimes,
+      model_forwarding_rules: extractedState.modelForwardingRules,
+    });
+    return true;
   }
 
   private generateSessionId(): string {

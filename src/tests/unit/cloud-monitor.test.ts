@@ -4,6 +4,7 @@ import { CloudAccountRepo } from '@/modules/cloud-account/persistence/cloudHandl
 import { CloudAccountSettingsStore } from '@/modules/cloud-account/persistence/cloud-account-settings-store';
 import { GoogleAPIService } from '@/modules/cloud-account/services/GoogleAPIService';
 import { AutoSwitchService } from '@/modules/cloud-account/services/AutoSwitchService';
+import { onQuotaRefreshed } from '@/modules/cloud-account/services/quota-refresh-notifier';
 import { AccountLeaseService } from '../../modules/proxy-gateway/server/modules/account-lease/account-lease.service';
 import { RateLimitTrackerService } from '../../modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service';
 import { logger } from '../../shared/logging/logger';
@@ -69,6 +70,35 @@ describe('CloudMonitorService', () => {
     expect(CloudAccountRepo.updateQuota).toHaveBeenCalledWith('acc1', expect.anything());
     expect(CloudAccountRepo.updateLastUsed).toHaveBeenCalledWith('acc1');
     expect(AutoSwitchService.checkAndSwitchIfNeeded).toHaveBeenCalled();
+  });
+
+  it('announces each refreshed quota so the proxy cache stops serving its start-up snapshot', async () => {
+    const mockAccounts = [
+      {
+        id: 'acc1',
+        email: 'test@example.com',
+        token: { access_token: 'valid_token', expiry_timestamp: Date.now() / 1000 + 3600 },
+      },
+    ];
+    const refreshedQuota = {
+      models: { chat_20706: { percentage: 100, resetTime: '', supports_cumulative_context: true } },
+    };
+
+    vi.mocked(CloudAccountRepo.getAccounts).mockResolvedValue(mockAccounts as never);
+    vi.mocked(GoogleAPIService.fetchQuota).mockResolvedValue(refreshedQuota as never);
+
+    const listener = vi.fn();
+    const unsubscribe = onQuotaRefreshed(listener);
+
+    try {
+      const pollPromise = CloudMonitorService.poll();
+      await vi.advanceTimersByTimeAsync(1000);
+      await pollPromise;
+    } finally {
+      unsubscribe();
+    }
+
+    expect(listener).toHaveBeenCalledWith('acc1', expect.objectContaining(refreshedQuota));
   });
 
   it('should refresh token if expired during poll', async () => {

@@ -3,6 +3,7 @@ import { CloudAccountRepo } from '@/modules/cloud-account/persistence/cloudHandl
 import { CloudAccountSettingsStore } from '@/modules/cloud-account/persistence/cloud-account-settings-store';
 import { GoogleAPIService, type TokenResponse } from './GoogleAPIService';
 import { AutoSwitchService } from './AutoSwitchService';
+import { notifyQuotaRefreshed } from './quota-refresh-notifier';
 import { logger } from '@/shared/logging/logger';
 import { classifyAccountStatusFromError } from '@/modules/cloud-account/utils/account-status';
 import type { CloudAccount } from '@/modules/cloud-account/types';
@@ -253,6 +254,7 @@ export class CloudMonitorService {
           // 3. Update DB
           await CloudAccountRepo.updateQuota(account.id, quota);
           account.quota = quota;
+          notifyQuotaRefreshed(account.id, quota);
           await CloudAccountRepo.updateLastUsed(account.id);
           await CloudAccountRepo.setAccountStatus(account.id, 'active', null);
         } catch (error) {

@@ -116,4 +116,44 @@ describe('AccountLeaseTokenCache', () => {
       expect.any(Error),
     );
   });
+
+  it('adopts a refreshed quota with its derived state', async () => {
+    const store = createStore([createAccount()]);
+    const { cache, tokenCache } = createTokenCache(store);
+    await cache.loadAccounts();
+
+    const applied = cache.applyQuota('acc-1', {
+      models: {
+        'models/gemini-3-pro': {
+          percentage: 10,
+          resetTime: '2026-06-21T00:00:00.000Z',
+          max_output_tokens: 4096,
+          supports_cumulative_context: true,
+        },
+      },
+    });
+
+    expect(applied).toBe(true);
+    expect(tokenCache.get('acc-1')).toEqual(
+      expect.objectContaining({
+        account_id: 'acc-1',
+        model_quotas: { 'gemini-3-pro': 10 },
+        model_limits: { 'gemini-3-pro': 4096 },
+        model_reset_times: { 'gemini-3-pro': '2026-06-21T00:00:00.000Z' },
+        model_forwarding_rules: {},
+      }),
+    );
+    expect(
+      tokenCache.get('acc-1')?.quota?.models['models/gemini-3-pro'].supports_cumulative_context,
+    ).toBe(true);
+  });
+
+  it('ignores a refreshed quota for an account it does not cache', async () => {
+    const store = createStore([createAccount()]);
+    const { cache, tokenCache } = createTokenCache(store);
+    await cache.loadAccounts();
+
+    expect(cache.applyQuota('acc-missing', { models: {} })).toBe(false);
+    expect(tokenCache.get('acc-1')?.model_quotas).toEqual({ 'gemini-3-pro': 50 });
+  });
 });
