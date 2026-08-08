@@ -698,6 +698,11 @@ const zhCn = {
       recent_misses_last_seen: '最后请求：{{time}}',
       create_miss_alias: '基于未命中创建别名',
       clear_misses: '清空未命中记录',
+      target_placeholder: '选择规范模型',
+      issue_empty_alias: '别名为空。填写后该行才会保存。',
+      issue_empty_target: '目标为空。选择规范模型后该行才会保存。',
+      issue_duplicate_alias: '该别名已被其他行占用。别名比较时忽略大小写。',
+      issue_shadows_canonical_model: '该别名与当前目录中的真实模型 ID 相同，会遮蔽该模型。',
       presets_title: '预设别名包',
       presets_description:
         '一次创建客户端常见硬编码的别名，全部指向你选择的同一个目标。每个别名都是可编辑、可删除的普通行。',

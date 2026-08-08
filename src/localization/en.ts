@@ -711,6 +711,14 @@ const en = {
       recent_misses_last_seen: 'Last seen {{time}}',
       create_miss_alias: 'Create alias from miss',
       clear_misses: 'Clear misses',
+      target_placeholder: 'Pick a canonical model',
+      issue_empty_alias: 'Alias is empty. This row is not saved until you name it.',
+      issue_empty_target:
+        'Target is empty. This row is not saved until you pick a canonical model.',
+      issue_duplicate_alias:
+        'This alias is already used by another row. Aliases are compared without case.',
+      issue_shadows_canonical_model:
+        'This alias is a real model ID in the current catalog and would shadow it.',
       presets_title: 'Preset packs',
       presets_description:
         'Create the alias names clients commonly hard-code, all pointing at one target you pick. Every alias becomes an ordinary row you can edit or delete.',

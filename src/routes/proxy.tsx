@@ -29,6 +29,10 @@ import {
   type ModelAliasPresetPlan,
 } from '@/modules/proxy-gateway/components/model-alias-presets';
 import {
+  hasBlockingModelAliasIssues,
+  validateModelAliasRows,
+} from '@/modules/proxy-gateway/components/model-alias-validation';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -254,6 +258,15 @@ function ProxyPage() {
     return [...targetIds].sort((left, right) => left.localeCompare(right));
   }, [exampleModels, modelRouteDiagnostics.data?.canonical_models, proxyConfig?.model_aliases]);
 
+  const modelAliasValidations = useMemo(
+    () =>
+      validateModelAliasRows(
+        proxyConfig?.model_aliases ?? [],
+        modelRouteDiagnostics.data?.canonical_models ?? [],
+      ),
+    [proxyConfig?.model_aliases, modelRouteDiagnostics.data?.canonical_models],
+  );
+
   const updateModelAlias = (
     index: number,
     patch: Partial<ProxyConfig['model_aliases'][number]>,
@@ -265,10 +278,12 @@ function ProxyPage() {
       routeIndex === index ? { ...route, ...patch } : route,
     );
     const nextConfig = { ...proxyConfig, model_aliases: modelAliases };
-    if (modelAliases.every((route) => route.alias.trim() && route.target.trim())) {
-      updateProxyConfig(nextConfig);
-    } else {
+    // A row with a blocking issue stays in local state so the edit is not lost, and the row itself
+    // says why it is not persisted yet.
+    if (hasBlockingModelAliasIssues(validateModelAliasRows(modelAliases))) {
       setProxyConfig(nextConfig);
+    } else {
+      updateProxyConfig(nextConfig);
     }
   };
 
@@ -340,6 +355,10 @@ function ProxyPage() {
       proxyConfig.model_aliases.map((route) => route.alias.trim().toLowerCase()),
     );
     if (existingAliases.has(normalizedAlias)) {
+      toast({
+        title: t('proxy.mapping.issue_duplicate_alias'),
+        variant: 'destructive',
+      });
       return;
     }
     updateProxyConfig({
@@ -711,19 +730,35 @@ print(response.choices[0].message.content)`;
                 const availableAccounts =
                   diagnostic?.accounts.filter((account) => account.status === 'available').length ??
                   0;
+                const validation = modelAliasValidations[index];
+                const issues = validation?.issues ?? [];
+                const aliasHasError = issues.some(
+                  (issue) =>
+                    issue.severity === 'error' &&
+                    (issue.code === 'empty_alias' || issue.code === 'duplicate_alias'),
+                );
+                const targetHasError = issues.some((issue) => issue.code === 'empty_target');
                 return (
-                  <div key={`${route.alias}-${index}`} className="rounded-lg border p-4">
+                  <div
+                    key={`${route.alias}-${index}`}
+                    className={
+                      validation?.hasError
+                        ? 'rounded-lg border border-red-400 p-4 dark:border-red-500'
+                        : 'rounded-lg border p-4'
+                    }
+                  >
                     <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] md:items-end">
                       <div className="space-y-2">
                         <Label>{t('proxy.mapping.alias')}</Label>
                         <Input
                           value={route.alias}
                           placeholder="my-model"
+                          aria-invalid={aliasHasError}
                           onChange={(event) =>
                             updateModelAlias(index, { alias: event.target.value })
                           }
                           onBlur={() => {
-                            if (route.alias.trim() && route.target.trim()) {
+                            if (!hasBlockingModelAliasIssues(modelAliasValidations)) {
                               updateProxyConfig(proxyConfig);
                             }
                           }}
@@ -735,8 +770,8 @@ print(response.choices[0].message.content)`;
                           value={route.target}
                           onValueChange={(target) => updateModelAlias(index, { target })}
                         >
-                          <SelectTrigger className="w-full">
-                            <SelectValue />
+                          <SelectTrigger className="w-full" aria-invalid={targetHasError}>
+                            <SelectValue placeholder={t('proxy.mapping.target_placeholder')} />
                           </SelectTrigger>
                           <SelectContent>
                             {modelAliasTargets.map((target) => (
@@ -778,6 +813,22 @@ print(response.choices[0].message.content)`;
                       ) : null}
                       {diagnostic?.wildcard ? <span>· {t('proxy.mapping.wildcard')}</span> : null}
                     </div>
+                    {issues.length > 0 ? (
+                      <ul className="mt-2 space-y-1 text-xs" role="alert">
+                        {issues.map((issue) => (
+                          <li
+                            key={issue.code}
+                            className={
+                              issue.severity === 'error'
+                                ? 'text-red-600 dark:text-red-400'
+                                : 'text-amber-600 dark:text-amber-400'
+                            }
+                          >
+                            {t(`proxy.mapping.issue_${issue.code}`)}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </div>
                 );
               })}

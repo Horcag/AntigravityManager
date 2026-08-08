@@ -658,6 +658,14 @@ const fr = {
       recent_misses_last_seen: 'Vu pour la dernière fois {{time}}',
       create_miss_alias: 'Créer un alias depuis cet élément',
       clear_misses: 'Effacer les éléments non trouvés',
+      target_placeholder: 'Choisissez un modèle canonique',
+      issue_empty_alias: "L'alias est vide. Cette ligne n'est pas enregistrée tant qu'il manque.",
+      issue_empty_target:
+        "La cible est vide. Cette ligne n'est pas enregistrée tant qu'aucun modèle canonique n'est choisi.",
+      issue_duplicate_alias:
+        'Cet alias est déjà utilisé par une autre ligne. Les alias sont comparés sans tenir compte de la casse.',
+      issue_shadows_canonical_model:
+        'Cet alias correspond à un vrai ID de modèle du catalogue actuel et le masquerait.',
       presets_title: 'Packs prédéfinis',
       presets_description:
         'Créez les alias que les clients codent en dur, tous pointant vers une cible que vous choisissez. Chaque alias devient une ligne ordinaire, modifiable et supprimable.',

@@ -631,6 +631,13 @@ const tr = {
       recent_misses_last_seen: 'Son görülme {{time}}',
       create_miss_alias: 'Kaçırmadan alias oluştur',
       clear_misses: 'Kaçırmaları temizle',
+      target_placeholder: 'Kanonik bir model seçin',
+      issue_empty_alias: 'Alias boş. Bir ad girene kadar bu satır kaydedilmez.',
+      issue_empty_target: 'Hedef boş. Kanonik bir model seçene kadar bu satır kaydedilmez.',
+      issue_duplicate_alias:
+        'Bu alias başka bir satırda kullanılıyor. Aliaslar büyük/küçük harf gözetmeden karşılaştırılır.',
+      issue_shadows_canonical_model:
+        'Bu alias, mevcut katalogdaki gerçek bir model kimliğiyle aynı ve onu gölgeler.',
       presets_title: 'Hazır paketler',
       presets_description:
         'İstemcilerin sık sık sabit yazdığı aliasları tek seferde oluşturun; hepsi seçtiğiniz tek hedefe işaret eder. Her alias düzenlenebilir ve silinebilir sıradan bir satır olur.',

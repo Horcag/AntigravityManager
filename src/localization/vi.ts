@@ -628,6 +628,14 @@ const vi = {
       recent_misses_last_seen: 'Lần cuối thấy: {{time}}',
       create_miss_alias: 'Tạo bí danh từ lần khớp thất bại',
       clear_misses: 'Xóa nhật ký không khớp',
+      target_placeholder: 'Chọn model chuẩn',
+      issue_empty_alias: 'Bí danh đang trống. Hàng này chưa được lưu cho tới khi bạn đặt tên.',
+      issue_empty_target:
+        'Đích đang trống. Hàng này chưa được lưu cho tới khi bạn chọn model chuẩn.',
+      issue_duplicate_alias:
+        'Bí danh này đã được một hàng khác dùng. Bí danh được so sánh không phân biệt hoa thường.',
+      issue_shadows_canonical_model:
+        'Bí danh này trùng với một ID model thật trong danh mục hiện tại và sẽ che khuất model đó.',
       presets_title: 'Gói bí danh dựng sẵn',
       presets_description:
         'Tạo nhanh các bí danh mà client thường gắn cứng, tất cả trỏ tới một đích do bạn chọn. Mỗi bí danh là một hàng bình thường, có thể sửa hoặc xóa.',
