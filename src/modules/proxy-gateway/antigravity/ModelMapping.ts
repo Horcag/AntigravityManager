@@ -42,16 +42,7 @@ export function getSupportedModels(): string[] {
 }
 
 /**
- * LAST-RESORT OVERRIDE, not the primary rule.
- *
- * The primary rule is {@link resolveCatalogWithholdReason}, which reads the
- * surface partitioning the provider actually sends
- * (`FetchAvailableModelsResponse.tab_model_ids` and siblings, see
- * {@link CatalogModelRoleIndex}). This table only covers ids the role data does
- * not classify — an account or provider version that omits the role arrays, or
- * an id the arrays never mention. Prefer deleting entries here over adding
- * them: an entry is a standing claim that provider data will never explain the
- * id.
+ * The only reason an advertised id is kept out of the published catalog.
  *
  * 2026-08-08 (live, 0.19.17-local1, kanban-37): the provider's discovery
  * response lists these ids next to real chat models, but they are not chat
@@ -61,12 +52,12 @@ export function getSupportedModels(): string[] {
  *  - tab_flash_lite_preview, tab_jump_flash_lite_preview -> answer 200, but
  *    they are Antigravity IDE's internal tab-completion functions, not
  *    models a user would deliberately select in a client.
- * kanban-40 confirmed from the vendor descriptor that the response carries the
- * role arrays, and now parses them, but could not make a live discovery call to
- * observe which role each of these four ids actually sits in. They therefore
- * stay listed until a live payload classifies them. These ids stay visible,
- * unfiltered, in GET /v1/model-routes so it stays evident the provider
- * advertised them.
+ * These ids stay visible, unfiltered, in GET /v1/model-routes so it stays
+ * evident the provider advertised them.
+ *
+ * DO NOT replace this table with a rule over the provider's role arrays. That
+ * was tried in kanban-40 and reverted: see {@link resolveCatalogWithholdReason}
+ * for the live measurement that refutes it.
  */
 export const NON_CHAT_CATALOG_MODEL_IDS: ReadonlySet<string> = new Set([
   'chat_20706',
@@ -82,55 +73,61 @@ export function isNonChatCatalogModelId(modelId: string): boolean {
 /**
  * The provider's surface partitioning, projected onto published catalog ids.
  * Built by AccountLeaseModelPolicy from `FetchAvailableModelsResponse`.
+ *
+ * Reporting only: this index annotates diagnostics and answers "which model
+ * does this account use for role X". It must not decide what the catalog
+ * publishes — see {@link resolveCatalogWithholdReason}.
  */
 export interface CatalogModelRoleIndex {
   /** Catalog id -> the non-chat roles (`tab`, `command`, ...) it belongs to. */
   nonChatRoles: ReadonlyMap<string, readonly string[]>;
   /** Catalog ids the provider offers on the chat (`agent`) surface. */
   chatModelIds: ReadonlySet<string>;
-  /**
-   * Whether any account reported the chat role at all. Without it, non-chat
-   * membership cannot prove an id is *not* also a chat model, so the rule must
-   * not fire.
-   */
+  /** Whether any account reported the chat (`agent`) role at all. */
   hasChatRoleData: boolean;
 }
 
 export interface UnpublishedCatalogModelId {
   id: string;
-  /** `role` when provider role data withheld it, `override` for the id table. */
-  reason: 'role' | 'override';
-  /** Provider roles that withheld the id; empty for the id table. */
+  /** Always `override`: {@link NON_CHAT_CATALOG_MODEL_IDS} is the only rule. */
+  reason: 'override';
+  /**
+   * Provider roles the id belongs to, when the role data mentions it. Reported
+   * for diagnostics; it never contributes to the withholding decision.
+   */
   roles: string[];
 }
 
 /**
  * Why an advertised id is kept out of the published catalog, or undefined when
- * it is publishable.
+ * it is publishable. {@link NON_CHAT_CATALOG_MODEL_IDS} decides alone; the role
+ * index only annotates the answer.
  *
- * Provider evidence wins: an id the provider assigned to a non-chat surface and
- * never to the chat surface is withheld with that role as the reason. The id
- * table is consulted only when the role data cannot answer, so a payload
- * without role arrays behaves exactly as it did before roles were parsed.
+ * Role membership MUST NOT withhold. kanban-40 shipped a rule that withheld any
+ * id in a non-chat role and absent from the agent list, and it broke published
+ * models on the live account (19 -> 16). The measured discovery response:
+ * 24 models, 11 in `agent_model_sorts`, role counts
+ * `{command:1, tab:2, image_generation:1, mquery:1, web_search:1,
+ * commit_message:1, audio_transcription:1}`. Under that rule `gemini-3-flash`
+ * (role `command`) and `gemini-3.1-flash-lite` (roles `commit_message`,
+ * `mquery`, `web_search`) disappeared even though both answer chat requests
+ * normally. `agent_model_sorts` is the model picker's grouping, not the set of
+ * chat-capable models, and role membership is not exclusive, so "in a tool role
+ * and absent from the agent list" does not mean "not a chat model". Names are no
+ * guide either: `chat_20706`/`chat_23310` measured as the `tab` models, while
+ * `tab_flash_lite_preview`/`tab_jump_flash_lite_preview` sit in no role at all.
  */
 export function resolveCatalogWithholdReason(
   modelId: string,
   roleIndex?: CatalogModelRoleIndex,
 ): UnpublishedCatalogModelId | undefined {
   const normalizedModelId = modelId.trim().toLowerCase();
-
-  if (roleIndex?.hasChatRoleData && !roleIndex.chatModelIds.has(normalizedModelId)) {
-    const roles = roleIndex.nonChatRoles.get(normalizedModelId);
-    if (roles && roles.length > 0) {
-      return { id: modelId, reason: 'role', roles: [...roles] };
-    }
+  if (!isNonChatCatalogModelId(normalizedModelId)) {
+    return undefined;
   }
 
-  if (isNonChatCatalogModelId(normalizedModelId)) {
-    return { id: modelId, reason: 'override', roles: [] };
-  }
-
-  return undefined;
+  const roles = roleIndex?.nonChatRoles.get(normalizedModelId) ?? [];
+  return { id: modelId, reason: 'override', roles: [...roles] };
 }
 
 export function getUnpublishedCatalogModelIds(

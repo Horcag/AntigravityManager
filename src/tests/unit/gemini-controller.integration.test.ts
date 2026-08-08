@@ -101,13 +101,16 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     );
   });
 
-  it('GET /v1beta/models withholds ids the provider assigned to a non-chat role', async () => {
+  it('GET /v1beta/models keeps ids the provider assigned to a non-chat role', async () => {
     mockAccountLeaseService.getAllCollectedModels.mockReturnValueOnce(
       new Set(['gemini-3-flash', 'tab_lite_preview']),
     );
     mockAccountLeaseService.getCatalogModelRoleIndex.mockReturnValueOnce({
-      nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
-      chatModelIds: new Set(['gemini-3-flash']),
+      nonChatRoles: new Map([
+        ['gemini-3-flash', ['command']],
+        ['tab_lite_preview', ['tab']],
+      ]),
+      chatModelIds: new Set(['gemini-3-pro']),
       hasChatRoleData: true,
     });
 
@@ -117,7 +120,10 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json().models).toEqual([expect.objectContaining({ name: 'models/gemini-3-flash' })]);
+    expect(res.json().models).toEqual([
+      expect.objectContaining({ name: 'models/gemini-3-flash' }),
+      expect.objectContaining({ name: 'models/tab_lite_preview' }),
+    ]);
   });
 
   it('returns native Gemini model route identity headers', async () => {

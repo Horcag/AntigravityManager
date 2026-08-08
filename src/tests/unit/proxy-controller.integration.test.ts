@@ -367,17 +367,17 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('names the provider role that withheld an id in model-routes diagnostics', () => {
+  it('reports the provider roles of a withheld id in model-routes diagnostics', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(
-        () => new Set(['gemini-3-flash', 'tab_lite_preview', 'commit_helper']),
+        () => new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
       ),
       getCatalogModelRoleIndex: vi.fn(() => ({
         nonChatRoles: new Map([
-          ['tab_lite_preview', ['tab']],
-          ['commit_helper', ['commit_message']],
+          ['chat_20706', ['tab']],
+          ['gemini-3-flash', ['command']],
         ]),
-        chatModelIds: new Set(['gemini-3-flash']),
+        chatModelIds: new Set(['gemini-3-pro']),
         hasChatRoleData: true,
       })),
       getModelCatalogStatus: vi.fn(() => 'known'),
@@ -396,21 +396,21 @@ describe('ProxyController Integration', () => {
 
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
-        canonical_models: ['commit_helper', 'gemini-3-flash', 'tab_lite_preview'],
+        canonical_models: ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
         unpublished_catalog_ids: [
-          { id: 'commit_helper', reason: 'role', roles: ['commit_message'] },
-          { id: 'tab_lite_preview', reason: 'role', roles: ['tab'] },
+          { id: 'chat_20706', reason: 'override', roles: ['tab'] },
+          { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
         ],
       }),
     );
   });
 
-  it('withholds provider role members from the standard model list', () => {
+  it('keeps provider role members in the standard model list', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash', 'tab_lite_preview'])),
       getCatalogModelRoleIndex: vi.fn(() => ({
-        nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
-        chatModelIds: new Set(['gemini-3-flash']),
+        nonChatRoles: new Map([['gemini-3-flash', ['command']]]),
+        chatModelIds: new Set(['gemini-3-pro']),
         hasChatRoleData: true,
       })),
     };
@@ -423,7 +423,10 @@ describe('ProxyController Integration', () => {
     controller.listModels(reply as any);
 
     const payload = reply.send.mock.calls[0][0];
-    expect(payload.data.map((model: { id: string }) => model.id)).toEqual(['gemini-3-flash']);
+    expect(payload.data.map((model: { id: string }) => model.id)).toEqual([
+      'gemini-3-flash',
+      'tab_lite_preview',
+    ]);
   });
 
   it('returns recent model misses as part of the model routes response', () => {
