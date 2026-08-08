@@ -22,7 +22,8 @@ import {
   getUpstreamResponseMetadata,
 } from './common/upstream-response-metadata';
 import { sanitizeGeminiResponse } from './modules/gemini/gemini-wire';
-import { requestsWebSearch, transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import { requestsWebSearch } from '../antigravity/claude-request-web-search';
 import {
   WEB_SEARCH_ROLE,
   runWebSearchSubCall,
