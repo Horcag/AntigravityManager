@@ -1,7 +1,7 @@
 {
   "name": "antigravity-manager",
   "productName": "Antigravity Manager",
-  "version": "0.19.30-local1",
+  "version": "0.19.31-local1",
   "description": "Antigravity Manager - Electron App",
   "main": ".vite/build/main.js",
   "private": true,
