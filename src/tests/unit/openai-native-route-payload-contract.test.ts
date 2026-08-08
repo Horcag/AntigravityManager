@@ -10,6 +10,7 @@ import type {
 import { ProxyService } from '@/modules/proxy-gateway/server/proxy.service';
 import { GenerationConstraintsService } from '@/modules/proxy-gateway/server/modules/shared/services/generation-constraints.service';
 import { ModelAvailabilityService } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { ModelRouteMissJournalService } from '@/modules/proxy-gateway/server/modules/shared/services/model-route-miss-journal.service';
 import { ModelRoutingService } from '@/modules/proxy-gateway/server/modules/shared/services/model-routing.service';
 import { ProxyRetryService } from '@/modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
 import type { OpenAIChatRequest } from '@/modules/proxy-gateway/server/common/interfaces/request-interfaces';
@@ -35,6 +36,7 @@ class TestableProxyService extends ProxyService {
       new GenerationConstraintsService(mockAccountLeaseService as any),
       new ProxyRetryService(mockAccountLeaseService as any, new ModelAvailabilityService()),
       new ModelRoutingService(),
+      new ModelRouteMissJournalService(),
       new SignatureStore(),
     );
   }
