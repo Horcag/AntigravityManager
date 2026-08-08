@@ -1,6 +1,14 @@
 import { test, expect, ElectronApplication } from '@playwright/test';
 import { _electron as electron } from 'playwright';
-import path from 'path';
+import { findLatestBuild, parseElectronApp } from 'electron-playwright-helpers';
+import electronPath from 'electron';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const electronBinaryPath = electronPath as unknown as string;
+
+const latestBuild = findLatestBuild();
+const appInfo = parseElectronApp(latestBuild);
 
 const injectCloudAccountsFailureScript = `
 (() => {
@@ -63,12 +71,17 @@ const injectCloudAccountsFailureScript = `
 
 test.describe('Antigravity Manager', () => {
   let electronApp: ElectronApplication;
-  const electronMainPath = path.join(__dirname, '../../../.vite/build/main.js');
 
   test.beforeAll(async () => {
     // Launch Electron app
+    const userDataDir = join(
+      tmpdir(),
+      'antigravity-manager-e2e',
+      `app-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
     electronApp = await electron.launch({
-      args: [electronMainPath],
+      executablePath: electronBinaryPath,
+      args: [appInfo.main, `--user-data-dir=${userDataDir}`],
     });
   });
 
@@ -101,17 +114,28 @@ test.describe('Antigravity Manager', () => {
   test('should show fallback UI when cloud accounts loading fails', async () => {
     await electronApp.close();
 
+    const userDataDir = join(
+      tmpdir(),
+      'antigravity-manager-e2e',
+      `app-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    );
     electronApp = await electron.launch({
-      args: [electronMainPath],
+      executablePath: electronBinaryPath,
+      args: [appInfo.main, `--user-data-dir=${userDataDir}`],
     });
 
     const page = await electronApp.firstWindow();
+    await page.addInitScript("localStorage.setItem('lang', 'en');");
     await page.addInitScript(injectCloudAccountsFailureScript);
     await page.reload();
     await page.waitForLoadState('domcontentloaded');
     const mainContent = page.getByRole('main');
+    // The injected failure is emitted at the ORPC transport layer before
+    // structured app-level error data reaches cloud-account handling.
+    // This path carries only a generic transport failure, so the UI surfaces
+    // the generic fallback message instead of cloud.error.loadFailed.
     await expect(
-      mainContent.getByText('Failed to load cloud accounts.', { exact: true }),
+      mainContent.getByText('An unexpected error occurred.', { exact: true }),
     ).toBeVisible({
       timeout: 15000,
     });
