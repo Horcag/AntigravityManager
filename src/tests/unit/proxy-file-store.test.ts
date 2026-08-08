@@ -34,7 +34,16 @@ function createStore(options: FileStoreOptions = {}): FileContentStore {
 
 afterEach(async () => {
   while (createdRoots.length > 0) {
-    await rm(createdRoots.pop() as string, { recursive: true, force: true });
+    // Windows releases a file handle a moment after the write resolves, so an
+    // immediate rmdir of the tree hits ENOTEMPTY under parallel load. This is a
+    // teardown race, not a store defect: it surfaced as an intermittent failure
+    // of whichever test happened to run last. `maxRetries` exists for exactly this.
+    await rm(createdRoots.pop() as string, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 50,
+    });
   }
 });
 
