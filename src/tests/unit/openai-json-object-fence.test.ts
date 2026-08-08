@@ -302,9 +302,18 @@ describe('json_object fence unwrap (kanban #58)', () => {
       ]);
     });
 
-    it('leaves the /v1/responses event protocol alone', () => {
-      const source = of('event: response.output_text.delta\ndata: {"delta":"```json"}\n\n');
-      expect(applyOpenAIJsonObjectFence(JSON_OBJECT_REQUEST, source, 'responses')).toBe(source);
+    it('hands the /v1/responses event protocol to its own transform', async () => {
+      // The chat transform forwards Responses frames verbatim; the dispatcher
+      // must not send them through it. Pinned in
+      // `openai-responses-json-object-fence.test.ts`.
+      const frame = 'event: response.output_text.delta\ndata: {"delta":"```json"}\n\n';
+      const source = of(frame);
+      const result = applyOpenAIJsonObjectFence(JSON_OBJECT_REQUEST, source, 'responses');
+
+      expect(result).not.toBe(source);
+      await expect(lastValueFrom((result as Observable<string>).pipe(toArray()))).resolves.toEqual([
+        frame,
+      ]);
     });
   });
 

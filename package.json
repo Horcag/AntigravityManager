@@ -28,7 +28,7 @@
     "test:unit": "vitest",
     "test:proxy:conformance": "vitest run src/tests/unit/proxy-cross-api-conformance.test.ts src/tests/unit/files-api.integration.test.ts src/tests/unit/proxy-file-store.test.ts src/tests/unit/batch-api.integration.test.ts src/tests/unit/batch-runner.test.ts",
     "test:proxy:gemini": "vitest run src/tests/unit/gemini-controller.integration.test.ts src/tests/unit/gemini-wire.test.ts src/tests/unit/internal-sse.test.ts",
-    "test:proxy:openai": "vitest run src/tests/unit/openai-request-contract.test.ts src/tests/unit/openai-responses-response-mapper.test.ts src/tests/unit/openai-responses-streaming-mapper.test.ts src/tests/unit/proxy-service-responses-stream.test.ts",
+    "test:proxy:openai": "vitest run src/tests/unit/openai-request-contract.test.ts src/tests/unit/openai-responses-response-mapper.test.ts src/tests/unit/openai-responses-streaming-mapper.test.ts src/tests/unit/proxy-service-responses-stream.test.ts src/tests/unit/openai-json-object-fence.test.ts src/tests/unit/openai-responses-json-object-fence.test.ts",
     "test:proxy:anthropic": "vitest run src/tests/unit/anthropic-request-contract.test.ts src/tests/unit/anthropic-request-mapper.test.ts src/tests/unit/claude-response-usage.test.ts src/tests/unit/claude-request-mapper-thinking.test.ts",
     "test:proxy:media": "vitest run src/tests/unit/proxy-media-wire.integration.test.ts src/tests/unit/openai-media-request-contract.test.ts src/tests/unit/openai-media-streaming.test.ts src/tests/unit/image-request-contract.test.ts src/tests/unit/audio-multipart-request.test.ts src/tests/unit/image-multipart-request.test.ts",
     "test:e2e": "playwright test",

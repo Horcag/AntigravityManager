@@ -9,6 +9,7 @@ import {
   getModelRouteMetadata,
 } from '../../../common/model-route-metadata';
 import { inheritUpstreamBackpressure } from '../../../common/stream-backpressure';
+import { unwrapJsonObjectFenceInResponsesStream } from '../responses/openai-responses-json-object-fence';
 
 /**
  * OpenAI `response_format: {"type":"json_object"}` promises valid JSON of *any*
@@ -294,14 +295,15 @@ export function applyOpenAIJsonObjectFence(
   if (!isObservable(result)) {
     return unwrapJsonObjectFenceInResponse(result);
   }
-  if (streamProtocol !== 'chat-completions') {
-    return result;
-  }
 
   // The source observable carries backpressure control and route metadata as
   // symbol properties; a derived observable has to inherit both or the client
   // loses flow control and the `x-antigravity-*` headers.
-  const unwrapped = inheritUpstreamBackpressure(result, unwrapJsonObjectFenceInChatStream(result));
+  const rewritten =
+    streamProtocol === 'responses'
+      ? unwrapJsonObjectFenceInResponsesStream(result, () => new JsonObjectFenceGate())
+      : unwrapJsonObjectFenceInChatStream(result);
+  const unwrapped = inheritUpstreamBackpressure(result, rewritten);
   const metadata = getModelRouteMetadata(result);
   return metadata ? attachModelRouteMetadata(unwrapped, metadata) : unwrapped;
 }
