@@ -115,6 +115,63 @@ describe('applyAnthropicModelVariant', () => {
       thinking: { type: 'disabled' },
     });
   });
+
+  it('disables Anthropic thinking when max_tokens cannot satisfy Opus thinking minimum', () => {
+    const applied = applyAnthropicModelVariant({
+      model: 'claude-opus-4-6-thinking',
+      messages: [{ role: 'user', content: 'Say OK' }],
+      max_tokens: 1024,
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'claude-opus-4-6-thinking',
+      max_tokens: 1024,
+      thinking: { type: 'disabled' },
+    });
+    expect(applied.variant).toMatchObject({
+      canonicalModel: 'claude-opus-4-6-thinking',
+      model: 'claude-opus-4-6-thinking',
+      thinkingBudget: 1024,
+    });
+  });
+
+  it('preserves Anthropic thinking when Opus max_tokens is above minimum', () => {
+    const applied = applyAnthropicModelVariant({
+      model: 'claude-opus-4-6-thinking',
+      messages: [{ role: 'user', content: 'Say OK' }],
+      max_tokens: 1025,
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'claude-opus-4-6-thinking',
+      max_tokens: 1025,
+      thinking: {
+        type: 'enabled',
+        budget_tokens: 1024,
+      },
+    });
+  });
+
+  it('does not disable thinking for Sonnet at 8 tokens because minimum is not set in registry', () => {
+    const applied = applyAnthropicModelVariant({
+      model: 'claude-sonnet-4-6-thinking',
+      messages: [{ role: 'user', content: 'Say OK' }],
+      max_tokens: 8,
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'claude-sonnet-4-6-thinking',
+      max_tokens: 8,
+      thinking: {
+        type: 'enabled',
+        budget_tokens: 1024,
+      },
+    });
+    expect(applied.variant).toMatchObject({
+      canonicalModel: 'claude-sonnet-4-6',
+      model: 'claude-sonnet-4-6',
+    });
+  });
 });
 
 describe('applyOpenAIModelVariant', () => {
@@ -212,6 +269,47 @@ describe('applyOpenAIModelVariant', () => {
       },
       tools: undefined,
       tool_choice: undefined,
+    });
+  });
+
+  it('disables OpenAI thinking when max_tokens cannot satisfy Opus thinking minimum', () => {
+    const applied = applyOpenAIModelVariant({
+      model: 'claude-opus-4-6-thinking',
+      messages: [{ role: 'user', content: 'Say OK' }],
+      max_tokens: 1024,
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'claude-opus-4-6-thinking',
+      max_tokens: 1024,
+      thinking: { type: 'disabled' },
+    });
+    expect(applied.variant).toMatchObject({
+      canonicalModel: 'claude-opus-4-6-thinking',
+      model: 'claude-opus-4-6-thinking',
+      thinkingBudget: 1024,
+    });
+  });
+
+  it('preserves OpenAI thinking when Opus max_tokens is above minimum', () => {
+    const applied = applyOpenAIModelVariant({
+      model: 'claude-opus-4-6-thinking',
+      messages: [{ role: 'user', content: 'Say OK' }],
+      max_tokens: 1025,
+    });
+
+    expect(applied.request).toMatchObject({
+      model: 'claude-opus-4-6-thinking',
+      max_tokens: 1025,
+      thinking: {
+        type: 'enabled',
+        budget_tokens: 1024,
+      },
+    });
+    expect(applied.variant).toMatchObject({
+      canonicalModel: 'claude-opus-4-6-thinking',
+      model: 'claude-opus-4-6-thinking',
+      thinkingBudget: 1024,
     });
   });
 });
