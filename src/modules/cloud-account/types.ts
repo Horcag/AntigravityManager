@@ -36,6 +36,21 @@ export interface CloudQuotaModelInfo {
   is_internal?: boolean;
   /** `ModelDetails.disabled`: advertised but turned off for this account. */
   disabled?: boolean;
+  /**
+   * `ModelDetails.supports_cumulative_context`: the editor keeps feeding the
+   * same growing buffer back. One of the editor-family markers.
+   */
+  supports_cumulative_context?: boolean;
+  /**
+   * `ModelDetails.supports_estimate_token_counter`: the editor sizes its own
+   * prompt locally instead of asking the provider. Editor-family marker.
+   */
+  supports_estimate_token_counter?: boolean;
+  /**
+   * `ModelDetails.requires_lead_in_generation`: generation must be primed with
+   * the text before the cursor. Editor-family marker.
+   */
+  requires_lead_in_generation?: boolean;
   beta?: boolean;
   preview?: boolean;
   supports_video?: boolean;
@@ -142,6 +157,9 @@ export const CloudQuotaModelInfoSchema = z.object({
   supported_mime_types: z.record(z.string(), z.boolean()).optional(),
   is_internal: z.boolean().optional(),
   disabled: z.boolean().optional(),
+  supports_cumulative_context: z.boolean().optional(),
+  supports_estimate_token_counter: z.boolean().optional(),
+  requires_lead_in_generation: z.boolean().optional(),
   beta: z.boolean().optional(),
   preview: z.boolean().optional(),
   supports_video: z.boolean().optional(),

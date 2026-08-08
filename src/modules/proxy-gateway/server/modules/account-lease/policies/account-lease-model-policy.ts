@@ -1,8 +1,11 @@
 import { isNumber } from 'lodash-es';
 import type { CloudModelRoleId } from '@/modules/cloud-account/types';
 import {
+  COMPLETION_MODEL_FLAGS,
   type CatalogModelRoleIndex,
+  type CompletionModelFlag,
   getPublicModelIdForDisplayName,
+  resolveCompletionModelFlags,
 } from '../../../../antigravity/ModelMapping';
 import {
   type AccountLeaseTokenData,
@@ -52,29 +55,57 @@ export class AccountLeaseModelPolicy {
   }
 
   /**
-   * Projects the provider's surface partitioning onto the catalog ids that
-   * {@link getAllCollectedModels} publishes, so the catalog filter can decide
-   * with provider facts instead of an id table.
+   * Projects the provider's own statements about each advertised id onto the
+   * catalog ids that {@link getAllCollectedModels} publishes, so the catalog
+   * filter can decide with provider facts instead of an id table.
    *
-   * 1. Role ids arrive as raw provider ids, catalog ids may have been rewritten
-   *    to a public preset id, so each role id is translated the same way.
-   * 2. Roles are unioned across accounts: a model any account offers for chat
-   *    stays publishable even if another account only lists it for a tool role.
+   * 1. Provider ids arrive raw, catalog ids may have been rewritten to a public
+   *    preset id, so every id is translated the same way.
+   * 2. Facts are unioned across accounts: a model any account offers for chat
+   *    stays publishable even if another account only lists it for a tool role,
+   *    and an editor-family marker any account reports counts for the id.
    * 3. `hasChatRoleData` stays false when no account reported an `agent` role,
    *    which is the signal that non-chat membership alone cannot be trusted.
    */
   getCatalogModelRoleIndex(): CatalogModelRoleIndex {
     const nonChatRoles = new Map<string, string[]>();
     const chatModelIds = new Set<string>();
+    const completionFlags = new Map<string, CompletionModelFlag[]>();
     let hasChatRoleData = false;
 
     for (const tokenData of this.options.getTokenCache().values()) {
+      const catalogIdByProviderId = this.buildCatalogIdIndex(tokenData);
+
+      for (const [modelId, modelInfo] of Object.entries(tokenData.quota?.models ?? {})) {
+        const flags = resolveCompletionModelFlags(modelInfo);
+        if (flags.length === 0) {
+          continue;
+        }
+
+        const normalizedModelId = normalizeModelId(modelId)?.toLowerCase();
+        if (!normalizedModelId) {
+          continue;
+        }
+
+        const catalogId = catalogIdByProviderId.get(normalizedModelId) ?? normalizedModelId;
+        const knownFlags = completionFlags.get(catalogId);
+        if (!knownFlags) {
+          completionFlags.set(catalogId, flags);
+          continue;
+        }
+        completionFlags.set(
+          catalogId,
+          COMPLETION_MODEL_FLAGS.filter(
+            (flag) => knownFlags.includes(flag) || flags.includes(flag),
+          ),
+        );
+      }
+
       const modelRoles = tokenData.quota?.model_roles;
       if (!modelRoles) {
         continue;
       }
 
-      const catalogIdByProviderId = this.buildCatalogIdIndex(tokenData);
       for (const [role, modelIds] of Object.entries(modelRoles) as [
         CloudModelRoleId,
         string[] | undefined,
@@ -112,7 +143,7 @@ export class AccountLeaseModelPolicy {
       }
     }
 
-    return { nonChatRoles, chatModelIds, hasChatRoleData };
+    return { nonChatRoles, chatModelIds, hasChatRoleData, completionFlags };
   }
 
   /** Maps a token's raw provider model ids to the ids the catalog publishes. */

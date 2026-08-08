@@ -127,6 +127,9 @@ export interface ModelQuotaInfo {
   supported_mime_types?: Record<string, boolean>;
   is_internal?: boolean;
   disabled?: boolean;
+  supports_cumulative_context?: boolean;
+  supports_estimate_token_counter?: boolean;
+  requires_lead_in_generation?: boolean;
   beta?: boolean;
   preview?: boolean;
   supports_video?: boolean;
@@ -166,6 +169,9 @@ interface ModelInfoRaw {
   supportedMimeTypes?: Record<string, boolean>;
   isInternal?: boolean;
   disabled?: boolean;
+  supportsCumulativeContext?: boolean;
+  supportsEstimateTokenCounter?: boolean;
+  requiresLeadInGeneration?: boolean;
   beta?: boolean;
   preview?: boolean;
   supportsVideo?: boolean;
@@ -328,6 +334,9 @@ function toModelQuotaInfo(modelName: string, info: ModelInfoRaw): ModelQuotaInfo
     supported_mime_types: info.supportedMimeTypes,
     is_internal: info.isInternal,
     disabled: info.disabled,
+    supports_cumulative_context: info.supportsCumulativeContext,
+    supports_estimate_token_counter: info.supportsEstimateTokenCounter,
+    requires_lead_in_generation: info.requiresLeadInGeneration,
     beta: info.beta,
     preview: info.preview,
     supports_video: info.supportsVideo,
