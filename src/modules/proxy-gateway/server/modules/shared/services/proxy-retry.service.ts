@@ -9,6 +9,7 @@ import {
   shouldGraceRetry,
 } from './rate-limit-tracker.service';
 import { UpstreamRequestError } from '../../../common/exceptions/upstream-request-exception';
+import { classifyForbiddenUpstreamError } from '../../../common/google-error-details';
 import { ModelAvailabilityService } from './model-availability.service';
 import { AccountLeaseService } from '../../account-lease/account-lease.service';
 
@@ -165,6 +166,9 @@ export class ProxyRetryService {
         this.persistModelRateLimit(accountId, model, error.body ?? error.message, status);
         return;
       }
+      if (status === 403 && this.isRecoverableForbidden(accountId, error)) {
+        return;
+      }
       if (status === 401 || status === 403) {
         this.accountLeaseService.markAsForbidden(accountId);
         return;
@@ -209,6 +213,32 @@ export class ProxyRetryService {
   markUpstreamSuccess(accountId: string, model: string): void {
     this.accountLeaseService.markModelSuccess(accountId, model);
     this.modelAvailabilityStore.clearModel(accountId, model);
+  }
+
+  /**
+   * A 403 that the user can clear (identity verification) or that a VPC-SC boundary produced says
+   * nothing about the credential, so the account stays in rotation. Every other 403 still burns it.
+   */
+  private isRecoverableForbidden(accountId: string, error: UpstreamRequestError): boolean {
+    const classification = classifyForbiddenUpstreamError({
+      details: error.details,
+      body: error.body,
+      message: error.message,
+    });
+    if (classification.kind === 'account_forbidden') {
+      return false;
+    }
+
+    const detail =
+      classification.kind === 'validation_required'
+        ? `validation required${
+            classification.validationLink ? ` (${classification.validationLink})` : ''
+          }`
+        : 'VPC Service Controls policy';
+    this.logger.warn(
+      `Upstream 403 for account ${accountId} is recoverable (${detail}); keeping the account in rotation.`,
+    );
+    return true;
   }
 
   private persistModelRateLimit(
@@ -258,9 +288,11 @@ export class ProxyRetryService {
       normalizedErrorMessage.includes('forbidden');
 
     if (isForbidden) {
+      const recoverable =
+        classifyForbiddenUpstreamError({ message: errorMessage }).kind !== 'account_forbidden';
       return {
         retry: true,
-        markAsForbidden: true,
+        markAsForbidden: !recoverable,
         markAsRateLimited: false,
       };
     }

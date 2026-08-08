@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ProxyRetryService } from '@/modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
 import { UpstreamRequestError } from '@/modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { ModelAvailabilityService } from '@/modules/proxy-gateway/server/modules/shared/services/model-availability.service';
+import { sanitizeUpstreamError } from '@/modules/proxy-gateway/server/modules/gemini/gemini-wire';
 import type { CloudAccount } from '@/modules/cloud-account/types';
 
 function createToken(id: string): CloudAccount {
@@ -247,6 +248,117 @@ describe('ProxyRetryService', () => {
       status: 429,
       body: '429 quota exceeded',
       model: 'gemini-3-flash',
+    });
+  });
+
+  it('keeps the account in rotation for a VALIDATION_REQUIRED 403 and surfaces the link', async () => {
+    const { policy, accountLeaseService } = createPolicy();
+    const details = [
+      {
+        type: 'type.googleapis.com/google.rpc.ErrorInfo',
+        reason: 'VALIDATION_REQUIRED',
+        domain: 'cloudcode-pa.googleapis.com',
+      },
+      {
+        type: 'type.googleapis.com/google.rpc.Help',
+        links: [
+          { description: 'Verify your account', url: 'https://developers.google.com/verify' },
+          { description: 'Learn more', url: 'https://support.google.com/help' },
+        ],
+      },
+    ];
+    const error = new UpstreamRequestError({
+      message: 'Permission denied',
+      status: 403,
+      details,
+    });
+
+    await policy.applyUpstreamPenalty('acc-validation', 'gemini-3-flash', error);
+
+    expect(accountLeaseService.markAsForbidden).not.toHaveBeenCalled();
+    expect(accountLeaseService.markFromUpstreamError).not.toHaveBeenCalled();
+    expect(sanitizeUpstreamError(error)).toEqual(
+      expect.objectContaining({
+        statusCode: 403,
+        validationLink: 'https://developers.google.com/verify',
+        message: expect.stringContaining('https://developers.google.com/verify'),
+      }),
+    );
+    expect(sanitizeUpstreamError(error).message).toContain('https://support.google.com/help');
+  });
+
+  it('keeps the account in rotation for a SECURITY_POLICY_VIOLATED 403', async () => {
+    const { policy, accountLeaseService } = createPolicy();
+    const error = new UpstreamRequestError({
+      message: 'Request is prohibited by organization policy',
+      status: 403,
+      details: [{ reason: 'SECURITY_POLICY_VIOLATED' }],
+    });
+
+    await policy.applyUpstreamPenalty('acc-vpcsc', 'gemini-3-flash', error);
+
+    expect(accountLeaseService.markAsForbidden).not.toHaveBeenCalled();
+    expect(accountLeaseService.markFromUpstreamError).not.toHaveBeenCalled();
+    expect(sanitizeUpstreamError(error).message).toContain('VPC Service Controls');
+  });
+
+  it('recognises both recoverable 403s from a truncated body alone', async () => {
+    const { policy, accountLeaseService } = createPolicy();
+
+    await policy.applyUpstreamPenalty(
+      'acc-body',
+      'gemini-3-flash',
+      new UpstreamRequestError({
+        message: 'Permission denied',
+        status: 403,
+        body: '{"reason":"VALIDATION_REQUIRED","domain":"cloudcode-pa.googleapis.com"',
+      }),
+    );
+    await policy.applyUpstreamPenalty(
+      'acc-body',
+      'gemini-3-flash',
+      new UpstreamRequestError({
+        message: 'Permission denied',
+        status: 403,
+        body: '{"details":[{"reason":"SECURITY_POLICY_VIOLATED"',
+      }),
+    );
+
+    expect(accountLeaseService.markAsForbidden).not.toHaveBeenCalled();
+  });
+
+  it('still burns the account on an unrecognised 403', async () => {
+    const { policy, accountLeaseService } = createPolicy();
+
+    await policy.applyUpstreamPenalty(
+      'acc-dead',
+      'gemini-3-flash',
+      new UpstreamRequestError({
+        message: 'The caller does not have permission',
+        status: 403,
+        details: [{ reason: 'IAM_PERMISSION_DENIED', domain: 'cloudcode-pa.googleapis.com' }],
+      }),
+    );
+
+    expect(accountLeaseService.markAsForbidden).toHaveBeenCalledWith('acc-dead');
+  });
+
+  it('spares the account when only the message carries the recoverable 403 signal', () => {
+    const { policy } = createPolicy();
+
+    expect(
+      policy.classifyUpstreamFailure(
+        '403 permission_denied VALIDATION_REQUIRED cloudcode-pa.googleapis.com',
+      ),
+    ).toEqual({
+      retry: true,
+      markAsForbidden: false,
+      markAsRateLimited: false,
+    });
+    expect(policy.classifyUpstreamFailure('403 permission_denied')).toEqual({
+      retry: true,
+      markAsForbidden: true,
+      markAsRateLimited: false,
     });
   });
 });
