@@ -654,6 +654,38 @@ const tr = {
       presets_preview_nothing: 'Bu paketteki tüm aliaslar zaten var. Hiçbir şey eklenmeyecek.',
       presets_cancel: 'İptal',
       presets_apply: 'Alias ekle',
+      transfer_title: 'İçe ve dışa aktarma',
+      transfer_description:
+        'Alias satırlarını bir JSON dosyasına yazın veya bir dosyayı mevcut listeyle birleştirin. Dosyaya yalnızca alias, hedef ve etkin bilgisi yazılır — API anahtarı, hesap kimlikleri veya portlar asla yazılmaz.',
+      transfer_export: 'Alias’ları dışa aktar',
+      transfer_exported: '{{count}} alias dışa aktarıldı',
+      transfer_import: 'Alias’ları içe aktar',
+      transfer_read_failed: 'Dosya okunamadı. Hiçbir şey değiştirilmedi.',
+      transfer_preview_title: '{{file}} dosyasından içe aktar',
+      transfer_preview_description:
+        'Dosya birleştirilir: yeni alias’lar eklenir, halihazırda bulunanlar değiştirilmeden bırakılır.',
+      transfer_preview_additions: 'Eklenecek',
+      transfer_preview_nothing: 'Bu dosyadan hiçbir şey eklenmeyecek.',
+      transfer_preview_collisions: 'Zaten var, değiştirilmedi',
+      transfer_preview_rejections: 'Reddedildi, içe aktarılmadı',
+      transfer_preview_warnings: 'Uyarıyla eklendi',
+      transfer_preview_entry: '{{entry}}. kayıt ({{alias}})',
+      transfer_cancel: 'İptal',
+      transfer_apply: 'Alias ekle',
+      transfer_applied: '{{added}} alias eklendi, {{skipped}} zaten vardı, {{rejected}} reddedildi',
+      transfer_envelope_invalid_json: 'Bu dosya geçerli JSON değil. Hiçbir şey değiştirilmedi.',
+      transfer_envelope_not_an_object:
+        'Bu dosya bir alias dışa aktarma nesnesi değil. Hiçbir şey değiştirilmedi.',
+      transfer_envelope_unknown_format:
+        'Bu dosya Model Eşleme dışa aktarması tarafından yazılmamış. Hiçbir şey değiştirilmedi.',
+      transfer_envelope_unsupported_version:
+        'Bu dosya, bu sürümün okuyamadığı bir dışa aktarma sürümü kullanıyor. Hiçbir şey değiştirilmedi.',
+      transfer_envelope_aliases_not_an_array:
+        'Bu dosyadaki “aliases” alanı bir liste değil. Hiçbir şey değiştirilmedi.',
+      transfer_reject_entry_not_an_object: 'Bu kayıt bir nesne değil.',
+      transfer_reject_alias_not_a_string: '“alias” alanı eksik veya metin değil.',
+      transfer_reject_target_not_a_string: '“target” alanı eksik veya metin değil.',
+      transfer_reject_enabled_not_a_boolean: '“enabled” alanı true veya false değil.',
       presets_applied: '{{added}} alias eklendi, {{skipped}} tanesi zaten vardı',
       maps_to: 'Şu modele eşlenir:',
       restore: 'Varsayılanlara Sıfırla',

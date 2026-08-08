@@ -736,6 +736,39 @@ const en = {
       presets_cancel: 'Cancel',
       presets_apply: 'Add aliases',
       presets_applied: '{{added}} alias(es) added, {{skipped}} already existed',
+      transfer_title: 'Import and export',
+      transfer_description:
+        'Write the alias rows to a JSON file, or merge a file back in. Only alias, target and enabled are written — never the API key, account ids or ports.',
+      transfer_export: 'Export aliases',
+      transfer_exported: '{{count}} alias(es) exported',
+      transfer_import: 'Import aliases',
+      transfer_read_failed: 'The file could not be read. Nothing was changed.',
+      transfer_preview_title: 'Import from {{file}}',
+      transfer_preview_description:
+        'The file is merged: new aliases are added, aliases you already have are kept unchanged.',
+      transfer_preview_additions: 'Will be added',
+      transfer_preview_nothing: 'Nothing in this file will be added.',
+      transfer_preview_collisions: 'Already exists, left unchanged',
+      transfer_preview_rejections: 'Rejected, not imported',
+      transfer_preview_warnings: 'Added with a warning',
+      transfer_preview_entry: 'Entry {{entry}} ({{alias}})',
+      transfer_cancel: 'Cancel',
+      transfer_apply: 'Add aliases',
+      transfer_applied:
+        '{{added}} alias(es) added, {{skipped}} already existed, {{rejected}} rejected',
+      transfer_envelope_invalid_json: 'This file is not valid JSON. Nothing was changed.',
+      transfer_envelope_not_an_object:
+        'This file is not an alias export object. Nothing was changed.',
+      transfer_envelope_unknown_format:
+        'This file was not written by the Model Mapping export. Nothing was changed.',
+      transfer_envelope_unsupported_version:
+        'This file uses an alias export version this build does not read. Nothing was changed.',
+      transfer_envelope_aliases_not_an_array:
+        'The "aliases" field of this file is not a list. Nothing was changed.',
+      transfer_reject_entry_not_an_object: 'This entry is not an object.',
+      transfer_reject_alias_not_a_string: 'The "alias" field is missing or is not text.',
+      transfer_reject_target_not_a_string: 'The "target" field is missing or is not text.',
+      transfer_reject_enabled_not_a_boolean: 'The "enabled" field is not true or false.',
       maps_to: 'Maps to',
       restore: 'Restore Defaults',
       empty: 'No aliases configured. Model IDs are sent without hidden substitutions.',

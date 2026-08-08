@@ -665,6 +665,38 @@ const ru = {
       presets_cancel: 'Отмена',
       presets_apply: 'Добавить алиасы',
       presets_applied: 'Добавлено алиасов: {{added}}, уже существовало: {{skipped}}',
+      transfer_title: 'Импорт и экспорт',
+      transfer_description:
+        'Сохраните строки алиасов в JSON-файл или объедините файл с текущим списком. В файл попадают только алиас, цель и флаг включения — ни API-ключа, ни идентификаторов аккаунтов, ни портов.',
+      transfer_export: 'Экспортировать алиасы',
+      transfer_exported: 'Экспортировано алиасов: {{count}}',
+      transfer_import: 'Импортировать алиасы',
+      transfer_read_failed: 'Не удалось прочитать файл. Ничего не изменено.',
+      transfer_preview_title: 'Импорт из {{file}}',
+      transfer_preview_description:
+        'Файл объединяется с текущим списком: новые алиасы добавляются, уже существующие остаются без изменений.',
+      transfer_preview_additions: 'Будет добавлено',
+      transfer_preview_nothing: 'Из этого файла ничего не будет добавлено.',
+      transfer_preview_collisions: 'Уже существует, остаётся без изменений',
+      transfer_preview_rejections: 'Отклонено, не импортировано',
+      transfer_preview_warnings: 'Добавлено с предупреждением',
+      transfer_preview_entry: 'Запись {{entry}} ({{alias}})',
+      transfer_cancel: 'Отмена',
+      transfer_apply: 'Добавить алиасы',
+      transfer_applied:
+        'Добавлено алиасов: {{added}}, уже существовало: {{skipped}}, отклонено: {{rejected}}',
+      transfer_envelope_invalid_json: 'Это не корректный JSON. Ничего не изменено.',
+      transfer_envelope_not_an_object: 'Это не объект экспорта алиасов. Ничего не изменено.',
+      transfer_envelope_unknown_format:
+        'Этот файл создан не экспортом «Сопоставление моделей». Ничего не изменено.',
+      transfer_envelope_unsupported_version:
+        'Версия формата экспорта не поддерживается этой сборкой. Ничего не изменено.',
+      transfer_envelope_aliases_not_an_array:
+        'Поле «aliases» в этом файле не является списком. Ничего не изменено.',
+      transfer_reject_entry_not_an_object: 'Эта запись не является объектом.',
+      transfer_reject_alias_not_a_string: 'Поле «alias» отсутствует или не является текстом.',
+      transfer_reject_target_not_a_string: 'Поле «target» отсутствует или не является текстом.',
+      transfer_reject_enabled_not_a_boolean: 'Поле «enabled» не равно true или false.',
       maps_to: '->',
       restore: 'Сброс',
       empty: 'Алиасов нет. Прокси не выполняет скрытых подмен модели.',

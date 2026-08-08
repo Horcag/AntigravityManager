@@ -652,6 +652,39 @@ const vi = {
       presets_preview_nothing: 'Mọi bí danh trong gói này đều đã tồn tại. Sẽ không thêm gì cả.',
       presets_cancel: 'Hủy',
       presets_apply: 'Thêm bí danh',
+      transfer_title: 'Nhập và xuất',
+      transfer_description:
+        'Ghi các dòng bí danh ra tệp JSON, hoặc hợp nhất một tệp trở lại. Tệp chỉ chứa bí danh, đích và trạng thái bật — không bao giờ chứa khóa API, ID tài khoản hay cổng.',
+      transfer_export: 'Xuất bí danh',
+      transfer_exported: 'Đã xuất {{count}} bí danh',
+      transfer_import: 'Nhập bí danh',
+      transfer_read_failed: 'Không đọc được tệp. Không có gì thay đổi.',
+      transfer_preview_title: 'Nhập từ {{file}}',
+      transfer_preview_description:
+        'Tệp được hợp nhất: bí danh mới được thêm, bí danh đã có được giữ nguyên.',
+      transfer_preview_additions: 'Sẽ được thêm',
+      transfer_preview_nothing: 'Không có gì trong tệp này được thêm.',
+      transfer_preview_collisions: 'Đã tồn tại, giữ nguyên',
+      transfer_preview_rejections: 'Bị từ chối, không nhập',
+      transfer_preview_warnings: 'Đã thêm kèm cảnh báo',
+      transfer_preview_entry: 'Mục {{entry}} ({{alias}})',
+      transfer_cancel: 'Hủy',
+      transfer_apply: 'Thêm bí danh',
+      transfer_applied:
+        'Đã thêm {{added}} bí danh, {{skipped}} đã tồn tại, {{rejected}} bị từ chối',
+      transfer_envelope_invalid_json: 'Tệp này không phải JSON hợp lệ. Không có gì thay đổi.',
+      transfer_envelope_not_an_object:
+        'Tệp này không phải đối tượng xuất bí danh. Không có gì thay đổi.',
+      transfer_envelope_unknown_format:
+        'Tệp này không do chức năng xuất của Ánh xạ mô hình tạo ra. Không có gì thay đổi.',
+      transfer_envelope_unsupported_version:
+        'Tệp này dùng phiên bản xuất mà bản dựng này không đọc được. Không có gì thay đổi.',
+      transfer_envelope_aliases_not_an_array:
+        'Trường “aliases” trong tệp này không phải danh sách. Không có gì thay đổi.',
+      transfer_reject_entry_not_an_object: 'Mục này không phải đối tượng.',
+      transfer_reject_alias_not_a_string: 'Trường “alias” bị thiếu hoặc không phải văn bản.',
+      transfer_reject_target_not_a_string: 'Trường “target” bị thiếu hoặc không phải văn bản.',
+      transfer_reject_enabled_not_a_boolean: 'Trường “enabled” không phải true hoặc false.',
       presets_applied: 'Đã thêm {{added}} bí danh, {{skipped}} bí danh đã tồn tại',
       maps_to: 'Ánh xạ tới',
       restore: 'Khôi phục mặc định',
