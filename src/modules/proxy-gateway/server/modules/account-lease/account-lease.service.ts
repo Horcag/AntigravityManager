@@ -1,5 +1,17 @@
-import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
-import { CloudAccount, type CloudModelRoleId } from '@/modules/cloud-account/types';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
+import {
+  CloudAccount,
+  type CloudModelRoleId,
+  type CloudQuotaData,
+} from '@/modules/cloud-account/types';
+import { onQuotaRefreshed } from '@/modules/cloud-account/services/quota-refresh-notifier';
 import { RateLimitTrackerService } from '../shared/services/rate-limit-tracker.service';
 import {
   ACCOUNT_LEASE_ACCOUNT_STORE,
@@ -48,7 +60,7 @@ export interface ModelRouteAccountAvailability {
 }
 
 @Injectable()
-export class AccountLeaseService implements OnModuleInit {
+export class AccountLeaseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AccountLeaseService.name);
   private readonly stickySessionTtlMs = 10 * 60 * 1000;
   private readonly rateLimitCooldownMs = 5 * 60 * 1000;
@@ -68,6 +80,7 @@ export class AccountLeaseService implements OnModuleInit {
   private readonly accountStore: AccountLeaseAccountStore;
   private readonly upstream: AccountLeaseUpstream;
   private readonly modelAvailabilityStore?: ModelAvailabilityService;
+  private unsubscribeQuotaRefresh?: () => void;
 
   constructor(
     @Inject(RateLimitTrackerService)
@@ -153,11 +166,29 @@ export class AccountLeaseService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    this.unsubscribeQuotaRefresh = onQuotaRefreshed((accountId, quota) => {
+      this.applyRefreshedQuota(accountId, quota);
+    });
     await this.loadAccounts();
+  }
+
+  onModuleDestroy() {
+    this.unsubscribeQuotaRefresh?.();
+    this.unsubscribeQuotaRefresh = undefined;
   }
 
   async loadAccounts(): Promise<number> {
     return this.tokenCache.loadAccounts();
+  }
+
+  /**
+   * Adopts a quota the account owner just fetched, so the cache does not keep
+   * serving the snapshot it loaded at start-up until the next full reload. The
+   * catalog policies read provider facts straight off this quota, so a stale one
+   * hides every field the persisted snapshot predates (kanban-40).
+   */
+  applyRefreshedQuota(accountId: string, quota: CloudQuotaData): boolean {
+    return this.tokenCache.applyQuota(accountId, quota);
   }
 
   async reloadAllAccounts(): Promise<number> {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountLeaseTokenData } from '@/modules/proxy-gateway/server/modules/account-lease/interfaces/account-lease-token-types';
+import type { CloudAccount, CloudQuotaData } from '@/modules/cloud-account/types';
 
 /**
  * The completion-model rule, exercised end to end: the wire payload
@@ -138,6 +139,61 @@ async function buildCatalog(payload: unknown) {
   };
 }
 
+/**
+ * Runs the parsed quota through the cache the proxy actually reads: the model
+ * policy never sees `fetchQuota`'s return value, it sees whatever
+ * `AccountLeaseTokenCache` copied out of the account store.
+ */
+async function createLeaseService(quota: CloudQuotaData) {
+  const account = {
+    id: 'acc-1',
+    provider: 'google',
+    email: 'lease@example.com',
+    token: {
+      access_token: 'access-token',
+      refresh_token: 'refresh-token',
+      token_type: 'Bearer',
+      expires_in: 3600,
+      expiry_timestamp: Math.floor(Date.now() / 1000) + 3600,
+    },
+    quota,
+    created_at: 1,
+    last_used: 1,
+  } as CloudAccount;
+
+  const accountStore = {
+    getAccounts: vi.fn().mockResolvedValue([account]),
+    getAccount: vi.fn().mockResolvedValue(account),
+    updateToken: vi.fn(),
+    updateQuota: vi.fn(),
+  };
+
+  const { AccountLeaseService } =
+    await import('@/modules/proxy-gateway/server/modules/account-lease/account-lease.service');
+  const { RateLimitTrackerService } =
+    await import('@/modules/proxy-gateway/server/modules/shared/services/rate-limit-tracker.service');
+
+  const service = new AccountLeaseService(new RateLimitTrackerService(), accountStore);
+  await service.onModuleInit();
+  return { service, accountStore };
+}
+
+/**
+ * The shape a build that predates the `ModelDetails` parse persisted: quota
+ * numbers and the role arrays it already knew about, no per-model scalars.
+ */
+function asPreMarkerSnapshot(quota: CloudQuotaData): CloudQuotaData {
+  return {
+    ...quota,
+    models: Object.fromEntries(
+      Object.entries(quota.models).map(([modelId, modelInfo]) => [
+        modelId,
+        { percentage: modelInfo.percentage, resetTime: modelInfo.resetTime },
+      ]),
+    ),
+  };
+}
+
 describe('completion-model catalog rule', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -204,6 +260,22 @@ describe('completion-model catalog rule', () => {
     expect(published).toContain('gemini-3.1-flash-image');
   });
 
+  it('reaches the rule through the account-lease cache, not only through the parse', async () => {
+    const quota = await fetchQuotaFromPayload(MEASURED_DISCOVERY_PAYLOAD);
+    const { service } = await createLeaseService(quota);
+
+    try {
+      const index = service.getCatalogModelRoleIndex();
+      expect(index.completionFlags.get('chat_20706')).toEqual([
+        'requiresLeadInGeneration',
+        'supportsCumulativeContext',
+        'supportsEstimateTokenCounter',
+      ]);
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
   it('withholds nothing new when the payload carries no ModelDetails scalars', async () => {
     const { index, published, unpublished } = await buildCatalog(PAYLOAD_WITHOUT_MODEL_DETAILS);
 
@@ -223,5 +295,77 @@ describe('completion-model catalog rule', () => {
       { id: 'chat_20706', reason: 'override', flags: [], roles: [] },
       { id: 'tab_flash_lite_preview', reason: 'override', flags: [], roles: [] },
     ]);
+  });
+});
+
+/**
+ * kanban-40 r5, the live failure: every parse hop handles the markers, but the
+ * proxy reads a cache it fills once, when it starts. The snapshot the previous
+ * build persisted carries the role arrays that build already parsed and none of
+ * the `ModelDetails` scalars this one added, so the rule saw roles and no flags
+ * across five poll cycles while the store was refreshed each time.
+ */
+describe('completion-model catalog rule over the account-lease cache', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('finds no markers while the cache holds the snapshot an older build persisted', async () => {
+    const quota = await fetchQuotaFromPayload(MEASURED_DISCOVERY_PAYLOAD);
+    const { service } = await createLeaseService(asPreMarkerSnapshot(quota));
+
+    try {
+      const index = service.getCatalogModelRoleIndex();
+
+      // The symptom, exactly: roles present, flags absent.
+      expect(index.nonChatRoles.get('chat_20706')).toEqual(['tab']);
+      expect(index.completionFlags.size).toBe(0);
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
+  it('withholds the completion ids once a refreshed quota is announced', async () => {
+    const quota = await fetchQuotaFromPayload(MEASURED_DISCOVERY_PAYLOAD);
+    const { service } = await createLeaseService(asPreMarkerSnapshot(quota));
+    const { notifyQuotaRefreshed } =
+      await import('@/modules/cloud-account/services/quota-refresh-notifier');
+    const { getUnpublishedCatalogModelIds } =
+      await import('@/modules/proxy-gateway/antigravity/ModelMapping');
+
+    try {
+      notifyQuotaRefreshed('acc-1', quota);
+
+      const index = service.getCatalogModelRoleIndex();
+      expect(index.completionFlags.get('chat_20706')).toEqual([
+        'requiresLeadInGeneration',
+        'supportsCumulativeContext',
+        'supportsEstimateTokenCounter',
+      ]);
+      expect(index.nonChatRoles.get('chat_20706')).toEqual(['tab']);
+      expect(
+        getUnpublishedCatalogModelIds([...service.getAllCollectedModels()], index).map(
+          (entry) => `${entry.id}:${entry.reason}`,
+        ),
+      ).toEqual(['chat_20706:completion_model', 'tab_flash_lite_preview:completion_model']);
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
+  it('ignores a refresh announced for an account it does not hold', async () => {
+    const quota = await fetchQuotaFromPayload(MEASURED_DISCOVERY_PAYLOAD);
+    const { service } = await createLeaseService(asPreMarkerSnapshot(quota));
+    const { notifyQuotaRefreshed } =
+      await import('@/modules/cloud-account/services/quota-refresh-notifier');
+
+    try {
+      notifyQuotaRefreshed('acc-unknown', quota);
+
+      expect(service.getCatalogModelRoleIndex().completionFlags.size).toBe(0);
+    } finally {
+      service.onModuleDestroy();
+    }
   });
 });
