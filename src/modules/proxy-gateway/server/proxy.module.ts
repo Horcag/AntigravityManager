@@ -9,6 +9,7 @@ import { CloudMonitorService } from '@/modules/cloud-account/services/CloudMonit
 import { IMAGE_QUOTA_REFRESH } from './proxy.controller';
 import { RateLimitTrackerService } from './modules/shared/services/rate-limit-tracker.service';
 import { ModelRoutingService } from './modules/shared/services/model-routing.service';
+import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
 import {
   ModelAvailabilityService,
   PROXY_MODEL_AVAILABILITY_PERSISTENCE,
@@ -29,6 +30,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
       useValue: persistentAvailabilityAdapter,
     },
     ModelAvailabilityService,
+    ModelRouteMissJournalService,
     AccountLeaseService,
     ProxyRetryService,
     GenerationConstraintsService,

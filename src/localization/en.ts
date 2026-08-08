@@ -705,6 +705,12 @@ const en = {
       title: 'Model Mapping',
       description:
         'Optional, explicit aliases. Empty by default; requests otherwise use their canonical model ID.',
+      recent_misses_title: 'Recent unmatched model IDs',
+      recent_misses_empty: 'No recent unmatched model IDs.',
+      recent_misses_count: '{{count}} hit(s)',
+      recent_misses_last_seen: 'Last seen {{time}}',
+      create_miss_alias: 'Create alias from miss',
+      clear_misses: 'Clear misses',
       maps_to: 'Maps to',
       restore: 'Restore Defaults',
       empty: 'No aliases configured. Model IDs are sent without hidden substitutions.',
@@ -723,6 +729,8 @@ const en = {
       not_checked: 'Availability not checked',
       check: 'Check availability',
       add: 'Add alias',
+      miss_cleared: 'Miss journal cleared',
+      miss_clear_failed: 'Failed to clear miss journal',
       clear: 'Clear aliases',
     },
     'open-code': {

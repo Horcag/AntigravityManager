@@ -1,6 +1,7 @@
 import {
   Controller,
   Post,
+  Delete,
   Get,
   Body,
   Res,
@@ -97,6 +98,7 @@ import {
   getModelRouteMetadata,
   type ModelRouteMetadata,
 } from './common/model-route-metadata';
+import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
 
 export const IMAGE_QUOTA_REFRESH = Symbol('IMAGE_QUOTA_REFRESH');
 export type ImageQuotaRefresh = () => Promise<void>;
@@ -128,6 +130,9 @@ export class ProxyController {
     @Optional()
     @Inject(ModelAvailabilityService)
     private readonly modelAvailabilityService?: ModelAvailabilityService,
+    @Optional()
+    @Inject(ModelRouteMissJournalService)
+    private readonly modelRouteMissJournalService?: ModelRouteMissJournalService,
   ) {}
 
   @Get('models')
@@ -176,6 +181,15 @@ export class ProxyController {
         accounts: this.accountLeaseService?.getModelRouteAvailability(route.target) ?? [],
       })),
       recent_failures: this.modelAvailabilityService?.getSnapshot() ?? [],
+      recent_misses: this.modelRouteMissJournalService?.getSnapshot() ?? [],
+    });
+  }
+
+  @Delete('model-routes/miss-journal')
+  clearMissJournal(@Res() res: FastifyReply) {
+    this.modelRouteMissJournalService?.clear();
+    res.status(HttpStatus.OK).send({
+      object: 'model-route-miss-journal-cleared',
     });
   }
 
