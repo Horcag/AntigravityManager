@@ -2,6 +2,7 @@ import { isPlainObject } from 'lodash-es';
 
 import type { OpenAIChatRequest } from '../../../common/interfaces/request-interfaces';
 import { OpenAIRequestValidationError } from '../chat/openai-request-contract';
+import { validateResponsesTools } from './openai-responses-web-search-tool';
 
 export interface ResponsesRequestBody {
   background?: boolean;
@@ -65,6 +66,7 @@ export function normalizeOpenAIResponsesRequest(
   if (raw.tools !== undefined && !Array.isArray(raw.tools)) {
     invalid('tools', 'tools must be an array');
   }
+  validateResponsesTools(raw.tools as OpenAIChatRequest['tools'], { invalid, unsupported });
 
   validateNumberRange(raw.temperature, 'temperature', 0, 2);
   validateNumberRange(raw.top_p, 'top_p', 0, 1);

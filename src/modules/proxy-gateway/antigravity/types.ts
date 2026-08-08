@@ -1,3 +1,9 @@
+import type {
+  AnthropicServerToolUseBlock,
+  AnthropicWebSearchCitation,
+  AnthropicWebSearchToolResultBlock,
+} from './anthropic-web-search-blocks';
+
 // ============================================================================
 // Common Types (Shared types used across multiple interfaces)
 // ============================================================================
@@ -108,11 +114,15 @@ export type ContentBlock =
   | ImageBlock
   | ToolUseBlock
   | ToolResultBlock
-  | RedactedThinkingBlock;
+  | RedactedThinkingBlock
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock;
 
 export interface TextBlock {
   type: 'text';
   text: string;
+  /** Web-search citations, present only on a grounded answer. */
+  citations?: AnthropicWebSearchCitation[];
 }
 
 export interface ThinkingBlock {

@@ -4,6 +4,13 @@ import {
   createGroundingAccumulator,
   renderGroundingMarkdown,
 } from './grounding-citations';
+import {
+  ANTHROPIC_WEB_SEARCH_TOOL_NAME,
+  buildAnthropicWebSearchBlocks,
+  buildAnthropicWebSearchCitations,
+} from './anthropic-web-search-blocks';
+import { toWebSearchResultSet, type WebSearchResultSet } from './web-search-results';
+import { v4 as uuidv4 } from 'uuid';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
@@ -14,6 +21,11 @@ type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
 
 export interface StreamingSignatureState extends SignatureContext {
   store: SignatureStore;
+}
+
+export interface StreamingMappingOptions {
+  /** See `ResponseMappingOptions.webSearch`; same gate, streaming side. */
+  webSearch?: boolean;
 }
 
 interface SignatureManager {
@@ -58,12 +70,15 @@ export class StreamingState {
   public webSearchQuery: string | null = null;
   public groundingChunks: GroundingChunk[] | null = null;
   private readonly grounding = createGroundingAccumulator();
+  /** Everything sent as `text_delta`, which is the string citations address. */
+  private streamedText = '';
 
   private parseErrorCount: number = 0;
 
   constructor(
     public readonly signatureState?: StreamingSignatureState,
     private readonly fallbackModel: string = '',
+    private readonly options: StreamingMappingOptions = {},
   ) {}
 
   /**
@@ -176,6 +191,11 @@ export class StreamingState {
   }
 
   public emitDelta(deltaType: string, deltaContent: any): string {
+    if (deltaType === 'text_delta' && typeof deltaContent?.text === 'string') {
+      // Accumulated at the single point every text delta passes through, so the
+      // string citations are resolved against is exactly what the client saw.
+      this.streamedText += deltaContent.text;
+    }
     const delta = { type: deltaType, ...deltaContent };
     return this.emit('content_block_delta', {
       type: 'content_block_delta',
@@ -218,28 +238,34 @@ export class StreamingState {
       this.blockIndex++;
     }
 
-    // Process grounding (web search) -> convert to Markdown text block.
-    // Inline `[n]` markers are deliberately not attempted here: the prose they
-    // annotate has already been streamed to the client by the time grounding
-    // arrives, so only the trailing source list can still be emitted.
-    const groundingText = renderGroundingMarkdown(
-      this.webSearchQuery ? [this.webSearchQuery] : null,
-      this.groundingChunks,
-    );
+    const webSearchResultSet = this.options.webSearch ? toWebSearchResultSet(this.grounding) : null;
 
-    if (groundingText) {
-      chunks.push(
-        this.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.blockIndex,
-          content_block: { type: 'text', text: '' },
-        }),
+    if (webSearchResultSet) {
+      chunks.push(...this.emitWebSearchBlocks(webSearchResultSet));
+    } else {
+      // Process grounding (web search) -> convert to Markdown text block.
+      // Inline `[n]` markers are deliberately not attempted here: the prose they
+      // annotate has already been streamed to the client by the time grounding
+      // arrives, so only the trailing source list can still be emitted.
+      const groundingText = renderGroundingMarkdown(
+        this.webSearchQuery ? [this.webSearchQuery] : null,
+        this.groundingChunks,
       );
-      chunks.push(this.emitDelta('text_delta', { text: groundingText }));
-      chunks.push(
-        this.emit('content_block_stop', { type: 'content_block_stop', index: this.blockIndex }),
-      );
-      this.blockIndex++;
+
+      if (groundingText) {
+        chunks.push(
+          this.emit('content_block_start', {
+            type: 'content_block_start',
+            index: this.blockIndex,
+            content_block: { type: 'text', text: '' },
+          }),
+        );
+        chunks.push(this.emitDelta('text_delta', { text: groundingText }));
+        chunks.push(
+          this.emit('content_block_stop', { type: 'content_block_stop', index: this.blockIndex }),
+        );
+        this.blockIndex++;
+      }
     }
 
     // Determine stop reason
@@ -277,6 +303,9 @@ export class StreamingState {
             0,
         }
       : { input_tokens: 0, output_tokens: 0 };
+    if (webSearchResultSet) {
+      usage.server_tool_use = { web_search_requests: webSearchResultSet.requestCount };
+    }
 
     chunks.push(
       this.emit('message_delta', {
@@ -290,6 +319,74 @@ export class StreamingState {
       chunks.push(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
       this.messageStopSent = true;
     }
+
+    return chunks;
+  }
+
+  /**
+   * The search blocks, emitted once the upstream stream is done.
+   *
+   * Grounding metadata only lands on the final frames, long after the prose it
+   * annotates has been streamed. Rather than invent incremental events for a
+   * search whose progress the upstream never reported, the whole thing is
+   * emitted here: the `server_tool_use` with its query, the
+   * `web_search_tool_result` with its sources, and a trailing empty text block
+   * whose `citations_delta` events carry the spans back to the client.
+   */
+  private emitWebSearchBlocks(resultSet: WebSearchResultSet): string[] {
+    const chunks: string[] = [];
+    const { serverToolUse, toolResult } = buildAnthropicWebSearchBlocks(
+      resultSet,
+      `srvtoolu_${uuidv4()}`,
+      ANTHROPIC_WEB_SEARCH_TOOL_NAME,
+    );
+
+    chunks.push(
+      this.emit('content_block_start', {
+        type: 'content_block_start',
+        index: this.blockIndex,
+        content_block: { ...serverToolUse, input: {} },
+      }),
+    );
+    chunks.push(
+      this.emitDelta('input_json_delta', { partial_json: JSON.stringify(serverToolUse.input) }),
+    );
+    chunks.push(
+      this.emit('content_block_stop', { type: 'content_block_stop', index: this.blockIndex }),
+    );
+    this.blockIndex++;
+
+    chunks.push(
+      this.emit('content_block_start', {
+        type: 'content_block_start',
+        index: this.blockIndex,
+        content_block: toolResult,
+      }),
+    );
+    chunks.push(
+      this.emit('content_block_stop', { type: 'content_block_stop', index: this.blockIndex }),
+    );
+    this.blockIndex++;
+
+    const citations = buildAnthropicWebSearchCitations(this.streamedText, resultSet);
+    if (citations.length === 0) {
+      return chunks;
+    }
+
+    chunks.push(
+      this.emit('content_block_start', {
+        type: 'content_block_start',
+        index: this.blockIndex,
+        content_block: { type: 'text', text: '', citations: [] },
+      }),
+    );
+    for (const citation of citations) {
+      chunks.push(this.emitDelta('citations_delta', { citation }));
+    }
+    chunks.push(
+      this.emit('content_block_stop', { type: 'content_block_stop', index: this.blockIndex }),
+    );
+    this.blockIndex++;
 
     return chunks;
   }

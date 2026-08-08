@@ -12,6 +12,8 @@ import type {
 import {
   buildWebSearchSubRequest,
   extractWebSearchQuery,
+  modelSupportsSearchGrounding,
+  requestsWebSearch,
   requiresSeparateWebSearchCall,
 } from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import { ModelRouteError } from '../../common/exceptions/model-route-exception';
@@ -94,8 +96,30 @@ export function formatWebSearchResult(response: GeminiResponse): string | null {
   return sourceList.length > 0 ? `${cited}\n\nSources:\n${sourceList.join('\n')}` : cited;
 }
 
+/**
+ * Whether this request cannot be grounded by the call it would otherwise make.
+ *
+ * Two independent reasons, and both end in the same place — a separate one-shot
+ * search — so they are decided together:
+ *
+ * 1. The request mixes search with client tools, which `v1internal` refuses in
+ *    one `generateContent`.
+ * 2. The model the request resolved to returns no grounding at all. Claude-family
+ *    and gpt-oss models accept `googleSearch` with a 200 and answer as if it were
+ *    never there, which is exactly the silent degradation this proxy exists to
+ *    prevent.
+ */
+export function needsSeparateWebSearch(claudeRequest: ClaudeRequest, servedModel: string): boolean {
+  if (!requestsWebSearch(claudeRequest)) {
+    return false;
+  }
+  return requiresSeparateWebSearchCall(claudeRequest) || !modelSupportsSearchGrounding(servedModel);
+}
+
 export interface WebSearchSubCallParams {
   claudeRequest: ClaudeRequest;
+  /** Model the main call will run on, used to decide whether it can ground. */
+  servedModel: string;
   /**
    * Read only once a request is known to need the sub-call, so the ordinary
    * request path never depends on the role catalog being available.
@@ -124,7 +148,7 @@ export interface WebSearchSubCallOutcome {
 export async function runWebSearchSubCall(
   params: WebSearchSubCallParams,
 ): Promise<WebSearchSubCallOutcome | null> {
-  if (!requiresSeparateWebSearchCall(params.claudeRequest)) {
+  if (!needsSeparateWebSearch(params.claudeRequest, params.servedModel)) {
     return null;
   }
 

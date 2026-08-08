@@ -5,6 +5,7 @@ import type {
 import { optimizeApplyPatch, validateApplyPatchV4A } from './ApplyPatchPreflight';
 import { extractCustomToolInput, isCustomToolCall } from './CustomToolCall';
 import { toOpenAIResponsesUsage } from './OpenAIUsageMapper';
+import { buildOpenAIWebSearchCallItem, getWebSearchResults } from './openai-web-search';
 
 type ResponsesToolOutput =
   | {
@@ -130,6 +131,18 @@ export function toOpenAIResponsesResponse(
     });
   }
 
+  const webSearchResults = getWebSearchResults(response);
+  if (webSearchResults) {
+    // Before the message, so the item order tells the same story the search
+    // did: the model looked something up, then answered from what it found.
+    output.push(
+      buildOpenAIWebSearchCallItem(
+        webSearchResults,
+        `ws_${responseId.slice('resp_'.length)}`,
+      ) as unknown as Record<string, unknown>,
+    );
+  }
+
   if ((typeof content === 'string' && content.length > 0) || refusal) {
     output.push({
       content: refusal
@@ -141,7 +154,7 @@ export function toOpenAIResponsesResponse(
           ]
         : [
             {
-              annotations: [],
+              annotations: choice?.message.annotations ?? [],
               text: content,
               type: 'output_text',
             },

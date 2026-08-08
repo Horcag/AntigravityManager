@@ -3,6 +3,11 @@ export interface ModelRouteMetadata {
   resolvedModel: string;
   servedModel?: string;
   routeSource: string;
+  /**
+   * Model the provider's `web_search` role nominated, when a request had to be
+   * grounded by a separate search call. Absent on every other request.
+   */
+  webSearchModel?: string;
 }
 
 const MODEL_ROUTE_METADATA = Symbol('proxy-model-route-metadata');
@@ -57,6 +62,7 @@ export function createModelRouteHeaders(
     'x-antigravity-resolved-model': sanitizeHeaderValue(metadata.resolvedModel),
     'x-antigravity-served-model': sanitizeHeaderValue(metadata.servedModel),
     'x-antigravity-route-source': sanitizeHeaderValue(metadata.routeSource),
+    'x-antigravity-web-search-model': sanitizeHeaderValue(metadata.webSearchModel),
     'x-antigravity-fallback-policy': 'none',
   };
   return Object.fromEntries(

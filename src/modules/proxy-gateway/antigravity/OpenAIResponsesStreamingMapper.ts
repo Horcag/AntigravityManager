@@ -7,6 +7,16 @@ import { splitNamespaceToolName } from './ToolNamespace';
 import type { OpenAIResponsesUsage } from './OpenAIUsageMapper';
 import { normalizeFunctionCallArgs } from './function-call-args';
 import { renderGroundingMarkdown } from './grounding-citations';
+import {
+  buildOpenAIUrlCitationAnnotations,
+  buildOpenAIWebSearchCallItem,
+} from './openai-web-search';
+import {
+  mergeWebSearchResultSets,
+  toWebSearchResultSet,
+  type WebSearchResultSet,
+} from './web-search-results';
+import type { GroundingMetadata } from './types';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface GeminiResponsesStreamPart {
@@ -111,6 +121,8 @@ interface OpenAIResponsesStreamingMapperOptions {
   model: string;
   responseId: string;
   signatureState?: OpenAIResponsesSignatureState;
+  /** The caller declared the `web_search` tool; report grounding as a search. */
+  webSearch?: boolean;
 }
 
 export class OpenAIResponsesStreamingMapper {
@@ -127,6 +139,7 @@ export class OpenAIResponsesStreamingMapper {
   private sequenceNumber = 0;
   private usage: OpenAIResponsesUsage | undefined;
   private latestResponseSignature: string | null = null;
+  private webSearchResults: WebSearchResultSet | null = null;
 
   constructor(private readonly options: OpenAIResponsesStreamingMapperOptions) {}
 
@@ -212,6 +225,21 @@ export class OpenAIResponsesStreamingMapper {
     return groundingText ? this.processText(groundingText) : [];
   }
 
+  /**
+   * Records grounding for a caller that asked for the search tool.
+   *
+   * Nothing is emitted here. The upstream reports the search only once it is
+   * over, usually on the closing frames, so the `web_search_call` item and the
+   * citations it produced are emitted from {@link complete} rather than as
+   * invented progress events.
+   */
+  public captureWebSearchGrounding(grounding: GroundingMetadata | undefined | null): void {
+    this.webSearchResults = mergeWebSearchResultSets(
+      this.webSearchResults,
+      toWebSearchResultSet(grounding),
+    );
+  }
+
   public setUsage(usage: OpenAIResponsesUsage): void {
     this.usage = usage;
   }
@@ -227,6 +255,7 @@ export class OpenAIResponsesStreamingMapper {
     const events = [
       ...this.closeThought(status),
       ...this.closeMessage(this.hasToolCall ? 'commentary' : 'final_answer', status),
+      ...this.emitWebSearchCallItem(),
     ];
 
     events.push(
@@ -413,7 +442,11 @@ export class OpenAIResponsesStreamingMapper {
     phase: 'commentary' | 'final_answer',
     status: 'completed' | 'incomplete',
   ): string[] {
-    message.item.content = [{ annotations: [], text: message.text, type: 'output_text' }];
+    const annotations: unknown[] = buildOpenAIUrlCitationAnnotations(
+      message.text,
+      this.webSearchResults,
+    );
+    message.item.content = [{ annotations, text: message.text, type: 'output_text' }];
     message.item.phase = phase;
     message.item.status = status;
     return [
@@ -429,7 +462,7 @@ export class OpenAIResponsesStreamingMapper {
         item_id: message.itemId,
         output_index: message.outputIndex,
         part: {
-          annotations: [],
+          annotations,
           text: message.text,
           type: 'output_text',
         },
@@ -438,6 +471,43 @@ export class OpenAIResponsesStreamingMapper {
       this.serialize({
         item: message.item,
         output_index: message.outputIndex,
+        type: 'response.output_item.done',
+      }),
+    ];
+  }
+
+  /**
+   * The `web_search_call` output item, emitted last.
+   *
+   * The non-streaming mapper puts this item ahead of the message because it can
+   * see the whole answer at once. A stream cannot: the message has already been
+   * opened and its text delivered by the time the upstream mentions grounding,
+   * so the item is appended in the order the facts actually arrived rather than
+   * back-dated to a position the events never had.
+   */
+  private emitWebSearchCallItem(): string[] {
+    const resultSet = this.webSearchResults;
+    if (!resultSet) {
+      return [];
+    }
+
+    const outputIndex = this.nextOutputIndex;
+    this.nextOutputIndex += 1;
+    const item = buildOpenAIWebSearchCallItem(
+      resultSet,
+      `ws_${this.options.responseId}_${outputIndex}`,
+    );
+    this.outputItems.push(item as unknown as ResponsesOutputItem);
+
+    return [
+      this.serialize({
+        item: { ...item, status: 'in_progress' },
+        output_index: outputIndex,
+        type: 'response.output_item.added',
+      }),
+      this.serialize({
+        item,
+        output_index: outputIndex,
         type: 'response.output_item.done',
       }),
     ];
