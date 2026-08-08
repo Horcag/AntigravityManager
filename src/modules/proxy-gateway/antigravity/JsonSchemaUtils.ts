@@ -4,10 +4,11 @@ import { isArray, isBoolean, isNumber, isObjectLike, isString } from 'lodash-es'
  * Recursively cleans JSON Schema to meet Gemini interface requirements
  *
  * 1. [New] Flatten $ref and $defs: Replace references with actual definitions to solve Gemini's lack of $ref support
- * 2. Remove unsupported fields: $schema, additionalProperties, format, default, uniqueItems, validation fields
- * 3. Handle Union types: ["string", "null"] -> "string"
- * 4. Convert type field values to lowercase (Gemini v1internal requirement)
- * 5. Remove numeric validation fields: multipleOf, exclusiveMinimum, exclusiveMaximum, etc.
+ * 2. Collapse allOf/anyOf/oneOf into the node so the declared shape survives removal
+ * 3. Remove unsupported fields: $schema, additionalProperties, format, default, uniqueItems, validation fields
+ * 4. Handle Union types: ["string", "null"] -> "string"
+ * 5. Convert type field values to lowercase (Gemini v1internal requirement)
+ * 6. Remove numeric validation fields: multipleOf, exclusiveMinimum, exclusiveMaximum, etc.
  */
 export function cleanJsonSchema(value: any) {
   // 0. Preprocessing: Expand $ref (Schema Flattening)
@@ -102,6 +103,71 @@ function flattenRefs(map: any, defs: Record<string, any>) {
   }
 }
 
+/**
+ * Merges a branch schema into the node, keeping whatever the node already declares.
+ * `properties` merge key by key and `required` unions, so nothing already present is overwritten.
+ */
+function mergeSchemaInto(target: Record<string, any>, source: Record<string, any>) {
+  for (const [key, val] of Object.entries(source)) {
+    if (key === 'properties' && isObjectLike(val) && !isArray(val)) {
+      if (!isObjectLike(target.properties) || isArray(target.properties)) {
+        target.properties = {};
+      }
+      const targetProperties = target.properties as Record<string, unknown>;
+      for (const [propertyName, propertySchema] of Object.entries(val)) {
+        if (targetProperties[propertyName] === undefined) {
+          targetProperties[propertyName] = propertySchema;
+        }
+      }
+      continue;
+    }
+
+    if (key === 'required' && isArray(val)) {
+      const existing = isArray(target.required) ? (target.required as unknown[]) : [];
+      target.required = [...existing, ...val.filter((item) => !existing.includes(item))];
+      continue;
+    }
+
+    if (target[key] === undefined) {
+      target[key] = val;
+    }
+  }
+}
+
+/**
+ * Collapses allOf/anyOf/oneOf into the node itself.
+ *
+ * Gemini's `parameters` is a restricted JSON Schema subset with no composition keywords, so they
+ * still have to go — but the node must keep a shape. `allOf` is an intersection, so every branch
+ * is merged. `anyOf`/`oneOf` let the model pick one branch, so the first non-null branch is adopted
+ * as the representative shape; that is a valid instance of the original schema and, unlike an empty
+ * node, it still tells the model the real property names.
+ */
+function collapseCompositionKeywords(map: Record<string, any>) {
+  for (const field of ['allOf', 'anyOf', 'oneOf'] as const) {
+    const branches = map[field];
+    if (!isArray(branches)) {
+      continue;
+    }
+
+    const objectBranches = branches.filter(
+      (branch): branch is Record<string, any> => isObjectLike(branch) && !isArray(branch),
+    );
+    if (objectBranches.length === 0) {
+      continue;
+    }
+
+    const selected =
+      field === 'allOf'
+        ? objectBranches
+        : [objectBranches.find((branch) => branch.type !== 'null') ?? objectBranches[0]];
+
+    for (const branch of selected) {
+      mergeSchemaInto(map, branch);
+    }
+  }
+}
+
 function cleanJsonSchemaRecursive(value: any) {
   if (!isObjectLike(value)) {
     return;
@@ -145,6 +211,11 @@ function cleanJsonSchemaRecursive(value: any) {
       }
     }
 
+    // 1b. Collapse allOf/anyOf/oneOf into this node before the hard blacklist deletes them.
+    // Deleting them outright turns a property whose whole shape lives in a branch into `{}`,
+    // which strips the declared property names and lets the model invent its own.
+    collapseCompositionKeywords(map);
+
     // 2. Collect and process validation fields (Migration logic: Downgrade constraints to Hints in description)
     const constraints: string[] = [];
 
@@ -161,6 +232,8 @@ function cleanJsonSchemaRecursive(value: any) {
       ['exclusiveMaximum', 'exclMax'],
       ['multipleOf', 'multipleOf'],
       ['format', 'format'],
+      ['const', 'const'],
+      ['default', 'default'],
     ];
 
     for (const [field, label] of validationFields) {
