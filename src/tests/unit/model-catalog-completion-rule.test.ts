@@ -281,20 +281,19 @@ describe('completion-model catalog rule', () => {
 
     expect(index.completionFlags.size).toBe(0);
     expect(index.hasChatRoleData).toBe(false);
-    // Without the ModelDetails scalars the flag rule cannot classify anything, so the id table is
-    // the only thing withholding. It lists all four known editor ids again — see the comment on
-    // NON_CHAT_CATALOG_MODEL_IDS: the rule was observed not firing on live data, so the entries
-    // stay until it does.
+    // Without the ModelDetails scalars there is nothing to classify by, and the override table is
+    // empty now that every id it held was observed carrying the markers live. An older provider
+    // version that omits the scalars therefore publishes everything it advertises — the honest
+    // outcome, since nothing in that payload says otherwise.
     expect(published).toEqual([
+      'chat_20706',
       'gemini-3-flash',
       'gemini-3-pro',
       'gemini-3.1-flash-image',
       'gemini-3.1-flash-lite',
+      'tab_flash_lite_preview',
     ]);
-    expect(unpublished).toEqual([
-      { id: 'chat_20706', reason: 'override', flags: [], roles: [] },
-      { id: 'tab_flash_lite_preview', reason: 'override', flags: [], roles: [] },
-    ]);
+    expect(unpublished).toEqual([]);
   });
 });
 
