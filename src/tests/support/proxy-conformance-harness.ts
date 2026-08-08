@@ -26,6 +26,15 @@ import { GeminiFilesController } from '@/modules/proxy-gateway/server/modules/fi
 import { ClientFilesController } from '@/modules/proxy-gateway/server/modules/files/client-files.controller';
 import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import type { FileStoreOptions } from '@/modules/proxy-gateway/server/modules/files/file-store.types';
+import {
+  BATCH_RUNNER_OPTIONS,
+  BatchRunnerService,
+} from '@/modules/proxy-gateway/server/modules/batch/batch-runner.service';
+import { OpenAIBatchesController } from '@/modules/proxy-gateway/server/modules/batch/openai-batches.controller';
+import { AnthropicMessageBatchesController } from '@/modules/proxy-gateway/server/modules/batch/anthropic-message-batches.controller';
+import { GeminiOperationsController } from '@/modules/proxy-gateway/server/modules/batch/gemini-operations.controller';
+import { AnthropicCompleteController } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-complete.controller';
+import type { BatchRunnerOptions } from '@/modules/proxy-gateway/server/modules/batch/batch-job.types';
 
 export interface ProxyConformanceService {
   handleAnthropicCountTokens(request: unknown): unknown;
@@ -41,6 +50,8 @@ export interface ProxyConformanceAppOptions {
   accountTokens?: AccountLeaseTokenData[];
   /** Overrides for the local file store; a fresh temp directory by default. */
   fileStore?: FileStoreOptions;
+  /** Overrides for the batch runner; in-memory with concurrency 2 by default. */
+  batchRunner?: BatchRunnerOptions;
 }
 
 export function createAccountLeaseTokenFixture(
@@ -122,9 +133,23 @@ export async function createProxyConformanceApp(
   };
 
   @Module({
-    controllers: [ProxyController, GeminiController, GeminiFilesController, ClientFilesController],
+    controllers: [
+      ProxyController,
+      GeminiController,
+      GeminiFilesController,
+      ClientFilesController,
+      OpenAIBatchesController,
+      AnthropicMessageBatchesController,
+      GeminiOperationsController,
+      AnthropicCompleteController,
+    ],
     providers: [
       { provide: ProxyService, useValue: options.proxyService },
+      {
+        provide: BATCH_RUNNER_OPTIONS,
+        useValue: { maxConcurrency: 2, ...options.batchRunner },
+      },
+      BatchRunnerService,
       { provide: AccountLeaseService, useValue: accountLeaseService },
       { provide: ProxyGuard, useValue: { canActivate: () => true } },
       { provide: IMAGE_QUOTA_REFRESH, useValue: async () => undefined },

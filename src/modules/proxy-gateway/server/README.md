@@ -215,11 +215,11 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - **Media & File Support**: The provider has **no file plane**. `google.internal.cloud.code.v1internal.*` exposes no upload method, no `files/*` resource, and no `fileUri` fetch, so nothing this proxy does can store a file on Google's side. The `/v1beta/files`, `/v1/files` and `/upload/v1beta/files` routes are a **local** content-addressed store plus reference expansion — see section 10. Remote file URIs are still never fetched: a `fileUri` this proxy did not issue is rejected, not forwarded. Inline data (`inlineData`) is limited to verified `image/png` and `audio/wav` on confirmed models; other MIME and model combinations remain unverified and model-dependent.
 - **CountTokens Scope**: The upstream method accepts only `{ "request": { "model": "models/<id>", "contents": [...] } }`, so `systemInstruction`, `tools`, and `toolConfig` sent alongside the contents are validated but not counted. Counting is a real upstream call routed like any other request: aliases apply, an unknown model returns 404 `model_not_found`, and no local estimation is performed. If the upstream answer omits `totalTokens`, the proxy reports an upstream failure (502 `INTERNAL` on the Gemini surface, 500 `api_error` on the Anthropic one) rather than substituting a fabricated `0`.
 - **Embeddings**: `embedContent` and `batchEmbedContents` return HTTP 501 `UNIMPLEMENTED`. CodeAssist has no embedding method; Google's own `gemini-cli` client throws unconditionally in `CodeAssistServer.embedContent`.
-- **Batches**: `batchGenerateContent` returns HTTP 501 `UNIMPLEMENTED`.
+- **Batches**: The provider has **no batch plane** — no batch resource, no deferred submission, no server-side job. `batchGenerateContent`, `/v1/batches` and `/v1/messages/batches` are served by a **local** deferred-job runner over the same `generateContent` calls the interactive endpoints make; see section 11. There is no 50% discount, no separate quota pool, and no separate rate limit.
 - **Public Context Cache CRUD**: Client `cachedContent` references are rejected with HTTP 501 `UNIMPLEMENTED`. Automatic explicit context caching runs internally on Vertex AI without exposing public cache resource APIs (`cachedContents/*`).
 - **Live / Bidi & Interactions**: Gemini Live WebSocket (Bidi) and Interactions APIs are unavailable under this adapter.
 - **Client Tier & Store Parameters**: Top-level `serviceTier` and `store` fields are explicitly rejected with HTTP 501 `UNIMPLEMENTED`.
-- **Unsupported Resource Families**: The remaining unsupported Gemini resource families (`tunedModels`, `corpora`, `cachedContents`, `batchJobs`, `operations`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`. `files` is served locally (section 10); resumable uploads within it are not implemented.
+- **Unsupported Resource Families**: The remaining unsupported Gemini resource families (`tunedModels`, `corpora`, `cachedContents`, `batchJobs`) return HTTP 501 `UNIMPLEMENTED` or 404 `NOT_FOUND`. `files` is served locally (section 10); resumable uploads within it are not implemented. `operations` is served locally too, but only `list` and `get`, and only for batches this proxy created (section 11).
 - **Partial Model Resources**: Antigravity does not expose authoritative `baseModelId`, `version`, input/output limits, temperature limits, or defaults. Model list/detail responses deliberately omit those fields instead of fabricating values, so they are a compatibility subset of Google's full `Model` resource.
 - **Capability Freshness**: Antigravity's quota response has no authoritative observation timestamp. `checked_at` reports when diagnostics were assembled, not when Google produced the capability snapshot. A listed model is provider-advertised, not a guarantee that the next generation call will succeed.
 - **Negative Evidence Is Account-Scoped**: A 404 marks only that account-model pair unsupported; quota and rate-limit failures use expiring cooldowns. The proxy does not convert those failures into permanent global removal and never reroutes to a sibling model.
@@ -277,7 +277,7 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 
 ### Explicit Compatibility Limits
 
-- This is a translation adapter, not Anthropic's hosted control plane. Message Batches, Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable. The Files API is served by the proxy's own local store (section 10), not by Anthropic.
+- This is a translation adapter, not Anthropic's hosted control plane. Admin APIs, server tools, container execution, MCP connectors, and Anthropic-side prompt-cache creation are unavailable. The Files API is served by the proxy's own local store (section 10) and Message Batches by the proxy's own local runner (section 11), not by Anthropic.
 - Anthropic prompt-cache controls are accepted as inert compatibility metadata. Usage cannot report genuine Anthropic cache creation; a Gemini implicit-cache hit is not equivalent to Anthropic cache semantics.
 - `redacted_thinking` is rejected because Anthropic ciphertext cannot be converted into a valid Gemini thought signature. `thinking.display` is also unavailable. Supported opaque thought signatures are round-tripped only when the upstream transport supplies compatible signature bytes.
 - Structured output via `output_config.format`, deferred/strict tools, and `disable_parallel_tool_use=true` are rejected instead of being silently weakened. Gemini cannot guarantee those Anthropic execution semantics through this path.
@@ -318,7 +318,7 @@ It is **not** provider-side storage, and it delivers **none of the token savings
 | Surface | Routes |
 | :--- | :--- |
 | **Gemini** | `POST /upload/v1beta/files` (simple media and multipart forms; resumable is not implemented), `GET /v1beta/files`, `GET /v1beta/files/{name}`, `DELETE /v1beta/files/{name}`. Returns the documented `File` resource with `state: "ACTIVE"` — there is no processing step, so no `PROCESSING` phase is invented. `uri` names this proxy, because that is where the bytes are. |
-| **OpenAI** | `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `DELETE /v1/files/{id}`. Ids are `file-…`. Only `user_data`, `vision` and `assistants_input` purposes are accepted; `fine-tune`, `batch` and the Assistants output purposes are rejected at upload naming the supported set, rather than stored and left useless. |
+| **OpenAI** | `POST /v1/files`, `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, `DELETE /v1/files/{id}`. Ids are `file-…`. Only `user_data`, `vision`, `assistants_input` and `batch` purposes are accepted; `fine-tune`, `evals` and the Assistants output purposes are rejected at upload naming the supported set, rather than stored and left useless. `batch` is accepted because `/v1/batches` reads its input JSONL back out of this store (section 11); the runner writes its results back with purpose `batch_output`. |
 | **Anthropic** | The same five routes, ids `file_…`, gated behind `anthropic-beta: files-api-2025-04-14`. |
 
 **Why one controller serves two dialects.** OpenAI and Anthropic both publish their Files API at exactly `/v1/files`, so a single route table has to answer both. `ClientFilesController` picks the dialect per request: any `anthropic-version` or `anthropic-beta` header means the Anthropic dialect, everything else is OpenAI. Each dialect's shapes, errors and upload rules live in its own adapter module (`openai-file-resource.ts`, `anthropic-file-resource.ts`) beside the controller. **The Anthropic beta header is required** — deliberately, since it is also how a request declares which dialect it wants; the error when it is missing names the header. Gemini has its own controller (`GeminiFilesController`) because its paths do not collide.
@@ -343,3 +343,56 @@ Expansion is **fail-closed**. A handle this proxy never issued, or one that has 
 ### Boot requirements
 
 `src/server/main.ts` registers a buffer content-type parser for the media families so Google's simple upload form (whole body is the file, `Content-Type` names its type) reaches the handler. `application/json` and `multipart/form-data` keep their existing exact-match parsers, so no other route changes behaviour. Upload routes get their own body limit in `src/server/proxy-body-limit.ts`.
+
+---
+
+## 11. Batch API — A Local Deferred-Job Runner, Not a Provider Batch Service
+
+### What this actually is
+
+The provider has **no batch plane**. A live sweep on 2026-08-09 found `POST /v1/batches`, `GET /v1/messages/batches` and `POST /v1/messages/batches` answering the framework's 404, and `:batchGenerateContent` answering a plain `501`. There is no batch resource, no deferred submission and no server-side job to hand work to.
+
+So the Batch API here is a **local deferred-job runner** over the same `generateContent` calls the proxy already makes. That is a real implementation of the client-facing contract — submit a set of requests, poll, collect results line by line, survive a dropped connection and an app restart — and it is worth having for clients that only speak batch.
+
+It is **not** the economics of a real batch API: **there is no 50% discount, no separate quota pool, and no separate rate limit. Every request costs exactly what it would cost sent normally.** Anything claiming otherwise would be false. The only thing a batch buys is scheduling: the work happens later, slower, and without holding a connection open.
+
+### The runner
+
+`BatchRunnerService` (`modules\batch\batch-runner.service.ts`) is the single owner, protocol-agnostic, over one `DurableRecordStore` — the same store kanban #49 built, not a third one. State lives at `<userData>\proxy-batches.json`, written through `atomic-json-file`.
+
+| Property | Behaviour |
+| :--- | :--- |
+| **Durability** | Every state change is persisted before it is observable. A record the file says was `running` cannot have finished, because the outcome is written before the state leaves `running`; on the next start it is reset to `pending` and retried from the top. A fresh runner over the same file resumes mid-flight batches without any in-memory carry-over. |
+| **Concurrency** | Two requests at a time by default, `AGM_BATCH_MAX_CONCURRENCY` to change it. Deliberately tiny: the proxy has **no global concurrency limiter**. `AccountLeaseService.getNextToken()` hands out an account per request and `RateLimitTrackerService` only reacts to upstream 429s by locking that account out — a lockout the interactive path then shares. A batch is by definition not urgent, so it stays well below what an interactive client would use rather than competing with one. |
+| **Lease cooperation** | Batch requests go through `ProxyService.handleChatCompletions` / `handleAnthropicMessages` / `handleGeminiGenerateContent` unchanged. There is no second path upstream: account selection, model routing, retries and rate-limit tracking all apply exactly as they do to an interactive call. |
+| **Failure isolation** | A failing request records its error against its own `custom_id` and the batch keeps going. One bad line never aborts the rest. |
+| **Cancellation** | `cancel` moves the batch to `cancelling` and cancels every request that had not started. One already dispatched upstream is **not** aborted — the cost is already incurred and the connection cannot be un-sent — but its answer is discarded and recorded as `canceled`, which is why the batch sits in `cancelling` until it settles. |
+| **Expiry** | `completion_window` is the processing deadline (24 h). Past it, requests that never ran become `expired` and the batch becomes `expired`; ones that already ran keep their real outcome, because they really did cost what they cost. |
+| **TTL** | Records are retained for 48 hours, matching the file store's handle lifetime, then evicted with the store's own bound of 200 batches. Output and error files age out on the file store's own 48-hour TTL. |
+| **Ordering** | Oldest batch first, so a long queue is not starved by newer arrivals. |
+
+### Routes
+
+| Surface | Routes |
+| :--- | :--- |
+| **OpenAI** | `POST /v1/batches` (`input_file_id`, `endpoint`, `completion_window`, `metadata`), `GET /v1/batches`, `GET /v1/batches/{id}`, `POST /v1/batches/{id}/cancel`. Ids are `batch_…`. Input and output are JSONL through the local Files API: the input is read from the store by `input_file_id`, and the results are written back into it and referenced as `output_file_id` / `error_file_id`. |
+| **Anthropic** | `POST /v1/messages/batches` with the inline `requests` array (no file needed), `GET /v1/messages/batches`, `GET /v1/messages/batches/{id}`, `GET /v1/messages/batches/{id}/results`, `POST /v1/messages/batches/{id}/cancel`, `DELETE /v1/messages/batches/{id}`. Ids are `msgbatch_…`. |
+| **Gemini** | `POST /v1beta/models/{model}:batchGenerateContent` answers with a long-running operation; poll it at `GET /v1beta/operations/{name}` or list with `GET /v1beta/operations`. |
+
+**Endpoints a batch may name.** `/v1/chat/completions` and `/v1/responses` only. Anything else is rejected at creation naming the supported set. `/v1/embeddings` is called out by name in the rejection message because there is no embedding RPC on this transport at all — established from the vendor's protobuf descriptors and corroborated by `gemini-cli` implementing `embedContent()` as a `throw`. It cannot be batched because it cannot be served.
+
+**Completion window.** `24h` only, which is the only value OpenAI documents. Any other value is rejected rather than accepted and quietly ignored.
+
+**How a batch declares its dialect.** It does not have to. `/v1/files` needed a header signal because OpenAI and Anthropic publish that resource at the same path; batches do not — OpenAI's is `/v1/batches` and Anthropic's is `/v1/messages/batches`, so the path already says which dialect is being spoken and no header is consulted. `anthropic-beta` is accepted and ignored rather than required: Message Batches is generally available at Anthropic, so demanding a beta header would refuse requests their own current SDKs send. This was checked against the route table rather than assumed.
+
+**Statuses.** The runner's internal vocabulary is OpenAI's documented one — `validating`, `in_progress`, `finalizing`, `completed`, `failed`, `cancelling`, `cancelled`, `expired` — because it is the most granular of the three, and each adapter maps it onto its own. Anthropic reports `in_progress` / `canceling` / `ended`; Gemini reports a `BatchState` inside the operation metadata. No status is invented on any surface. `request_counts` is recomputed from the live request records on every read, so it is never ahead of reality.
+
+**Result shapes.** OpenAI output lines are `{id, custom_id, response: {status_code, request_id, body}, error}`; successes go to the output file and everything else to the error file. Anthropic result lines are `{custom_id, result: {type: "succeeded" | "errored" | "canceled" | "expired", …}}`, served as JSONL from `/results` once the batch has ended. Gemini's completed operation carries `response.inlinedResponses.inlinedResponses`, one entry per request, keyed by the `metadata.key` the request was submitted with.
+
+**What is not implemented.** Gemini's file-input form of `:batchGenerateContent` — this runner's inputs are request bodies, not stored blobs, and accepting a handle it would have to reject at execution time would be worse than refusing it at submission. `operations.cancel` and `operations.delete` are absent too: cancellation belongs to the batch, and this proxy will not publish an operations control plane it does not have.
+
+### Legacy `/v1/complete`
+
+Anthropic's deprecated Text Completions endpoint, served as a thin adapter over the Messages path rather than left as a bare 404. The `\n\nHuman: … \n\nAssistant:` prompt is parsed back into turns (a prefilled assistant turn is kept, because that is what it meant on the old endpoint; a prompt with no markers at all becomes a single user turn), `max_tokens_to_sample` becomes `max_tokens`, and the Messages response is rendered back as `{type, id, completion, stop_reason, stop, model}` with the leading space the old API always emitted.
+
+Streaming is refused with a 400 rather than half-served: the old `completion` event stream is a different wire format from the Messages SSE this proxy produces, and returning Messages events to a Text Completions client would be worse than a clear error.

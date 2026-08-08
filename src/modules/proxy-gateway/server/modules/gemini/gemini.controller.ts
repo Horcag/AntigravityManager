@@ -32,6 +32,8 @@ import {
 import { resolveCountTokensContents } from '../shared/services/count-tokens.service';
 import { FileContentStore } from '../files/file-content-store.service';
 import { FileReferenceError, expandFileReferences } from '../files/file-reference-expander';
+import { BatchRunnerService } from '../batch/batch-runner.service';
+import { respondGeminiBatchGenerateContent } from '../batch/gemini-batch-submit';
 
 type GeminiModelMetadata = {
   name: string;
@@ -50,6 +52,9 @@ export class GeminiController {
     @Optional()
     @Inject(FileContentStore)
     private readonly fileStore?: FileContentStore,
+    @Optional()
+    @Inject(BatchRunnerService)
+    private readonly batchRunner?: BatchRunnerService,
   ) {}
 
   @Get('models')
@@ -155,11 +160,12 @@ export class GeminiController {
       return;
     }
 
-    if (
-      action === 'embedContent' ||
-      action === 'batchEmbedContents' ||
-      action === 'batchGenerateContent'
-    ) {
+    if (action === 'batchGenerateContent') {
+      await respondGeminiBatchGenerateContent(this.batchRunner, model, body, res);
+      return;
+    }
+
+    if (action === 'embedContent' || action === 'batchEmbedContents') {
       res.status(HttpStatus.NOT_IMPLEMENTED).send({
         error: {
           code: HttpStatus.NOT_IMPLEMENTED,
@@ -308,7 +314,12 @@ export class GeminiController {
     return {
       name: modelName,
       displayName,
-      supportedGenerationMethods: ['countTokens', 'generateContent', 'streamGenerateContent'],
+      supportedGenerationMethods: [
+        'countTokens',
+        'generateContent',
+        'streamGenerateContent',
+        'batchGenerateContent',
+      ],
     };
   }
 

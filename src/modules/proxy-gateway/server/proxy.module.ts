@@ -25,6 +25,12 @@ import { FILE_STORE_OPTIONS, FileContentStore } from './modules/files/file-conte
 import { resolveFileStoreOptions } from './modules/files/file-store-location';
 import { GeminiFilesController } from './modules/files/gemini-files.controller';
 import { ClientFilesController } from './modules/files/client-files.controller';
+import { BATCH_RUNNER_OPTIONS, BatchRunnerService } from './modules/batch/batch-runner.service';
+import { resolveBatchRunnerOptions } from './modules/batch/batch-store-location';
+import { OpenAIBatchesController } from './modules/batch/openai-batches.controller';
+import { AnthropicMessageBatchesController } from './modules/batch/anthropic-message-batches.controller';
+import { GeminiOperationsController } from './modules/batch/gemini-operations.controller';
+import { AnthropicCompleteController } from './modules/anthropic/anthropic-complete.controller';
 
 @Module({
   imports: [],
@@ -34,6 +40,10 @@ import { ClientFilesController } from './modules/files/client-files.controller';
     GeminiController,
     GeminiFilesController,
     ClientFilesController,
+    OpenAIBatchesController,
+    AnthropicMessageBatchesController,
+    GeminiOperationsController,
+    AnthropicCompleteController,
   ],
   providers: [
     {
@@ -41,6 +51,11 @@ import { ClientFilesController } from './modules/files/client-files.controller';
       useFactory: resolveFileStoreOptions,
     },
     FileContentStore,
+    {
+      provide: BATCH_RUNNER_OPTIONS,
+      useFactory: resolveBatchRunnerOptions,
+    },
+    BatchRunnerService,
     RateLimitTrackerService,
     ModelRoutingService,
     {
@@ -75,6 +90,7 @@ import { ClientFilesController } from './modules/files/client-files.controller';
     CountTokensService,
     OpenAIResponsesSessionService,
     FileContentStore,
+    BatchRunnerService,
   ],
 })
 export class ProxyModule {}
