@@ -99,6 +99,7 @@ describe('separate web-search call', () => {
 
     const outcome = await runWebSearchSubCall({
       claudeRequest: createRequest(),
+      servedModel: 'gemini-3-pro',
       getRoleModelIds: () => ['gemini-3.1-flash-lite'],
       generate,
     });
@@ -114,6 +115,7 @@ describe('separate web-search call', () => {
 
     const outcome = await runWebSearchSubCall({
       claudeRequest: createRequest({ tools: [SEARCH_TOOL] }),
+      servedModel: 'gemini-3-pro',
       getRoleModelIds: () => ['gemini-3.1-flash-lite'],
       generate,
     });
@@ -132,6 +134,7 @@ describe('separate web-search call', () => {
     await expect(
       runWebSearchSubCall({
         claudeRequest: createRequest(),
+        servedModel: 'gemini-3-pro',
         getRoleModelIds: () => [],
         generate,
       }),

@@ -22,7 +22,7 @@ import {
   getUpstreamResponseMetadata,
 } from './common/upstream-response-metadata';
 import { sanitizeGeminiResponse } from './modules/gemini/gemini-wire';
-import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import { requestsWebSearch, transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
 import {
   WEB_SEARCH_ROLE,
   runWebSearchSubCall,
@@ -50,9 +50,16 @@ import {
   ClaudeResponse,
   type GeminiContent,
   GeminiInternalRequest,
+  type GroundingMetadata,
   type UsageMetadata,
 } from '../antigravity/types';
-import { normalizeObjectJsonSchema } from '../antigravity/JsonSchemaUtils';
+import { toWebSearchResultSet, type WebSearchResultSet } from '../antigravity/web-search-results';
+import {
+  attachWebSearchResults,
+  buildOpenAIUrlCitationAnnotations,
+} from '../antigravity/openai-web-search';
+import { OpenAIChatWebSearchStream } from './modules/openai/chat/openai-chat-web-search-stream';
+import { convertOpenAIToolsToAnthropicTools } from './modules/openai/chat/openai-tool-conversion';
 import {
   extractCustomToolInput,
   isCustomToolCall,
@@ -108,6 +115,14 @@ interface OpenAIStreamContract {
   expectedChoices: number;
   includeUsage: boolean;
   serviceTier?: string;
+  /** Emit search citations rather than the trailing grounding markdown. */
+  webSearch?: boolean;
+}
+
+interface WebSearchSubCallResult {
+  request: ClaudeRequest;
+  /** Set only when a separate search call actually ran. */
+  webSearchModel?: string;
 }
 
 @Injectable()
@@ -152,14 +167,16 @@ export class ProxyService extends BaseProxyService {
    */
   private async applyWebSearchSubCall(
     claudeRequest: ClaudeRequest,
+    servedModel: string,
     token: CloudAccount,
     deadlineAt: number,
     projectId: string,
     userAgent: string,
     sessionId?: string,
-  ): Promise<ClaudeRequest> {
+  ): Promise<WebSearchSubCallResult> {
     const outcome = await runWebSearchSubCall({
       claudeRequest,
+      servedModel,
       getRoleModelIds: () => this.accountLeaseService.getModelIdsForRole?.(WEB_SEARCH_ROLE) ?? [],
       projectId,
       userAgent,
@@ -175,13 +192,20 @@ export class ProxyService extends BaseProxyService {
     });
 
     if (!outcome) {
-      return claudeRequest;
+      return { request: claudeRequest };
     }
 
     this.logger.log(
       `[Web-Search] separate search call model=${outcome.model} grounded=${outcome.context !== null}`,
     );
-    return outcome.context ? withWebSearchContext(claudeRequest, outcome.context) : claudeRequest;
+    return {
+      request: outcome.context
+        ? withWebSearchContext(claudeRequest, outcome.context)
+        : claudeRequest,
+      // Reported through x-antigravity-web-search-model so the caller can see
+      // which model actually ran the search, like every other resolution here.
+      webSearchModel: outcome.model,
+    };
   }
 
   private attachRouteMetadata<T extends object>(
@@ -190,12 +214,14 @@ export class ProxyService extends BaseProxyService {
     resolvedModel: string,
     servedModel: string | undefined,
     routeSource: string,
+    webSearchModel?: string,
   ): T {
     return attachModelRouteMetadata(value, {
       requestedModel,
       resolvedModel,
       servedModel,
       routeSource,
+      webSearchModel,
     });
   }
 
@@ -264,21 +290,26 @@ export class ProxyService extends BaseProxyService {
       const accountTargetModel = effectiveVariantRequest.variant
         ? accountRequest.model
         : effectiveTargetModel;
+      const baseClaudeRequest = this.toClaudeRequest(accountRequest, sessionKey);
+      const webSearch = requestsWebSearch(baseClaudeRequest);
       let claudeRequest: ClaudeRequest | null = null;
+      let webSearchModel: string | undefined;
 
       try {
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
-        const baseClaudeRequest = this.toClaudeRequest(accountRequest, sessionKey);
         // Reused by the project-context fallback below so the search runs once.
-        claudeRequest = await this.applyWebSearchSubCall(
+        const searched = await this.applyWebSearchSubCall(
           baseClaudeRequest,
+          accountTargetModel,
           token,
           deadlineAt,
           projectId,
           requestUserAgent,
           baseClaudeRequest.metadata?.user_id,
         );
+        claudeRequest = searched.request;
+        webSearchModel = searched.webSearchModel;
         const geminiBody = transformClaudeRequestIn(
           claudeRequest,
           projectId,
@@ -307,11 +338,13 @@ export class ProxyService extends BaseProxyService {
               stream,
               this.createSignatureState(token.id, geminiBody.model),
               geminiBody.model,
+              webSearch,
             ),
             request.model,
             targetModel,
             geminiBody.model,
             route.source,
+            webSearchModel,
           );
         } else {
           const response = await this.generateInternalWithStreamFallback(
@@ -323,7 +356,9 @@ export class ProxyService extends BaseProxyService {
           );
           this.markUpstreamSuccess(token.id, geminiBody.model);
           const anthropicResponse = this.toAnthropicChatResponse(
-            transformResponse(response, this.createSignatureState(token.id, geminiBody.model)),
+            transformResponse(response, this.createSignatureState(token.id, geminiBody.model), {
+              webSearch,
+            }),
             geminiBody.model,
           );
           return this.attachRouteMetadata(
@@ -332,6 +367,7 @@ export class ProxyService extends BaseProxyService {
             targetModel,
             anthropicResponse.model,
             route.source,
+            webSearchModel,
           );
         }
       } catch (error) {
@@ -342,7 +378,7 @@ export class ProxyService extends BaseProxyService {
           try {
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
-              claudeRequest ?? this.toClaudeRequest(accountRequest, sessionKey),
+              claudeRequest ?? baseClaudeRequest,
               '',
               requestUserAgent,
               accountTargetModel,
@@ -368,11 +404,13 @@ export class ProxyService extends BaseProxyService {
                   stream,
                   this.createSignatureState(token.id, fallbackBody.model),
                   fallbackBody.model,
+                  webSearch,
                 ),
                 request.model,
                 targetModel,
                 fallbackBody.model,
                 route.source,
+                webSearchModel,
               );
             } else {
               const response = await this.generateInternalWithStreamFallback(
@@ -387,6 +425,7 @@ export class ProxyService extends BaseProxyService {
                 transformResponse(
                   response,
                   this.createSignatureState(token.id, fallbackBody.model),
+                  { webSearch },
                 ),
                 fallbackBody.model,
               );
@@ -396,6 +435,7 @@ export class ProxyService extends BaseProxyService {
                 targetModel,
                 anthropicResponse.model,
                 route.source,
+                webSearchModel,
               );
             }
           } catch (fallbackErr) {
@@ -421,13 +461,14 @@ export class ProxyService extends BaseProxyService {
     upstreamStream: NodeJS.ReadableStream,
     signatureState: StreamingSignatureState,
     fallbackModel: string,
+    webSearch = false,
   ): Observable<string> {
     return attachUpstreamBackpressure(
       new Observable<string>((subscriber) => {
         const decoder = new TextDecoder();
         let buffer = '';
 
-        const state = new StreamingState(signatureState, fallbackModel);
+        const state = new StreamingState(signatureState, fallbackModel, { webSearch });
         const processor = new PartProcessor(state);
 
         let lastFinishReason: string | undefined;
@@ -913,8 +954,16 @@ export class ProxyService extends BaseProxyService {
     const deadlineAt = this.createRequestDeadline();
 
     const targetModel = routedRequest.model;
+    let webSearchModel: string | undefined;
     const attachRoute = <T extends object>(value: T, servedModel: string | undefined): T =>
-      this.attachRouteMetadata(value, request.model, targetModel, servedModel, route.source);
+      this.attachRouteMetadata(
+        value,
+        request.model,
+        targetModel,
+        servedModel,
+        route.source,
+        webSearchModel,
+      );
     const extraHeaders = this.createModelSpecificHeaders(targetModel);
     this.logger.log(
       `OpenAI-compatible request received: model=${request.model}, mappedModel=${targetModel}, stream=${request.stream}`,
@@ -951,21 +1000,25 @@ export class ProxyService extends BaseProxyService {
       const accountTargetModel = effectiveVariantRequest.variant
         ? accountRequest.model
         : effectiveTargetModel;
+      const baseClaudeRequest = this.convertOpenAIToClaude(accountRequest, sessionKey);
+      const webSearch = requestsWebSearch(baseClaudeRequest);
       let searchedClaudeRequest: ClaudeRequest | null = null;
 
       try {
-        const baseClaudeRequest = this.convertOpenAIToClaude(accountRequest, sessionKey);
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
         // Reused by the project-context fallback below so the search runs once.
-        searchedClaudeRequest = await this.applyWebSearchSubCall(
+        const searched = await this.applyWebSearchSubCall(
           baseClaudeRequest,
+          accountTargetModel,
           token,
           deadlineAt,
           projectId,
           requestUserAgent,
           baseClaudeRequest.metadata?.user_id,
         );
+        searchedClaudeRequest = searched.request;
+        webSearchModel = searched.webSearchModel;
         const claudeRequest = searchedClaudeRequest;
         const geminiBody = transformClaudeRequestIn(
           claudeRequest,
@@ -999,7 +1052,7 @@ export class ProxyService extends BaseProxyService {
                 outputProtocol,
                 clientToolNames,
                 this.createSignatureState(token.id, geminiBody.model),
-                this.createOpenAIStreamContract(request),
+                this.createOpenAIStreamContract(request, webSearch),
               ),
               geminiBody.model,
             );
@@ -1028,13 +1081,14 @@ export class ProxyService extends BaseProxyService {
               this.createSignatureState(token.id, geminiBody.model),
               this.resolveOpenAIServiceTier(request.service_tier),
               request.top_logprobs,
+              webSearch,
             );
             const syntheticStream =
               outputProtocol === 'responses'
                 ? this.createSyntheticResponsesStream(openaiResponse, clientToolNames)
                 : this.createSyntheticOpenAIStream(
                     openaiResponse,
-                    this.createOpenAIStreamContract(request),
+                    this.createOpenAIStreamContract(request, webSearch),
                   );
             return attachRoute(syntheticStream, openaiResponse.model);
           }
@@ -1057,6 +1111,7 @@ export class ProxyService extends BaseProxyService {
             this.createSignatureState(token.id, geminiBody.model),
             this.resolveOpenAIServiceTier(request.service_tier),
             request.top_logprobs,
+            webSearch,
           );
           return attachRoute(openaiResponse, openaiResponse.model);
         }
@@ -1066,8 +1121,7 @@ export class ProxyService extends BaseProxyService {
             `OpenAI compatibility request hit project context issue, retrying without project: ${err.message}`,
           );
           try {
-            const claudeRequest =
-              searchedClaudeRequest ?? this.convertOpenAIToClaude(accountRequest, sessionKey);
+            const claudeRequest = searchedClaudeRequest ?? baseClaudeRequest;
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
               claudeRequest,
@@ -1098,7 +1152,7 @@ export class ProxyService extends BaseProxyService {
                   outputProtocol,
                   clientToolNames,
                   this.createSignatureState(token.id, fallbackBody.model),
-                  this.createOpenAIStreamContract(request),
+                  this.createOpenAIStreamContract(request, webSearch),
                 ),
                 fallbackBody.model,
               );
@@ -1119,6 +1173,7 @@ export class ProxyService extends BaseProxyService {
               this.createSignatureState(token.id, fallbackBody.model),
               this.resolveOpenAIServiceTier(request.service_tier),
               request.top_logprobs,
+              webSearch,
             );
             return attachRoute(openaiResponse, openaiResponse.model);
           } catch (fallbackErr) {
@@ -1154,6 +1209,7 @@ export class ProxyService extends BaseProxyService {
         model,
         clientToolNames,
         signatureState,
+        streamContract?.webSearch === true,
       );
     }
     return this.processStreamResponse(
@@ -1165,11 +1221,15 @@ export class ProxyService extends BaseProxyService {
     );
   }
 
-  private createOpenAIStreamContract(request: OpenAIChatRequest): OpenAIStreamContract {
+  private createOpenAIStreamContract(
+    request: OpenAIChatRequest,
+    webSearch = false,
+  ): OpenAIStreamContract {
     return {
       expectedChoices: request.n ?? 1,
       includeUsage: request.stream_options?.include_usage === true,
       serviceTier: this.resolveOpenAIServiceTier(request.service_tier),
+      webSearch,
     };
   }
 
@@ -1182,6 +1242,7 @@ export class ProxyService extends BaseProxyService {
     model: string,
     clientToolNames?: ReadonlySet<string>,
     signatureState?: StreamingSignatureState,
+    webSearch = false,
   ): Observable<string> {
     return attachUpstreamBackpressure(
       new Observable<string>((subscriber) => {
@@ -1193,6 +1254,7 @@ export class ProxyService extends BaseProxyService {
           model,
           responseId: `resp_${uuidv4()}`,
           signatureState,
+          webSearch,
         });
         let heartbeatTimer: NodeJS.Timeout | undefined;
         let idleTimer: { clear(): void; dispose(): void; reset(): void };
@@ -1289,10 +1351,16 @@ export class ProxyService extends BaseProxyService {
               }
             }
 
-            const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
-            if (grounding) {
-              for (const event of mapper.processGrounding(grounding)) {
-                subscriber.next(event);
+            if (webSearch) {
+              mapper.captureWebSearchGrounding(
+                candidate?.groundingMetadata as GroundingMetadata | undefined,
+              );
+            } else {
+              const grounding = this.toResponsesGroundingMetadata(candidate?.groundingMetadata);
+              if (grounding) {
+                for (const event of mapper.processGrounding(grounding)) {
+                  subscriber.next(event);
+                }
               }
             }
 
@@ -1505,6 +1573,7 @@ export class ProxyService extends BaseProxyService {
         const toolCallIndexes = new Map<number, number>();
         const emittedToolCallCounts = new Map<number, number>();
         const latestResponseSignatures = new Map<number, string>();
+        const webSearchStream = new OpenAIChatWebSearchStream(streamContract.webSearch === true);
         const toolCallIntegrityByChoice = new Map<number, ToolCallIdIntegrityTracker>();
         let heartbeatTimer: NodeJS.Timeout | undefined;
 
@@ -1641,6 +1710,8 @@ export class ProxyService extends BaseProxyService {
                 ? candidate.index
                 : fallbackCandidateIndex;
               emitRoleIfNeeded(candidateIndex);
+
+              webSearchStream.captureGrounding(candidateIndex, candidate.groundingMetadata);
 
               const content = this.toUnknownRecord(candidate.content);
               const parts = Array.isArray(content?.parts) ? content.parts : [];
@@ -1795,6 +1866,7 @@ export class ProxyService extends BaseProxyService {
               }
 
               if (responseContent) {
+                webSearchStream.appendText(candidateIndex, responseContent);
                 pushChunk(
                   withOptionalUsage({
                     id: streamId,
@@ -1813,6 +1885,24 @@ export class ProxyService extends BaseProxyService {
               }
 
               if (isString(candidate.finishReason) && !finishedChoiceIndexes.has(candidateIndex)) {
+                const annotations = webSearchStream.buildAnnotations(candidateIndex);
+                if (annotations.length > 0) {
+                  pushChunk(
+                    withOptionalUsage({
+                      id: streamId,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model: servedModel,
+                      choices: [
+                        {
+                          index: candidateIndex,
+                          delta: { annotations },
+                          finish_reason: null,
+                        },
+                      ],
+                    }),
+                  );
+                }
                 pushChunk(
                   withOptionalUsage({
                     id: streamId,
@@ -2155,6 +2245,9 @@ export class ProxyService extends BaseProxyService {
         output_tokens: response.usage?.output_tokens ?? 0,
         cache_creation_input_tokens: response.usage?.cache_creation_input_tokens,
         cache_read_input_tokens: response.usage?.cache_read_input_tokens,
+        ...(response.usage?.server_tool_use
+          ? { server_tool_use: response.usage.server_tool_use }
+          : {}),
       },
     };
   }
@@ -2267,7 +2360,10 @@ export class ProxyService extends BaseProxyService {
       model: request.model,
       messages: anthropicMessages,
       system: systemPrompt,
-      tools: this.convertOpenAIToolsToAnthropicTools(request.tools),
+      tools: convertOpenAIToolsToAnthropicTools(
+        request.tools,
+        request.web_search_options !== undefined,
+      ),
       thinking: request.thinking
         ? {
             type: request.thinking.type ?? 'enabled',
@@ -2384,90 +2480,6 @@ export class ProxyService extends BaseProxyService {
     return names;
   }
 
-  private convertOpenAIToolsToAnthropicTools(
-    tools: OpenAIChatRequest['tools'],
-  ): AnthropicChatRequest['tools'] {
-    if (!tools || tools.length === 0) {
-      return undefined;
-    }
-
-    const result: NonNullable<AnthropicChatRequest['tools']> = [];
-    const searchToolTypes = new Set([
-      'web_search_20250305',
-      'google_search',
-      'google_search_retrieval',
-      'builtin_web_search',
-    ]);
-
-    for (const tool of flattenOpenAITools(tools) ?? []) {
-      if (!tool) {
-        continue;
-      }
-
-      const toolType = isString(tool.type) ? tool.type.toLowerCase() : '';
-      const functionName = isString(tool.function?.name)
-        ? tool.function.name
-        : isString(tool.name)
-          ? tool.name
-          : '';
-      const normalizedFunctionName = functionName.toLowerCase();
-      const isSearchTool =
-        searchToolTypes.has(toolType) || searchToolTypes.has(normalizedFunctionName);
-
-      if (isSearchTool) {
-        result.push({
-          name: functionName || 'builtin_web_search',
-          type: 'web_search_20250305',
-          input_schema: {
-            type: 'object',
-            properties: {},
-          },
-        });
-        continue;
-      }
-
-      if (!functionName) {
-        continue;
-      }
-
-      const parameters = isCustomToolCall(functionName)
-        ? {
-            type: 'object',
-            properties: {
-              input: {
-                type: 'string',
-                description:
-                  'The exact freeform V4A patch text to pass to Codex apply_patch. It must start with *** Begin Patch and end with *** End Patch. Do not wrap it in a shell command or command array.',
-              },
-            },
-            required: ['input'],
-          }
-        : (tool.function?.parameters ??
-          (isPlainObject(tool.parameters)
-            ? (tool.parameters as Record<string, unknown>)
-            : {
-                type: 'object',
-                properties: {
-                  content: {
-                    type: 'string',
-                    description: 'The raw content or patch to be applied',
-                  },
-                },
-                required: ['content'],
-              }));
-      const inputSchema = normalizeObjectJsonSchema(parameters);
-
-      result.push({
-        name: functionName,
-        description:
-          tool.function?.description ?? (isString(tool.description) ? tool.description : undefined),
-        input_schema: inputSchema,
-      });
-    }
-
-    return result.length > 0 ? result : undefined;
-  }
-
   private mapGeminiFinishReasonToOpenAIFinishReason(finishReason?: string): string | null {
     if (!finishReason) {
       return null;
@@ -2553,6 +2565,7 @@ export class ProxyService extends BaseProxyService {
     signatureState?: StreamingSignatureState,
     serviceTier?: string,
     topLogprobs = 0,
+    webSearch = false,
   ): OpenAIChatResponse {
     const candidates =
       geminiResponse.candidates && geminiResponse.candidates.length > 0
@@ -2563,13 +2576,16 @@ export class ProxyService extends BaseProxyService {
         ...geminiResponse,
         candidates: candidate ? [candidate] : [],
       };
-      const claudeResponse = transformResponse(candidateResponse, signatureState);
+      const claudeResponse = transformResponse(candidateResponse, signatureState, { webSearch });
       const candidateIndex = isNumber(candidate?.index) ? candidate.index : fallbackIndex;
       return this.convertClaudeToOpenAIChoice(
         claudeResponse,
         candidateIndex,
         clientToolNames,
         this.toOpenAIChatLogprobs(candidate?.logprobsResult, topLogprobs),
+        webSearch
+          ? toWebSearchResultSet(candidate?.groundingMetadata as GroundingMetadata | undefined)
+          : null,
       );
     });
     const usageSource = transformResponse(
@@ -2577,7 +2593,7 @@ export class ProxyService extends BaseProxyService {
       undefined,
     );
 
-    return {
+    const openaiResponse: OpenAIChatResponse = {
       id: `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
       created: Math.floor(Date.now() / 1000),
@@ -2586,6 +2602,13 @@ export class ProxyService extends BaseProxyService {
       usage: toOpenAIUsage(usageSource.usage),
       ...(serviceTier ? { service_tier: serviceTier } : {}),
     };
+
+    const groundingResultSet = webSearch
+      ? toWebSearchResultSet(candidates[0]?.groundingMetadata as GroundingMetadata | undefined)
+      : null;
+    return groundingResultSet
+      ? attachWebSearchResults(openaiResponse, groundingResultSet)
+      : openaiResponse;
   }
 
   private convertClaudeToOpenAIChoice(
@@ -2593,6 +2616,7 @@ export class ProxyService extends BaseProxyService {
     index: number,
     clientToolNames?: ReadonlySet<string>,
     logprobs: OpenAIChatLogprobs | null = null,
+    webSearchResultSet: WebSearchResultSet | null = null,
   ): OpenAIChatResponse['choices'][number] {
     const contentBlocks = Array.isArray(claudeResponse?.content) ? claudeResponse.content : [];
 
@@ -2649,6 +2673,8 @@ export class ProxyService extends BaseProxyService {
         };
       });
 
+    const annotations = buildOpenAIUrlCitationAnnotations(textContent, webSearchResultSet);
+
     return {
       index,
       message: {
@@ -2657,6 +2683,7 @@ export class ProxyService extends BaseProxyService {
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         reasoning_content: reasoningContent || undefined,
         refusal: claudeResponse.refusal,
+        ...(annotations.length > 0 ? { annotations } : {}),
       },
       logprobs,
       finish_reason: this.mapAnthropicStopReasonToOpenAIFinishReason(claudeResponse.stop_reason),

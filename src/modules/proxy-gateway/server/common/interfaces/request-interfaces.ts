@@ -1,4 +1,9 @@
 import type { GeminiToolDeclaration, SafetySetting } from '../../../antigravity/types';
+import type {
+  AnthropicServerToolUseBlock,
+  AnthropicWebSearchToolResultBlock,
+} from '../../../antigravity/anthropic-web-search-blocks';
+import type { OpenAIUrlCitationAnnotation } from '../../../antigravity/openai-web-search';
 
 export interface OpenAIChatRequest {
   model: string;
@@ -32,6 +37,11 @@ export interface OpenAIChatRequest {
   user?: string;
   service_tier?: string;
   extra?: Record<string, unknown>;
+  /**
+   * OpenAI's Chat Completions switch for the built-in web search tool. An empty
+   * object turns search on; the options inside it are validated separately.
+   */
+  web_search_options?: Record<string, unknown>;
 }
 
 export interface OpenAIResponseFormat {
@@ -230,7 +240,9 @@ export type AnthropicContent =
       is_error?: boolean;
       cache_control?: AnthropicCacheControl;
     }
-  | { type: 'redacted_thinking'; data: string };
+  | { type: 'redacted_thinking'; data: string }
+  | AnthropicServerToolUseBlock
+  | AnthropicWebSearchToolResultBlock;
 
 export interface AnthropicImageSource {
   type: 'base64';
@@ -350,6 +362,7 @@ export interface OpenAIChoice {
     tool_calls?: OpenAIToolCall[];
     reasoning_content?: string;
     refusal?: string;
+    annotations?: OpenAIUrlCitationAnnotation[];
   };
   logprobs?: OpenAIChatLogprobs | null;
   finish_reason: string | null;
@@ -381,5 +394,6 @@ export interface AnthropicChatResponse {
     output_tokens: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    server_tool_use?: { web_search_requests?: number };
   };
 }

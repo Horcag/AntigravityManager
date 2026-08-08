@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import { ProxyService } from '../../modules/proxy-gateway/server/proxy.service';
+import { convertOpenAIToolsToAnthropicTools } from '../../modules/proxy-gateway/server/modules/openai/chat/openai-tool-conversion';
 
 describe('OpenAI tool mapper compatibility', () => {
   it('maps a Responses apply_patch custom tool to the upstream freeform input schema', () => {
-    const service = Object.create(ProxyService.prototype) as ProxyService;
-    const result = Reflect.get(service, 'convertOpenAIToolsToAnthropicTools').call(service, [
+    const result = convertOpenAIToolsToAnthropicTools([
       {
         type: 'custom',
         name: 'apply_patch',

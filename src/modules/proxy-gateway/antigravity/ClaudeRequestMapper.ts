@@ -620,6 +620,30 @@ function injectGoogleSearchTool(body: { tools?: GeminiToolDeclaration[] }, mappe
 }
 
 /**
+ * Whether the caller asked for web search at all.
+ *
+ * The response surfaces need this to decide between rendering grounding as the
+ * protocol's search blocks and rendering it as the trailing markdown that a
+ * caller who never asked for search still gets.
+ */
+export function requestsWebSearch(claudeReq: ClaudeRequest): boolean {
+  return detectsNetworkingTool(claudeReq.tools);
+}
+
+/**
+ * Whether the model the request will actually run on can ground an answer.
+ *
+ * Measured against the live account: `googleSearch` returns real
+ * `groundingMetadata` on Gemini-family models and none at all on the
+ * Claude-family and gpt-oss models the same catalog publishes. A request for
+ * search on one of those must not be answered ungrounded, so callers route it
+ * through the separate search call instead.
+ */
+export function modelSupportsSearchGrounding(model: string): boolean {
+  return mapClaudeModelToGemini(model).toLowerCase().startsWith('gemini');
+}
+
+/**
  * Whether this request's web search has to be served by a separate call.
  *
  * `v1internal` rejects a `generateContent` that carries both

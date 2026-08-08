@@ -28,6 +28,7 @@ const mockAccountLeaseService = {
   getModelThinkingBudgetForAccount: vi.fn(),
   resolveDynamicModelForAccount: vi.fn((_token: unknown, model: string) => model),
   getModelCatalogStatus: vi.fn(),
+  getModelIdsForRole: vi.fn(() => [] as string[]),
 };
 const mockGeminiClient = { streamGenerateInternal: vi.fn(), generateInternal: vi.fn() };
 
@@ -969,7 +970,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
   });
 
-  it('keeps the explicit model when web search capability is unverified', async () => {
+  it('keeps the explicit model and grounds it through the web_search role model', async () => {
     setServerConfig(
       createProxyConfig({
         custom_mapping: {
@@ -979,6 +980,7 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     );
     const service = new TestableProxyService();
     mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockAccountLeaseService.getModelIdsForRole.mockReturnValue(['gemini-3.1-flash-lite']);
     mockGeminiClient.generateInternal.mockResolvedValue({
       candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
       usageMetadata: { totalTokenCount: 5 },
@@ -991,8 +993,38 @@ describe('ProxyService Empty Stream Retry Logic', () => {
       tools: [{ type: 'web_search_20250305' }],
     });
 
-    const internalRequest = mockGeminiClient.generateInternal.mock.calls[0][0];
-    expect(internalRequest.model).toBe('custom-search-model');
+    // A model outside the Gemini family cannot ground, so the search runs
+    // separately on the role model while the answer still comes from the model
+    // the caller asked for.
+    const [searchRequest, mainRequest] = mockGeminiClient.generateInternal.mock.calls.map(
+      (call) => call[0],
+    );
+    expect(searchRequest.model).toBe('gemini-3.1-flash-lite');
+    expect(searchRequest.request.tools).toEqual([{ googleSearch: {} }]);
+    expect(mainRequest.model).toBe('custom-search-model');
+  });
+
+  it('fails closed rather than answering ungrounded when no web_search role model exists', async () => {
+    setServerConfig(
+      createProxyConfig({
+        custom_mapping: {
+          'custom-search-model': 'custom-search-model',
+        },
+      }),
+    );
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockAccountLeaseService.getModelIdsForRole.mockReturnValue([]);
+
+    await expect(
+      service.handleChatCompletions({
+        model: 'custom-search-model',
+        stream: false,
+        messages: [{ role: 'user', content: 'Search the documentation.' }],
+        tools: [{ type: 'web_search_20250305' }],
+      }),
+    ).rejects.toThrowError(/web_search role/);
+    expect(mockGeminiClient.generateInternal).not.toHaveBeenCalled();
   });
 
   it('retries Anthropic flow with the same error classification matrix', async () => {

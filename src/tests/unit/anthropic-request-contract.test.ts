@@ -153,7 +153,29 @@ describe('Anthropic Messages request contract', () => {
   });
 
   it.each([
-    [{ tools: [{ type: 'web_search_20250305', name: 'web_search' }] }, 'tools.0.type'],
+    [{ tools: [{ type: 'code_execution_20250522', name: 'code_execution' }] }, 'tools.0.type'],
+    [{ tools: [{ type: 'web_fetch_20250910', name: 'web_fetch' }] }, 'tools.0.type'],
+    [{ tools: [{ type: 'computer_20250124', name: 'computer' }] }, 'tools.0.type'],
+    [
+      {
+        tools: [
+          {
+            type: 'web_search_20250305',
+            name: 'web_search',
+            user_location: { type: 'approximate' },
+          },
+        ],
+      },
+      'tools.0.user_location',
+    ],
+    [
+      {
+        tools: [
+          { type: 'web_search_20250305', name: 'web_search', allowed_domains: ['example.com'] },
+        ],
+      },
+      'tools.0.allowed_domains',
+    ],
     [{ output_config: { format: { type: 'json_schema', schema: {} } } }, 'output_config.format'],
     [
       {
@@ -175,6 +197,37 @@ describe('Anthropic Messages request contract', () => {
         ...extra,
       }),
     ).toThrowError(expect.objectContaining({ param }));
+  });
+
+  it('accepts the one server tool the transport can serve, plus an explicit custom tool', () => {
+    const request = normalizeAnthropicMessagesRequest({
+      model: 'claude-opus-5',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'who won?' }],
+      tools: [
+        { type: 'web_search_20250305', name: 'web_search', max_uses: 3 },
+        { type: 'custom', name: 'lookup', input_schema: { type: 'object' } },
+      ],
+      tool_choice: { type: 'tool', name: 'lookup' },
+    });
+
+    expect(request.tools).toHaveLength(2);
+    expect(request.tools?.[0]).toMatchObject({ type: 'web_search_20250305', name: 'web_search' });
+    expect(request.tools?.[1]).toMatchObject({ type: 'custom', name: 'lookup' });
+  });
+
+  it('rejects a second web search declaration rather than mapping two upstream tools', () => {
+    expect(() =>
+      normalizeAnthropicMessagesRequest({
+        model: 'claude-opus-5',
+        max_tokens: 64,
+        messages: [{ role: 'user', content: 'hello' }],
+        tools: [
+          { type: 'web_search_20250305', name: 'web_search' },
+          { type: 'web_search_20250305', name: 'web_search_again' },
+        ],
+      }),
+    ).toThrowError(expect.objectContaining({ param: 'tools.1.type' }));
   });
 
   it('rejects disable_parallel_tool_use because Gemini cannot enforce it', () => {

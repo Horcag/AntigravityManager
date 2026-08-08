@@ -6,6 +6,7 @@ import type {
   OpenAICompletionRequest,
   OpenAIMessage,
 } from '../../../common/interfaces/request-interfaces';
+import { validateOpenAIWebSearchOptions } from './openai-web-search-options';
 
 type OpenAIRequestErrorCode =
   | 'invalid_value'
@@ -317,15 +318,8 @@ function validateResponseFormat(value: unknown): void {
 }
 
 function validateUnsupportedChatFields(raw: Record<string, unknown>): void {
-  for (const param of [
-    'audio',
-    'function_call',
-    'functions',
-    'prediction',
-    'quality',
-    'size',
-    'web_search_options',
-  ]) {
+  validateOpenAIWebSearchOptions(raw.web_search_options, { invalid, unsupported });
+  for (const param of ['audio', 'function_call', 'functions', 'prediction', 'quality', 'size']) {
     if (raw[param] !== undefined) {
       unsupported(param, `${param} is not implemented by this Chat Completions adapter`);
     }

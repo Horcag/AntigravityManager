@@ -8,6 +8,13 @@ import {
   GroundingMetadata,
 } from './types';
 import { applyGroundingCitations, renderGroundingMarkdown } from './grounding-citations';
+import {
+  ANTHROPIC_WEB_SEARCH_TOOL_NAME,
+  buildAnthropicWebSearchBlocks,
+  buildAnthropicWebSearchCitations,
+  type AnthropicWebSearchCitation,
+} from './anthropic-web-search-blocks';
+import { toWebSearchResultSet, type WebSearchResultSet } from './web-search-results';
 import { decodeSignature } from './signature-utils';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { normalizeFunctionCallArgs } from './function-call-args';
@@ -15,6 +22,16 @@ import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 export interface ResponseSignatureState extends SignatureContext {
   store: SignatureStore;
+}
+
+export interface ResponseMappingOptions {
+  /**
+   * The caller declared the `web_search_20250305` server tool, so grounding is
+   * reported as Anthropic's search blocks and citations. Without it grounding
+   * keeps rendering as the trailing markdown a caller who never asked for
+   * search still receives, so no existing client's output changes shape.
+   */
+  webSearch?: boolean;
 }
 
 /**
@@ -30,8 +47,13 @@ class NonStreamingProcessor {
   private hasToolCall: boolean = false;
   private responseSignature: string | null = null;
   private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
+  private webSearchResultSet: WebSearchResultSet | null = null;
+  private pendingCitations: AnthropicWebSearchCitation[] | null = null;
 
-  constructor(private readonly signatureState?: ResponseSignatureState) {}
+  constructor(
+    private readonly signatureState?: ResponseSignatureState,
+    private readonly options: ResponseMappingOptions = {},
+  ) {}
 
   public process(geminiResponse: GeminiResponse): ClaudeResponse {
     const candidate = geminiResponse.candidates?.[0];
@@ -61,7 +83,10 @@ class NonStreamingProcessor {
       this.trailingSignature = null; // Consumed
     }
 
-    // 5. Build response
+    // 5. Search blocks, once the text they precede exists
+    this.insertWebSearchBlocks();
+
+    // 6. Build response
     return this.buildResponse(geminiResponse);
   }
 
@@ -191,6 +216,11 @@ class NonStreamingProcessor {
   }
 
   private processGrounding(grounding: GroundingMetadata) {
+    if (this.options.webSearch) {
+      this.processWebSearchGrounding(grounding);
+      return;
+    }
+
     // Inline `[n]` markers first: the answer text is complete here, so the
     // byte offsets in `groundingSupports` still address it. They must be
     // applied before the trailing block below is appended, or every offset
@@ -240,11 +270,68 @@ class NonStreamingProcessor {
     }
   }
 
+  /**
+   * Records grounding as search results instead of appended prose.
+   *
+   * Citations are computed here rather than at flush time because the offsets
+   * address exactly the answer text as the model produced it, and nothing has
+   * been appended to it yet at this point.
+   */
+  private processWebSearchGrounding(grounding: GroundingMetadata) {
+    const resultSet = toWebSearchResultSet(grounding);
+    if (!resultSet) {
+      return;
+    }
+    this.webSearchResultSet = resultSet;
+
+    if (this.textBuilder) {
+      this.pendingCitations = buildAnthropicWebSearchCitations(this.textBuilder, resultSet);
+      return;
+    }
+
+    for (let i = this.contentBlocks.length - 1; i >= 0; i--) {
+      const block = this.contentBlocks[i];
+      if (block.type === 'text' && block.text) {
+        const citations = buildAnthropicWebSearchCitations(block.text, resultSet);
+        if (citations.length > 0) {
+          block.citations = citations;
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * Splices the search blocks in ahead of the answer they grounded.
+   *
+   * Before the first text block rather than at the very front, so a thinking
+   * block keeps its leading position and the order the client sees is the one
+   * Anthropic documents: the search, its results, then the cited prose.
+   */
+  private insertWebSearchBlocks() {
+    const resultSet = this.webSearchResultSet;
+    if (!resultSet) {
+      return;
+    }
+
+    const { serverToolUse, toolResult } = buildAnthropicWebSearchBlocks(
+      resultSet,
+      `srvtoolu_${uuidv4()}`,
+      ANTHROPIC_WEB_SEARCH_TOOL_NAME,
+    );
+    const firstTextIndex = this.contentBlocks.findIndex((block) => block.type === 'text');
+    const insertAt = firstTextIndex === -1 ? this.contentBlocks.length : firstTextIndex;
+    this.contentBlocks.splice(insertAt, 0, serverToolUse, toolResult);
+  }
+
   private flushText() {
     if (!this.textBuilder) return;
+    const citations = this.pendingCitations;
+    this.pendingCitations = null;
     this.contentBlocks.push({
       type: 'text',
       text: this.textBuilder,
+      ...(citations?.length ? { citations } : {}),
     });
     this.textBuilder = '';
   }
@@ -308,6 +395,9 @@ class NonStreamingProcessor {
         geminiResponse.usageMetadata?.totalThoughtTokens ??
         geminiResponse.usageMetadata?.thoughtsTokenCount ??
         0,
+      ...(this.webSearchResultSet
+        ? { server_tool_use: { web_search_requests: this.webSearchResultSet.requestCount } }
+        : {}),
     };
 
     return {
@@ -329,7 +419,8 @@ class NonStreamingProcessor {
 export function transformResponse(
   geminiResponse: GeminiResponse,
   signatureState?: ResponseSignatureState,
+  options?: ResponseMappingOptions,
 ): ClaudeResponse {
-  const processor = new NonStreamingProcessor(signatureState);
+  const processor = new NonStreamingProcessor(signatureState, options);
   return processor.process(geminiResponse);
 }

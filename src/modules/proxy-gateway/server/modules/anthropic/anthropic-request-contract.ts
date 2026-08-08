@@ -11,6 +11,7 @@ import {
   OpenAIMediaRequestError,
   parseInlineMediaInput,
 } from '../openai/media/openai-media-request-contract';
+import { validateAnthropicTools, type AnthropicContractFailures } from './anthropic-tool-contract';
 
 export const ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 export const ANTHROPIC_IMAGE_BYTES_LIMIT = 5 * 1024 * 1024;
@@ -433,48 +434,14 @@ function validateSystem(value: unknown): void {
   }
 }
 
+const TOOL_CONTRACT_FAILURES: AnthropicContractFailures = {
+  invalid,
+  unsupported,
+  validateCacheControl,
+};
+
 function validateTools(value: unknown): Set<string> {
-  const names = new Set<string>();
-  if (value === undefined) {
-    return names;
-  }
-  if (!Array.isArray(value)) {
-    invalid('tools', 'tools must be an array');
-  }
-  for (const [index, toolValue] of value.entries()) {
-    const param = `tools.${index}`;
-    const tool = asRecord(toolValue, param);
-    validateObjectFields(tool, param, [
-      'cache_control',
-      'defer_loading',
-      'description',
-      'input_schema',
-      'name',
-      'strict',
-      'type',
-    ]);
-    if (tool.type !== undefined) {
-      unsupported(
-        `${param}.type`,
-        'Anthropic server tools are not exposed by the Gemini compatibility transport',
-      );
-    }
-    const name = requireExactNonEmptyString(tool.name, `${param}.name`);
-    if (names.has(name)) {
-      invalid(`${param}.name`, `duplicate tool name: ${name}`);
-    }
-    names.add(name);
-    validateOptionalString(tool.description, `${param}.description`);
-    asRecord(tool.input_schema, `${param}.input_schema`);
-    validateCacheControl(tool.cache_control, `${param}.cache_control`);
-    if (tool.strict !== undefined) {
-      unsupported(`${param}.strict`, 'strict tool schema enforcement is not available upstream');
-    }
-    if (tool.defer_loading !== undefined) {
-      unsupported(`${param}.defer_loading`, 'deferred tool loading is not available upstream');
-    }
-  }
-  return names;
+  return validateAnthropicTools(value, TOOL_CONTRACT_FAILURES).names;
 }
 
 function validateToolChoice(
