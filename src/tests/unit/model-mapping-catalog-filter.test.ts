@@ -55,7 +55,7 @@ describe('getPublishedCatalogModelIds', () => {
     ).toEqual(['custom-fast', 'gemini-3-flash']);
   });
 
-  it('withholds ids the provider assigned only to a non-chat role', () => {
+  it('publishes ids the provider assigned only to a non-chat role', () => {
     const index = roleIndex({
       nonChatRoles: new Map([
         ['tab_lite_preview', ['tab']],
@@ -70,7 +70,44 @@ describe('getPublishedCatalogModelIds', () => {
         ['gemini-3-flash', 'tab_lite_preview', 'transcriber_v2'],
         index,
       ),
-    ).toEqual(['gemini-3-flash']);
+    ).toEqual(['gemini-3-flash', 'tab_lite_preview', 'transcriber_v2']);
+  });
+
+  it('keeps a tool-role model absent from the agent list, as measured live', () => {
+    // The live regression: gemini-3-flash is the sole `command` model and is
+    // not in agent_model_sorts, yet it answers chat requests normally.
+    const index = roleIndex({
+      nonChatRoles: new Map([
+        ['gemini-3-flash', ['command']],
+        ['gemini-3.1-flash-lite', ['commit_message', 'mquery', 'web_search']],
+        ['gemini-3.1-flash-image', ['image_generation']],
+        ['chat_20706', ['tab']],
+        ['chat_23310', ['tab']],
+      ]),
+      chatModelIds: new Set(['gemini-3-pro', 'claude-sonnet-4-5']),
+    });
+
+    expect(
+      getPublishedCatalogModelIds(
+        {},
+        [
+          'gemini-3-pro',
+          'claude-sonnet-4-5',
+          'gemini-3-flash',
+          'gemini-3.1-flash-lite',
+          'gemini-3.1-flash-image',
+          'chat_20706',
+          'chat_23310',
+        ],
+        index,
+      ),
+    ).toEqual([
+      'claude-sonnet-4-5',
+      'gemini-3-flash',
+      'gemini-3-pro',
+      'gemini-3.1-flash-image',
+      'gemini-3.1-flash-lite',
+    ]);
   });
 
   it('keeps an id the provider also offers on the chat surface', () => {
@@ -105,18 +142,18 @@ describe('getPublishedCatalogModelIds', () => {
 });
 
 describe('getUnpublishedCatalogModelIds', () => {
-  it('reports the provider role that withheld an id', () => {
+  it('does not report a role member the id table does not withhold', () => {
     const index = roleIndex({
       nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
       chatModelIds: new Set(['gemini-3-flash']),
     });
 
-    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'tab_lite_preview'], index)).toEqual([
-      { id: 'tab_lite_preview', reason: 'role', roles: ['tab'] },
-    ]);
+    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'tab_lite_preview'], index)).toEqual(
+      [],
+    );
   });
 
-  it('falls back to the last-resort id table when role data cannot explain an id', () => {
+  it('names the id table as the reason with no role data available', () => {
     const index = roleIndex({ chatModelIds: new Set(['gemini-3-flash']) });
 
     expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'chat_20706'], index)).toEqual([
@@ -124,14 +161,23 @@ describe('getUnpublishedCatalogModelIds', () => {
     ]);
   });
 
-  it('prefers the provider role over the id table for a listed id', () => {
+  it('reports the provider roles of an id the table withheld', () => {
     const index = roleIndex({
-      nonChatRoles: new Map([['tab_flash_lite_preview', ['tab']]]),
-      chatModelIds: new Set(['gemini-3-flash']),
+      nonChatRoles: new Map([
+        ['chat_20706', ['tab']],
+        ['gemini-3-flash', ['command']],
+      ]),
+      chatModelIds: new Set(['gemini-3-pro']),
     });
 
-    expect(getUnpublishedCatalogModelIds(['tab_flash_lite_preview'], index)).toEqual([
-      { id: 'tab_flash_lite_preview', reason: 'role', roles: ['tab'] },
+    expect(
+      getUnpublishedCatalogModelIds(
+        ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
+        index,
+      ),
+    ).toEqual([
+      { id: 'chat_20706', reason: 'override', roles: ['tab'] },
+      { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
     ]);
   });
 });
