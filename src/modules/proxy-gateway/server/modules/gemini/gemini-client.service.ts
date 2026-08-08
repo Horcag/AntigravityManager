@@ -444,7 +444,9 @@ export class GeminiClient {
       return false;
     }
 
-    return status === 408 || status === 429 || status >= 500;
+    // 499 is Google's client-cancelled code; upstream emits it for its own aborts, so the next
+    // endpoint is worth trying rather than surfacing it as a failure.
+    return status === 408 || status === 429 || status === 499 || status >= 500;
   }
 
   private async executeRequestWithEndpointFailover<T>(
