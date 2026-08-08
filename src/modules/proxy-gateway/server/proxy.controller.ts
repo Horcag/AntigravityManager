@@ -55,6 +55,7 @@ import {
 import { ProxyGuard } from './guards/proxy.guard';
 import {
   getOpenAICompatibleModels,
+  isNonChatCatalogModelId,
   MODEL_LIST_CREATED_AT,
   MODEL_LIST_OWNER,
 } from '../antigravity/ModelMapping';
@@ -174,6 +175,9 @@ export class ProxyController {
       object: 'model_route_list',
       checked_at: new Date().toISOString(),
       canonical_models: canonicalModels.sort((left, right) => left.localeCompare(right)),
+      unpublished_catalog_ids: canonicalModels
+        .filter((modelId) => isNonChatCatalogModelId(modelId))
+        .sort((left, right) => left.localeCompare(right)),
       data: routes.map((route) => ({
         ...route,
         target_status:

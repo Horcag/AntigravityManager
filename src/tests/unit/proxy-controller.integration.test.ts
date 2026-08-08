@@ -246,6 +246,33 @@ describe('ProxyController Integration', () => {
     expect(ids).not.toContain('claude-opus-4-6-thinking');
   });
 
+  it('excludes provider-advertised non-chat service ids from the standard model list', () => {
+    const proxyService = {
+      handleChatCompletions: vi.fn(),
+      handleAnthropicMessages: vi.fn(),
+    };
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(
+        () =>
+          new Set([
+            'gemini-3-flash',
+            'chat_20706',
+            'chat_23310',
+            'tab_flash_lite_preview',
+            'tab_jump_flash_lite_preview',
+          ]),
+      ),
+    };
+    const controller = new ProxyController(proxyService as any, accountLeaseService as any);
+    const reply = createReplyMock();
+
+    controller.listModels(reply as any);
+
+    const payload = reply.send.mock.calls[0][0];
+    const ids = payload.data.map((model: { id: string }) => model.id);
+    expect(ids).toEqual(['gemini-3-flash']);
+  });
+
   it('reports configured routes separately from the standard model list', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash'])),
@@ -296,6 +323,39 @@ describe('ProxyController Integration', () => {
             target_status: 'known',
           }),
         ],
+      }),
+    );
+  });
+
+  it('keeps provider-advertised non-chat service ids visible in model-routes diagnostics', () => {
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(
+        () => new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
+      ),
+      getModelCatalogStatus: vi.fn(() => 'known'),
+      getModelRouteAvailability: vi.fn(() => []),
+    };
+    const routingService = {
+      getConfiguredRoutes: vi.fn(() => []),
+    };
+    const availabilityService = {
+      getSnapshot: vi.fn(() => []),
+    };
+    const controller = new ProxyController(
+      {} as any,
+      accountLeaseService as any,
+      undefined,
+      routingService as any,
+      availabilityService as any,
+    );
+    const reply = createReplyMock();
+
+    controller.listModelRoutes(reply as any);
+
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canonical_models: ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
+        unpublished_catalog_ids: ['chat_20706', 'tab_flash_lite_preview'],
       }),
     );
   });
