@@ -70,6 +70,13 @@ import {
 } from './modules/openai/media/image-monitoring-summary';
 import { parseImageMultipartRequest } from './modules/openai/media/image-multipart-request';
 import {
+  IMAGE_GENERATION_ROLE,
+  buildModelRoleRoutes,
+  createImageRouteMetadata,
+  resolveImageGenerationModel,
+  type ImageModelResolution,
+} from './modules/openai/media/image-model-resolution';
+import {
   getGeminiImageRequestMetadata,
   normalizeImageEditJsonRequest,
   normalizeImageGenerationRequest,
@@ -181,6 +188,9 @@ export class ProxyController {
         canonicalModels,
         this.accountLeaseService?.getCatalogModelRoleIndex(),
       ),
+      role_routes: buildModelRoleRoutes(
+        (role) => this.accountLeaseService?.getModelIdsForRole?.(role) ?? [],
+      ),
       data: routes.map((route) => ({
         ...route,
         target_status:
@@ -276,8 +286,9 @@ export class ProxyController {
     try {
       const body = normalizeImageGenerationRequest(rawBody);
       this.logImageMonitoringSummary('request', summarizeImageRequest(path, body));
+      const resolution = this.resolveImageModel(body.model);
       const request: OpenAIChatRequest = {
-        model: body.model ?? 'gemini-3.1-flash-image',
+        model: resolution.model,
         messages: [
           {
             role: 'user',
@@ -290,7 +301,14 @@ export class ProxyController {
         extra: getGeminiImageRequestMetadata(body),
       };
 
-      await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, body, res);
+      await this.sendOpenAIImageGenerationResponse(
+        request,
+        body.prompt ?? '',
+        path,
+        body,
+        res,
+        resolution,
+      );
     } catch (error) {
       this.sendOpenAIErrorResponse(res, path, error);
     }
@@ -332,8 +350,16 @@ export class ProxyController {
         : []),
     ];
 
+    let resolution: ImageModelResolution;
+    try {
+      resolution = this.resolveImageModel(body.model);
+    } catch (error) {
+      this.sendOpenAIErrorResponse(res, path, error);
+      return;
+    }
+
     const request: OpenAIChatRequest = {
-      model: body.model ?? 'gemini-3.1-flash-image',
+      model: resolution.model,
       messages: [
         {
           role: 'user',
@@ -346,7 +372,26 @@ export class ProxyController {
       extra: getGeminiImageRequestMetadata(body),
     };
 
-    await this.sendOpenAIImageGenerationResponse(request, body.prompt ?? '', path, body, res);
+    await this.sendOpenAIImageGenerationResponse(
+      request,
+      body.prompt ?? '',
+      path,
+      body,
+      res,
+      resolution,
+    );
+  }
+
+  /**
+   * Resolves the image model from the provider's `image_generation` role array
+   * when the caller named none, so the endpoint stops depending on the caller
+   * guessing an image-capable id.
+   */
+  private resolveImageModel(requestedModel: string | undefined): ImageModelResolution {
+    return resolveImageGenerationModel(
+      requestedModel,
+      this.accountLeaseService?.getModelIdsForRole?.(IMAGE_GENERATION_ROLE) ?? [],
+    );
   }
 
   @Post('audio/transcriptions')
@@ -1159,6 +1204,15 @@ export class ProxyController {
     return createModelRouteHeaders(metadata);
   }
 
+  private getImageRouteResponseHeaders(
+    result: unknown,
+    resolution: ImageModelResolution,
+  ): Record<string, string> {
+    return createModelRouteHeaders(
+      createImageRouteMetadata(resolution, getModelRouteMetadata(result)),
+    );
+  }
+
   private applyResponseHeaders(res: FastifyReply, headers: Record<string, string>): void {
     for (const [name, value] of Object.entries(headers)) {
       res.header(name, value);
@@ -1277,10 +1331,11 @@ export class ProxyController {
     path: '/v1/images/generations' | '/v1/images/edits',
     body: ImageMonitoringRequest,
     res: FastifyReply,
+    resolution: ImageModelResolution,
   ): Promise<void> {
     try {
       const result = await this.proxyService.handleChatCompletions(request);
-      const routeHeaders = this.getModelRouteResponseHeaders(result, request.model);
+      const routeHeaders = this.getImageRouteResponseHeaders(result, resolution);
       if (this.isObservableLike(result)) {
         if (body.stream) {
           const stream = inheritUpstreamBackpressure(
@@ -1348,7 +1403,7 @@ export class ProxyController {
         try {
           const geminiRequest = this.buildGeminiImageRequest(request, prompt);
           const geminiResult = await this.proxyService.handleGeminiGenerateContent(
-            request.model ?? 'gemini-3.1-flash-image',
+            resolution.model,
             geminiRequest,
           );
           const fallbackImage = this.extractInlineBase64ImageFromGeminiResponse(geminiResult);
@@ -1367,7 +1422,7 @@ export class ProxyController {
               path,
               body,
               res,
-              this.getModelRouteResponseHeaders(geminiResult, request.model),
+              this.getImageRouteResponseHeaders(geminiResult, resolution),
             );
             return;
           }

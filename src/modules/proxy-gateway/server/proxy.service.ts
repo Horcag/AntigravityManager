@@ -1,5 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { isEmpty, isNil, isNumber, isPlainObject, isString } from 'lodash-es';
+import type { CloudAccount } from '@/modules/cloud-account/types';
 import { AccountLeaseService } from './modules/account-lease/account-lease.service';
 import { GeminiClient } from './modules/gemini/gemini-client.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
@@ -22,6 +23,11 @@ import {
 } from './common/upstream-response-metadata';
 import { sanitizeGeminiResponse } from './modules/gemini/gemini-wire';
 import { transformClaudeRequestIn } from '../antigravity/ClaudeRequestMapper';
+import {
+  WEB_SEARCH_ROLE,
+  runWebSearchSubCall,
+  withWebSearchContext,
+} from './modules/gemini/web-search-sub-call';
 import { transformResponse } from '../antigravity/ClaudeResponseMapper';
 import {
   toOpenAIResponsesUsage,
@@ -135,6 +141,49 @@ export class ProxyService extends BaseProxyService {
     });
   }
 
+  /**
+   * Serves a request that asks for web search *and* client tools.
+   *
+   * `v1internal` rejects both in one `generateContent`, so the search runs as
+   * its own unary call against a model from the provider's `web_search` role
+   * and its grounded answer is folded into the request that follows. Requests
+   * that do not hit that combination are returned untouched; a request that
+   * does hit it and cannot be served fails loudly instead of losing the search.
+   */
+  private async applyWebSearchSubCall(
+    claudeRequest: ClaudeRequest,
+    token: CloudAccount,
+    deadlineAt: number,
+    projectId: string,
+    userAgent: string,
+    sessionId?: string,
+  ): Promise<ClaudeRequest> {
+    const outcome = await runWebSearchSubCall({
+      claudeRequest,
+      getRoleModelIds: () => this.accountLeaseService.getModelIdsForRole?.(WEB_SEARCH_ROLE) ?? [],
+      projectId,
+      userAgent,
+      sessionId,
+      generate: (body) =>
+        this.geminiClient.generateInternal(
+          body,
+          token.token.access_token,
+          token.token.upstream_proxy_url,
+          this.createModelSpecificHeaders(body.model),
+          deadlineAt,
+        ),
+    });
+
+    if (!outcome) {
+      return claudeRequest;
+    }
+
+    this.logger.log(
+      `[Web-Search] separate search call model=${outcome.model} grounded=${outcome.context !== null}`,
+    );
+    return outcome.context ? withWebSearchContext(claudeRequest, outcome.context) : claudeRequest;
+  }
+
   private attachRouteMetadata<T extends object>(
     value: T,
     requestedModel: string,
@@ -215,12 +264,23 @@ export class ProxyService extends BaseProxyService {
       const accountTargetModel = effectiveVariantRequest.variant
         ? accountRequest.model
         : effectiveTargetModel;
+      let claudeRequest: ClaudeRequest | null = null;
 
       try {
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
+        const baseClaudeRequest = this.toClaudeRequest(accountRequest, sessionKey);
+        // Reused by the project-context fallback below so the search runs once.
+        claudeRequest = await this.applyWebSearchSubCall(
+          baseClaudeRequest,
+          token,
+          deadlineAt,
+          projectId,
+          requestUserAgent,
+          baseClaudeRequest.metadata?.user_id,
+        );
         const geminiBody = transformClaudeRequestIn(
-          this.toClaudeRequest(accountRequest, sessionKey),
+          claudeRequest,
           projectId,
           requestUserAgent,
           accountTargetModel,
@@ -282,7 +342,7 @@ export class ProxyService extends BaseProxyService {
           try {
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
-              this.toClaudeRequest(accountRequest, sessionKey),
+              claudeRequest ?? this.toClaudeRequest(accountRequest, sessionKey),
               '',
               requestUserAgent,
               accountTargetModel,
@@ -440,6 +500,7 @@ export class ProxyService extends BaseProxyService {
               if (response.usageMetadata) {
                 lastUsageMetadata = response.usageMetadata;
               }
+              state.captureGrounding(candidate?.groundingMetadata);
 
               if (Array.isArray(parts)) {
                 for (const part of parts) {
@@ -890,11 +951,22 @@ export class ProxyService extends BaseProxyService {
       const accountTargetModel = effectiveVariantRequest.variant
         ? accountRequest.model
         : effectiveTargetModel;
+      let searchedClaudeRequest: ClaudeRequest | null = null;
 
       try {
-        const claudeRequest = this.convertOpenAIToClaude(accountRequest, sessionKey);
+        const baseClaudeRequest = this.convertOpenAIToClaude(accountRequest, sessionKey);
         const projectId = token.token.project_id ?? '';
         const requestUserAgent = await resolveRequestUserAgent();
+        // Reused by the project-context fallback below so the search runs once.
+        searchedClaudeRequest = await this.applyWebSearchSubCall(
+          baseClaudeRequest,
+          token,
+          deadlineAt,
+          projectId,
+          requestUserAgent,
+          baseClaudeRequest.metadata?.user_id,
+        );
+        const claudeRequest = searchedClaudeRequest;
         const geminiBody = transformClaudeRequestIn(
           claudeRequest,
           projectId,
@@ -994,7 +1066,8 @@ export class ProxyService extends BaseProxyService {
             `OpenAI compatibility request hit project context issue, retrying without project: ${err.message}`,
           );
           try {
-            const claudeRequest = this.convertOpenAIToClaude(accountRequest, sessionKey);
+            const claudeRequest =
+              searchedClaudeRequest ?? this.convertOpenAIToClaude(accountRequest, sessionKey);
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
               claudeRequest,

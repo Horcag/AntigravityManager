@@ -35,7 +35,13 @@ describe('OpenAI media HTTP wire contract', () => {
     server = Fastify();
     server.addHook('onRoute', applyProxyRouteBodyLimit);
     await server.register(fastifyMultipart, OPENAI_MEDIA_MULTIPART_OPTIONS);
-    const controller = new ProxyController(proxyService as never);
+    // The image endpoints resolve their model from the provider's
+    // `image_generation` role when the caller names none.
+    const accountLeaseService = {
+      getModelIdsForRole: (role: string) =>
+        role === 'image_generation' ? ['gemini-3.1-flash-image'] : [],
+    };
+    const controller = new ProxyController(proxyService as never, accountLeaseService as never);
     server.post('/v1/images/generations', async (request, reply) =>
       controller.imageGenerations(request.body as never, reply),
     );
