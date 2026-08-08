@@ -93,6 +93,7 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
       hasChatRoleData: true,
       completionFlags: new Map([
         ['chat_20706', ['requiresLeadInGeneration', 'supportsCumulativeContext']],
+        ['chat_23310', ['requiresLeadInGeneration']],
         ['tab_flash_lite_preview', ['supportsEstimateTokenCounter']],
       ]),
     });

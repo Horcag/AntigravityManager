@@ -279,24 +279,20 @@ describe('ProxyController Integration', () => {
         nonChatRoles: new Map(),
         chatModelIds: new Set(),
         hasChatRoleData: true,
-        completionFlags: new Map([
-          [
-            'chat_20706',
-            [
-              'requiresLeadInGeneration',
-              'supportsCumulativeContext',
-              'supportsEstimateTokenCounter',
+        // All four measured live on 0.19.28-local1 with every marker set; the
+        // markers alone withhold them, the dated table is empty.
+        completionFlags: new Map(
+          ['chat_20706', 'chat_23310', 'tab_flash_lite_preview', 'tab_jump_flash_lite_preview'].map(
+            (modelId) => [
+              modelId,
+              [
+                'requiresLeadInGeneration',
+                'supportsCumulativeContext',
+                'supportsEstimateTokenCounter',
+              ],
             ],
-          ],
-          [
-            'tab_flash_lite_preview',
-            [
-              'requiresLeadInGeneration',
-              'supportsCumulativeContext',
-              'supportsEstimateTokenCounter',
-            ],
-          ],
-        ]),
+          ),
+        ),
       })),
     };
     const controller = new ProxyController(proxyService as any, accountLeaseService as any);
@@ -375,6 +371,7 @@ describe('ProxyController Integration', () => {
         hasChatRoleData: true,
         completionFlags: new Map([
           ['chat_20706', ['requiresLeadInGeneration']],
+          ['chat_23310', ['requiresLeadInGeneration', 'supportsCumulativeContext']],
           ['tab_flash_lite_preview', ['supportsCumulativeContext']],
         ]),
       })),
@@ -408,7 +405,12 @@ describe('ProxyController Integration', () => {
             flags: ['requiresLeadInGeneration'],
             roles: [],
           },
-          { id: 'chat_23310', reason: 'override', flags: [], roles: [] },
+          {
+            id: 'chat_23310',
+            reason: 'completion_model',
+            flags: ['requiresLeadInGeneration', 'supportsCumulativeContext'],
+            roles: [],
+          },
           {
             id: 'tab_flash_lite_preview',
             reason: 'completion_model',
