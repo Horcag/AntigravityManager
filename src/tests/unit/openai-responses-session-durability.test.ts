@@ -150,7 +150,6 @@ describe('OpenAIResponsesSessionStore durability', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       beforeStore,
     ).responses({ input: 'First question', model: 'gpt-4o' }, createReplyMock() as never);
     await beforeStore.flush();
@@ -161,7 +160,6 @@ describe('OpenAIResponsesSessionStore durability', () => {
     const afterReply = createReplyMock();
     await new ProxyController(
       afterService as never,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -193,7 +191,6 @@ describe('OpenAIResponsesSessionStore durability', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       beforeStore,
     ).responses(
       { input: 'First question', model: 'gpt-4o', store: false },
@@ -204,7 +201,6 @@ describe('OpenAIResponsesSessionStore durability', () => {
     const afterReply = createReplyMock();
     await new ProxyController(
       { handleChatCompletions: vi.fn() } as never,
-      undefined,
       undefined,
       undefined,
       undefined,

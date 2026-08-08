@@ -3,6 +3,7 @@ import { of, Subject, throwError } from 'rxjs';
 import { EventEmitter } from 'node:events';
 
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
+import { OpenAIMediaController } from '../../modules/proxy-gateway/server/modules/openai/media/openai-media.controller';
 import { OpenAIResponsesSessionStore } from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
@@ -336,7 +337,6 @@ describe('ProxyController Integration', () => {
     const controller = new ProxyController(
       {} as any,
       accountLeaseService as any,
-      undefined,
       routingService as any,
       availabilityService as any,
     );
@@ -387,7 +387,6 @@ describe('ProxyController Integration', () => {
     const controller = new ProxyController(
       {} as any,
       accountLeaseService as any,
-      undefined,
       routingService as any,
       availabilityService as any,
     );
@@ -452,7 +451,6 @@ describe('ProxyController Integration', () => {
     const controller = new ProxyController(
       {} as any,
       accountLeaseService as any,
-      undefined,
       { getConfiguredRoutes: vi.fn(() => []) } as any,
       { getSnapshot: vi.fn(() => []) } as any,
     );
@@ -535,7 +533,6 @@ describe('ProxyController Integration', () => {
     const controller = new ProxyController(
       {} as any,
       accountLeaseService as any,
-      undefined,
       routingService as any,
       availabilityService as any,
       modelRouteMissJournalService as any,
@@ -565,7 +562,6 @@ describe('ProxyController Integration', () => {
     };
     const controller = new ProxyController(
       {} as any,
-      undefined,
       undefined,
       undefined,
       undefined,
@@ -1428,7 +1424,7 @@ describe('ProxyController Integration', () => {
       }),
     };
     const imageQuotaRefresh = vi.fn().mockResolvedValue(undefined);
-    const controller = new ProxyController(
+    const controller = new OpenAIMediaController(
       proxyService as any,
       imageRoleLease() as any,
       imageQuotaRefresh,
@@ -1483,7 +1479,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
+    const controller = new OpenAIMediaController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a cat' }, reply as any);
@@ -1499,7 +1495,7 @@ describe('ProxyController Integration', () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockRejectedValue(new Error('429 quota exceeded')),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new OpenAIMediaController(proxyService as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1522,7 +1518,7 @@ describe('ProxyController Integration', () => {
         }),
       ),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new OpenAIMediaController(proxyService as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1541,7 +1537,7 @@ describe('ProxyController Integration', () => {
         choices: [{ message: { content: '![img](data:image/png;base64,QUJDRA==)' } }],
       }),
     };
-    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
+    const controller = new OpenAIMediaController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a dog' }, reply as any);
@@ -1576,7 +1572,7 @@ describe('ProxyController Integration', () => {
       }),
     };
     const imageQuotaRefresh = vi.fn().mockResolvedValue(undefined);
-    const controller = new ProxyController(
+    const controller = new OpenAIMediaController(
       proxyService as any,
       imageRoleLease() as any,
       imageQuotaRefresh,
@@ -1648,7 +1644,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
+    const controller = new OpenAIMediaController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations({ prompt: 'draw a fox' }, reply as any);
@@ -1673,7 +1669,7 @@ describe('ProxyController Integration', () => {
         candidates: [],
       }),
     };
-    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
+    const controller = new OpenAIMediaController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
 
     await controller.imageGenerations(
@@ -1698,7 +1694,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any, imageRoleLease() as any);
+    const controller = new OpenAIMediaController(proxyService as any, imageRoleLease() as any);
     const reply = createReplyMock();
     const mainImage = Buffer.concat([
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -1783,7 +1779,7 @@ describe('ProxyController Integration', () => {
     const proxyService = {
       handleChatCompletions: vi.fn(),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new OpenAIMediaController(proxyService as any);
     const reply = createReplyMock();
 
     await controller.imageEdits(
@@ -1817,7 +1813,7 @@ describe('ProxyController Integration', () => {
         ],
       }),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new OpenAIMediaController(proxyService as any);
     const reply = createReplyMock();
     const wav = Buffer.concat([
       Buffer.from('RIFF'),
@@ -1849,7 +1845,7 @@ describe('ProxyController Integration', () => {
     const proxyService = {
       handleGeminiGenerateContent: vi.fn(),
     };
-    const controller = new ProxyController(proxyService as any);
+    const controller = new OpenAIMediaController(proxyService as any);
     const reply = createReplyMock();
 
     await controller.audioTranscriptions(

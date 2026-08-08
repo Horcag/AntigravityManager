@@ -7,7 +7,10 @@ import { GeminiClient } from './modules/gemini/gemini-client.service';
 import { GeminiController } from './modules/gemini/gemini.controller';
 import { ProxyGuard } from './guards/proxy.guard';
 import { CloudMonitorService } from '@/modules/cloud-account/services/CloudMonitorService';
-import { IMAGE_QUOTA_REFRESH } from './proxy.controller';
+import {
+  IMAGE_QUOTA_REFRESH,
+  OpenAIMediaController,
+} from './modules/openai/media/openai-media.controller';
 import { RateLimitTrackerService } from './modules/shared/services/rate-limit-tracker.service';
 import { ModelRoutingService } from './modules/shared/services/model-routing.service';
 import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
@@ -39,6 +42,7 @@ import { ClientModelsController } from './modules/models/client-models.controlle
   imports: [],
   controllers: [
     ProxyController,
+    OpenAIMediaController,
     OpenAIResponsesStoreController,
     GeminiController,
     GeminiFilesController,

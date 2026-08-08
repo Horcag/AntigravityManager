@@ -15,7 +15,7 @@ import {
   modelSupportsSearchGrounding,
   requestsWebSearch,
   requiresSeparateWebSearchCall,
-} from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
+} from '@/modules/proxy-gateway/antigravity/claude-request-web-search';
 import { ModelRouteError } from '../../common/exceptions/model-route-exception';
 
 /**

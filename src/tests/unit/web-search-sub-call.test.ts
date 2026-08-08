@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { transformClaudeRequestIn } from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
 import {
   buildWebSearchSubRequest,
   extractWebSearchQuery,
   requiresSeparateWebSearchCall,
-  transformClaudeRequestIn,
-} from '@/modules/proxy-gateway/antigravity/ClaudeRequestMapper';
+} from '@/modules/proxy-gateway/antigravity/claude-request-web-search';
 import { applyGroundingCitations } from '@/modules/proxy-gateway/antigravity/grounding-citations';
 import {
   formatWebSearchResult,
