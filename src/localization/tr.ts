@@ -625,6 +625,12 @@ const tr = {
     mapping: {
       title: 'Model Eşleme',
       description: 'İsteğe bağlı açık takma adlar. Liste varsayılan olarak boştur.',
+      recent_misses_title: 'Son eşleşmeyen model istekleri',
+      recent_misses_empty: 'Son zamanlarda eşleşmeyen model yok.',
+      recent_misses_count: '{{count}} kez',
+      recent_misses_last_seen: 'Son görülme {{time}}',
+      create_miss_alias: 'Kaçırmadan alias oluştur',
+      clear_misses: 'Kaçırmaları temizle',
       maps_to: 'Şu modele eşlenir:',
       restore: 'Varsayılanlara Sıfırla',
       empty: 'Takma ad yapılandırılmadı. Gizli model değişimi yok.',
@@ -643,6 +649,8 @@ const tr = {
       not_checked: 'Kullanılabilirlik denetlenmedi',
       check: 'Kullanılabilirliği denetle',
       add: 'Takma ad ekle',
+      miss_cleared: 'Kayıp günlükleri temizlendi',
+      miss_clear_failed: 'Kayıp günlükleri temizlenemedi',
       clear: 'Takma adları temizle',
     },
     'open-code': {

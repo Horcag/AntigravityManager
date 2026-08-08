@@ -5,6 +5,7 @@ import { GeminiClient } from './modules/gemini/gemini-client.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { ModelRoutingService } from './modules/shared/services/model-routing.service';
+import { ModelRouteMissJournalService } from './modules/shared/services/model-route-miss-journal.service';
 import { v4 as uuidv4 } from 'uuid';
 import { Observable } from 'rxjs';
 import { createGeminiSseObservable } from './modules/gemini/gemini-sse-decoder';
@@ -97,6 +98,8 @@ export class ProxyService extends BaseProxyService {
     readonly generationConstraintsService: GenerationConstraintsService,
     @Inject(ProxyRetryService) readonly proxyRetryService: ProxyRetryService,
     @Inject(ModelRoutingService) readonly customModelRoutingService: ModelRoutingService,
+    @Inject(ModelRouteMissJournalService)
+    readonly modelRouteMissJournalService: ModelRouteMissJournalService,
     @Inject(SignatureStore) readonly signatureStore: SignatureStore,
   ) {
     super(
@@ -111,6 +114,7 @@ export class ProxyService extends BaseProxyService {
   private createNoAvailableAccountError(model: string): ModelRouteError {
     const catalogStatus = this.accountLeaseService.getModelCatalogStatus(model);
     if (catalogStatus === 'unknown_model') {
+      this.modelRouteMissJournalService.record(model);
       return new ModelRouteError({
         message: `The requested model '${model}' is not present in the discovered provider catalog`,
         status: HttpStatus.NOT_FOUND,

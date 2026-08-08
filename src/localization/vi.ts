@@ -622,6 +622,12 @@ const vi = {
     mapping: {
       title: 'Ánh xạ mô hình',
       description: 'Bí danh tường minh tùy chọn. Danh sách mặc định để trống.',
+      recent_misses_title: 'Các model không khớp gần đây',
+      recent_misses_empty: 'Không có model nào gần đây không khớp.',
+      recent_misses_count: '{{count}} lần',
+      recent_misses_last_seen: 'Lần cuối thấy: {{time}}',
+      create_miss_alias: 'Tạo bí danh từ lần khớp thất bại',
+      clear_misses: 'Xóa nhật ký không khớp',
       maps_to: 'Ánh xạ tới',
       restore: 'Khôi phục mặc định',
       empty: 'Chưa cấu hình bí danh. Không có thay thế mô hình ẩn.',
@@ -640,6 +646,8 @@ const vi = {
       not_checked: 'Chưa kiểm tra tính khả dụng',
       check: 'Kiểm tra tính khả dụng',
       add: 'Thêm bí danh',
+      miss_cleared: 'Nhật ký mất dữ liệu đã được xóa',
+      miss_clear_failed: 'Không thể xóa nhật ký mất dữ liệu',
       clear: 'Xóa các bí danh',
     },
     'open-code': {

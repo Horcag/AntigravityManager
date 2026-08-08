@@ -75,6 +75,11 @@ interface ModelRouteDiagnosticsResponse {
   checked_at: string;
   canonical_models: string[];
   data: ModelRouteDiagnostic[];
+  recent_misses: Array<{
+    model: string;
+    count: number;
+    lastSeen: number;
+  }>;
   recent_failures: Array<{
     accountId: string;
     modelId: string;
@@ -288,6 +293,51 @@ function ProxyPage() {
       ...proxyConfig,
       model_aliases: proxyConfig.model_aliases.filter((_, routeIndex) => routeIndex !== index),
     });
+  };
+
+  const createAliasFromMiss = (model: string) => {
+    if (!proxyConfig) {
+      return;
+    }
+    if (!model.trim() || modelAliasTargets.length === 0) {
+      return;
+    }
+    const normalizedAlias = model.trim().toLowerCase();
+    const existingAliases = new Set(
+      proxyConfig.model_aliases.map((route) => route.alias.trim().toLowerCase()),
+    );
+    if (existingAliases.has(normalizedAlias)) {
+      return;
+    }
+    updateProxyConfig({
+      ...proxyConfig,
+      model_aliases: [
+        ...proxyConfig.model_aliases,
+        { alias: model.trim(), target: modelAliasTargets[0], enabled: true },
+      ],
+    });
+  };
+
+  const clearMissJournal = async () => {
+    try {
+      const response = await fetch(`${baseUrl}/v1/model-routes/miss-journal`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${proxyConfig?.api_key ?? ''}` },
+      });
+      if (!response.ok) {
+        throw new Error(`Clear failed with HTTP ${response.status}`);
+      }
+      await modelRouteDiagnostics.refetch();
+      toast({
+        title: t('proxy.mapping.miss_cleared'),
+      });
+    } catch (error) {
+      toast({
+        title: t('proxy.mapping.miss_clear_failed'),
+        description: error instanceof Error ? error.message : t('proxy.mapping.miss_clear_failed'),
+        variant: 'destructive',
+      });
+    }
   };
 
   const copyToClipboard = (text: string, type: string) => {
@@ -701,6 +751,53 @@ print(response.choices[0].message.content)`;
             </div>
           )}
 
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {t('proxy.mapping.recent_misses_title')}
+            </div>
+            {modelRouteDiagnostics.data?.recent_misses &&
+            modelRouteDiagnostics.data.recent_misses.length > 0 ? (
+              <div className="space-y-2">
+                {modelRouteDiagnostics.data.recent_misses.map((miss) => (
+                  <div
+                    key={miss.model}
+                    className="rounded-lg border border-dashed p-3 text-sm text-gray-600 dark:text-gray-300"
+                  >
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium text-gray-800 dark:text-gray-100">
+                        <span>{miss.model}</span>
+                        <span className="text-gray-500 dark:text-gray-400">
+                          {' '}
+                          · {t('proxy.mapping.recent_misses_count', { count: miss.count })}
+                        </span>
+                      </div>
+                      <div>
+                        {t('proxy.mapping.recent_misses_last_seen', {
+                          time: new Date(miss.lastSeen).toLocaleString(),
+                        })}
+                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => createAliasFromMiss(miss.model)}
+                        disabled={modelAliasTargets.length === 0}
+                      >
+                        <Plus size={14} className="mr-2" />
+                        {t('proxy.mapping.create_miss_alias')}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed p-3 text-sm text-gray-500">
+                {t('proxy.mapping.recent_misses_empty')}
+              </div>
+            )}
+          </div>
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-xs text-gray-500">
               {modelRouteDiagnostics.data?.checked_at
@@ -730,6 +827,14 @@ print(response.choices[0].message.content)`;
               >
                 <Plus size={14} className="mr-2" />
                 {t('proxy.mapping.add')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!modelRouteDiagnostics.data?.recent_misses?.length}
+                onClick={clearMissJournal}
+              >
+                {t('proxy.mapping.clear_misses')}
               </Button>
               <Button
                 variant="outline"

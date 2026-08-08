@@ -300,6 +300,77 @@ describe('ProxyController Integration', () => {
     );
   });
 
+  it('returns recent model misses as part of the model routes response', () => {
+    const accountLeaseService = {
+      getAllCollectedModels: vi.fn(() => new Set(['gemini-3-flash'])),
+      getModelCatalogStatus: vi.fn(() => 'known'),
+      getModelRouteAvailability: vi.fn(() => []),
+    };
+    const routingService = {
+      getConfiguredRoutes: vi.fn(() => []),
+    };
+    const availabilityService = {
+      getSnapshot: vi.fn(() => []),
+    };
+    const modelRouteMissJournalService = {
+      getSnapshot: vi.fn(() => [
+        {
+          model: 'model-not-found',
+          count: 3,
+          lastSeen: 1_700_000_123_456,
+        },
+      ]),
+    };
+    const controller = new ProxyController(
+      {} as any,
+      accountLeaseService as any,
+      undefined,
+      routingService as any,
+      availabilityService as any,
+      modelRouteMissJournalService as any,
+    );
+    const reply = createReplyMock();
+
+    controller.listModelRoutes(reply as any);
+
+    expect(reply.status).toHaveBeenCalledWith(200);
+    expect(reply.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object: 'model_route_list',
+        recent_misses: [
+          {
+            model: 'model-not-found',
+            count: 3,
+            lastSeen: 1_700_000_123_456,
+          },
+        ],
+      }),
+    );
+  });
+
+  it('clears recent model misses', () => {
+    const missJournal = {
+      clear: vi.fn(),
+    };
+    const controller = new ProxyController(
+      {} as any,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      missJournal as any,
+    );
+    const reply = createReplyMock();
+
+    controller.clearMissJournal(reply as any);
+
+    expect(missJournal.clear).toHaveBeenCalledOnce();
+    expect(reply.status).toHaveBeenCalledWith(200);
+    expect(reply.send).toHaveBeenCalledWith({
+      object: 'model-route-miss-journal-cleared',
+    });
+  });
+
   it('routes Claude OpenAI requests to protocol parity path', async () => {
     const proxyService = {
       handleChatCompletions: vi.fn().mockResolvedValue({ ok: true }),

@@ -652,6 +652,12 @@ const fr = {
     mapping: {
       title: 'Mappage des modeles',
       description: 'Alias explicites facultatifs. La liste est vide par défaut.',
+      recent_misses_title: 'Modèles récemment non trouvés',
+      recent_misses_empty: 'Aucun modèle récemment non trouvé.',
+      recent_misses_count: '{{count}} occurrence(s)',
+      recent_misses_last_seen: 'Vu pour la dernière fois {{time}}',
+      create_miss_alias: 'Créer un alias depuis cet élément',
+      clear_misses: 'Effacer les éléments non trouvés',
       maps_to: 'Mappe vers',
       restore: 'Restaurer les valeurs par defaut',
       empty: 'Aucun alias configuré. Aucune substitution cachée.',
@@ -670,6 +676,8 @@ const fr = {
       not_checked: 'Disponibilité non vérifiée',
       check: 'Vérifier la disponibilité',
       add: 'Ajouter un alias',
+      miss_cleared: 'Journal des modèles non trouvés effacé',
+      miss_clear_failed: 'Échec de l’effacement du journal des modèles non trouvés',
       clear: 'Effacer les alias',
     },
     'open-code': {
