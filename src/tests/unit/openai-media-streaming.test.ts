@@ -1,4 +1,4 @@
-import { lastValueFrom, Observable, of, toArray } from 'rxjs';
+import { lastValueFrom, Observable, of, Subject, toArray } from 'rxjs';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -11,6 +11,11 @@ const pngFrame = (marker: number): string =>
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     Buffer.from([marker]),
   ]).toString('base64');
+
+const audioTextEvent = (text: string): string =>
+  `data: ${JSON.stringify({
+    candidates: [{ content: { parts: [{ text }] }, index: 0 }],
+  })}\n\n`;
 
 const chatImageEvent = (data: string): string =>
   `data: ${JSON.stringify({
@@ -69,6 +74,105 @@ describe('OpenAI media upstream stream adapters', () => {
 
     expect(first).toEqual(second);
     expect(second.at(-1)).toContain('"text":"once"');
+  });
+
+  /**
+   * The point of these three is timing, not shape. Asserting on the assembled `text` alone would
+   * pass against an implementation that buffers the whole upstream response and synthesises the
+   * events at the end, so each one drives the upstream by hand and asserts on what the client
+   * already holds *while the upstream is still open*.
+   */
+  it('delivers each transcript delta before the upstream stream completes', () => {
+    const upstream = new Subject<string>();
+    const received: string[] = [];
+    let completed = false;
+
+    const subscription = mapGeminiAudioTranscriptionStream(upstream).subscribe({
+      next: (chunk) => received.push(chunk),
+      complete: () => {
+        completed = true;
+      },
+    });
+
+    upstream.next(audioTextEvent('first '));
+    expect(completed).toBe(false);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toContain('event: transcript.text.delta');
+    expect(received[0]).toContain('"delta":"first "');
+
+    upstream.next(audioTextEvent('second'));
+    expect(completed).toBe(false);
+    expect(received).toHaveLength(2);
+    expect(received[1]).toContain('"delta":"second"');
+    // A buffering implementation could not have produced either delta by this point, and the
+    // terminal event must not appear until the upstream actually ends.
+    expect(received.some((chunk) => chunk.includes('transcript.text.done'))).toBe(false);
+
+    upstream.complete();
+    expect(completed).toBe(true);
+    expect(received).toHaveLength(3);
+    expect(received[2]).toContain('event: transcript.text.done');
+    expect(received[2]).toContain('"text":"first second"');
+
+    subscription.unsubscribe();
+  });
+
+  it('trips the transcript byte limit on the running total while the upstream is still open', () => {
+    const megabyte = 'x'.repeat(1024 * 1024);
+    const upstream = new Subject<string>();
+    const received: string[] = [];
+    let failure: unknown;
+    let completed = false;
+
+    mapGeminiAudioTranscriptionStream(upstream).subscribe({
+      next: (chunk) => received.push(chunk),
+      error: (error) => {
+        failure = error;
+      },
+      complete: () => {
+        completed = true;
+      },
+    });
+
+    // The limit is 4 MiB, so four deltas pass and the fifth must be refused mid-stream. Enforcing
+    // the cap on the final assembly instead would let all five through and only fail on complete().
+    for (let index = 0; index < 5; index += 1) {
+      upstream.next(audioTextEvent(megabyte));
+    }
+
+    expect(received).toHaveLength(4);
+    expect(completed).toBe(false);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/transcript exceeds/i);
+  });
+
+  it('surfaces a mid-stream upstream failure without retracting or completing the sent deltas', () => {
+    const upstream = new Subject<string>();
+    const received: string[] = [];
+    let failure: unknown;
+    let completed = false;
+
+    mapGeminiAudioTranscriptionStream(upstream).subscribe({
+      next: (chunk) => received.push(chunk),
+      error: (error) => {
+        failure = error;
+      },
+      complete: () => {
+        completed = true;
+      },
+    });
+
+    upstream.next(audioTextEvent('partial words'));
+    expect(received).toHaveLength(1);
+
+    upstream.error(new Error('upstream transcription stream aborted'));
+
+    // Deltas already on the wire stay on the wire; the stream errors rather than inventing a
+    // `transcript.text.done` that would claim the partial transcript was the whole transcript.
+    expect(received).toHaveLength(1);
+    expect(received[0]).toContain('"delta":"partial words"');
+    expect(completed).toBe(false);
+    expect((failure as Error).message).toBe('upstream transcription stream aborted');
   });
 
   it('emits an image partial only after a later upstream image proves it was intermediate', async () => {
