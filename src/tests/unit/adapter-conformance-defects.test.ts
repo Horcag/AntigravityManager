@@ -296,7 +296,6 @@ describe('adapter conformance defects (kanban #50)', () => {
     it.each([
       'embeddings',
       'moderations',
-      'batches',
       'uploads',
       'vector_stores',
       'fine_tuning/jobs',
@@ -313,19 +312,23 @@ describe('adapter conformance defects (kanban #50)', () => {
       expect(body).not.toHaveProperty('statusCode');
     });
 
-    it.each(['messages/batches', 'complete'])(
-      'answers POST /v1/%s in the Anthropic error shape',
-      async (route) => {
-        const response = await app.inject({ method: 'POST', url: `/v1/${route}`, payload: {} });
+    it('answers an unserved Anthropic route in the Anthropic error shape', async () => {
+      // `/v1/messages/batches` and `/v1/complete` used to stand here; kanban #51
+      // implemented both, so the assertion moved to a subresource Anthropic owns
+      // and we do not serve.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/messages/unserved',
+        payload: {},
+      });
 
-        expect(response.statusCode).toBe(404);
-        const body = response.json();
-        expect(body.type).toBe('error');
-        expect(body.error.type).toBe('not_found_error');
-        expect(body.request_id).toMatch(/^req_[0-9a-f]{32}$/u);
-        expect(response.headers['request-id']).toBe(body.request_id);
-      },
-    );
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.type).toBe('error');
+      expect(body.error.type).toBe('not_found_error');
+      expect(body.request_id).toMatch(/^req_[0-9a-f]{32}$/u);
+      expect(response.headers['request-id']).toBe(body.request_id);
+    });
 
     it.each(['cachedContents', 'tunedModels', 'corpora', 'operations'])(
       'answers POST /v1beta/%s in the Gemini error shape',
@@ -354,9 +357,15 @@ describe('adapter conformance defects (kanban #50)', () => {
       const files = await app.inject({ method: 'GET', url: '/v1/files' });
       const geminiFiles = await app.inject({ method: 'GET', url: '/v1beta/files' });
       const storedResponse = await app.inject({ method: 'GET', url: '/v1/responses/resp_missing' });
+      // Landed after this suite was written (kanban #51). Listed here so the
+      // catch-all can never quietly reclaim them.
+      const batches = await app.inject({ method: 'GET', url: '/v1/batches' });
+      const messageBatches = await app.inject({ method: 'GET', url: '/v1/messages/batches' });
 
       expect(files.statusCode).toBe(200);
       expect(geminiFiles.statusCode).toBe(200);
+      expect(batches.statusCode).toBe(200);
+      expect(messageBatches.statusCode).toBe(200);
       // Served by the store controller: a real 404 for a handle it never issued,
       // in the OpenAI shape rather than the catch-all's `unknown_url`.
       expect(storedResponse.json().error?.code).not.toBe('unknown_url');

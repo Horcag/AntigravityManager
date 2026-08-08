@@ -27,6 +27,12 @@ import { resolveFileStoreOptions } from './modules/files/file-store-location';
 import { GeminiFilesController } from './modules/files/gemini-files.controller';
 import { ClientFilesController } from './modules/files/client-files.controller';
 import { UnimplementedRouteFilter } from './common/unimplemented-route.filter';
+import { BATCH_RUNNER_OPTIONS, BatchRunnerService } from './modules/batch/batch-runner.service';
+import { resolveBatchRunnerOptions } from './modules/batch/batch-store-location';
+import { OpenAIBatchesController } from './modules/batch/openai-batches.controller';
+import { AnthropicMessageBatchesController } from './modules/batch/anthropic-message-batches.controller';
+import { GeminiOperationsController } from './modules/batch/gemini-operations.controller';
+import { AnthropicCompleteController } from './modules/anthropic/anthropic-complete.controller';
 
 @Module({
   imports: [],
@@ -36,6 +42,10 @@ import { UnimplementedRouteFilter } from './common/unimplemented-route.filter';
     GeminiController,
     GeminiFilesController,
     ClientFilesController,
+    OpenAIBatchesController,
+    AnthropicMessageBatchesController,
+    GeminiOperationsController,
+    AnthropicCompleteController,
   ],
   providers: [
     // Answers an unrouted `/v1...` or `/v1beta...` request in the error shape of
@@ -49,6 +59,11 @@ import { UnimplementedRouteFilter } from './common/unimplemented-route.filter';
       useFactory: resolveFileStoreOptions,
     },
     FileContentStore,
+    {
+      provide: BATCH_RUNNER_OPTIONS,
+      useFactory: resolveBatchRunnerOptions,
+    },
+    BatchRunnerService,
     RateLimitTrackerService,
     ModelRoutingService,
     {
@@ -83,6 +98,7 @@ import { UnimplementedRouteFilter } from './common/unimplemented-route.filter';
     CountTokensService,
     OpenAIResponsesSessionService,
     FileContentStore,
+    BatchRunnerService,
   ],
 })
 export class ProxyModule {}

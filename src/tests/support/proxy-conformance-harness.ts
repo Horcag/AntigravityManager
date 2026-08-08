@@ -30,6 +30,15 @@ import { OpenAIResponsesSessionStore } from '@/modules/proxy-gateway/server/modu
 import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import type { FileStoreOptions } from '@/modules/proxy-gateway/server/modules/files/file-store.types';
 import { UnimplementedRouteFilter } from '@/modules/proxy-gateway/server/common/unimplemented-route.filter';
+import {
+  BATCH_RUNNER_OPTIONS,
+  BatchRunnerService,
+} from '@/modules/proxy-gateway/server/modules/batch/batch-runner.service';
+import { OpenAIBatchesController } from '@/modules/proxy-gateway/server/modules/batch/openai-batches.controller';
+import { AnthropicMessageBatchesController } from '@/modules/proxy-gateway/server/modules/batch/anthropic-message-batches.controller';
+import { GeminiOperationsController } from '@/modules/proxy-gateway/server/modules/batch/gemini-operations.controller';
+import { AnthropicCompleteController } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-complete.controller';
+import type { BatchRunnerOptions } from '@/modules/proxy-gateway/server/modules/batch/batch-job.types';
 
 export interface ProxyConformanceService {
   handleAnthropicCountTokens(request: unknown): unknown;
@@ -45,6 +54,8 @@ export interface ProxyConformanceAppOptions {
   accountTokens?: AccountLeaseTokenData[];
   /** Overrides for the local file store; a fresh temp directory by default. */
   fileStore?: FileStoreOptions;
+  /** Overrides for the batch runner; in-memory with concurrency 2 by default. */
+  batchRunner?: BatchRunnerOptions;
 }
 
 export function createAccountLeaseTokenFixture(
@@ -132,6 +143,10 @@ export async function createProxyConformanceApp(
       GeminiFilesController,
       ClientFilesController,
       OpenAIResponsesStoreController,
+      OpenAIBatchesController,
+      AnthropicMessageBatchesController,
+      GeminiOperationsController,
+      AnthropicCompleteController,
     ],
     providers: [
       // Registered exactly as ProxyModule does, so conformance tests see the
@@ -141,6 +156,11 @@ export async function createProxyConformanceApp(
       // The in-memory store the controller already falls back to when no
       // durable service is bound, so behaviour is unchanged by binding it.
       { provide: OpenAIResponsesSessionService, useValue: OpenAIResponsesSessionStore },
+      {
+        provide: BATCH_RUNNER_OPTIONS,
+        useValue: { maxConcurrency: 2, ...options.batchRunner },
+      },
+      BatchRunnerService,
       { provide: AccountLeaseService, useValue: accountLeaseService },
       { provide: ProxyGuard, useValue: { canActivate: () => true } },
       { provide: IMAGE_QUOTA_REFRESH, useValue: async () => undefined },

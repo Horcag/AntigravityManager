@@ -70,7 +70,14 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
       expect.arrayContaining([
         expect.objectContaining({
           name: 'models/gemini-3-flash',
-          supportedGenerationMethods: ['countTokens', 'generateContent', 'streamGenerateContent'],
+          // `batchGenerateContent` is advertised because the local batch runner
+          // genuinely serves it; see section 11 of the server README.
+          supportedGenerationMethods: [
+            'countTokens',
+            'generateContent',
+            'streamGenerateContent',
+            'batchGenerateContent',
+          ],
         }),
         expect.objectContaining({
           name: 'models/gemini-3.1-pro-high',

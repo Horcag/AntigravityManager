@@ -11,8 +11,20 @@
  * in provider-side storage or tokens.
  */
 
-/** Purposes the OpenAI files surface can genuinely serve through this proxy. */
-export const SUPPORTED_OPENAI_FILE_PURPOSES = ['user_data', 'vision', 'assistants_input'] as const;
+/**
+ * Purposes the OpenAI files surface can genuinely serve through this proxy.
+ *
+ * `batch` joined the list when the local batch runner landed: `/v1/batches`
+ * reads its JSONL input from this store, so a file uploaded for that purpose
+ * now has something to be used for. The runner writes its output and error
+ * JSONL back with purpose `batch_output`.
+ */
+export const SUPPORTED_OPENAI_FILE_PURPOSES = [
+  'user_data',
+  'vision',
+  'assistants_input',
+  'batch',
+] as const;
 
 export type FileStoreErrorCode =
   | 'invalid_id'
