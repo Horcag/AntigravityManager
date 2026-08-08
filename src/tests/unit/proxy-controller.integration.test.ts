@@ -263,7 +263,29 @@ describe('ProxyController Integration', () => {
             'tab_jump_flash_lite_preview',
           ]),
       ),
-      getCatalogModelRoleIndex: vi.fn(() => undefined),
+      getCatalogModelRoleIndex: vi.fn(() => ({
+        nonChatRoles: new Map(),
+        chatModelIds: new Set(),
+        hasChatRoleData: true,
+        completionFlags: new Map([
+          [
+            'chat_20706',
+            [
+              'requiresLeadInGeneration',
+              'supportsCumulativeContext',
+              'supportsEstimateTokenCounter',
+            ],
+          ],
+          [
+            'tab_flash_lite_preview',
+            [
+              'requiresLeadInGeneration',
+              'supportsCumulativeContext',
+              'supportsEstimateTokenCounter',
+            ],
+          ],
+        ]),
+      })),
     };
     const controller = new ProxyController(proxyService as any, accountLeaseService as any);
     const reply = createReplyMock();
@@ -333,9 +355,17 @@ describe('ProxyController Integration', () => {
   it('keeps provider-advertised non-chat service ids visible in model-routes diagnostics', () => {
     const accountLeaseService = {
       getAllCollectedModels: vi.fn(
-        () => new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
+        () => new Set(['gemini-3-flash', 'chat_20706', 'chat_23310', 'tab_flash_lite_preview']),
       ),
-      getCatalogModelRoleIndex: vi.fn(() => undefined),
+      getCatalogModelRoleIndex: vi.fn(() => ({
+        nonChatRoles: new Map(),
+        chatModelIds: new Set(),
+        hasChatRoleData: true,
+        completionFlags: new Map([
+          ['chat_20706', ['requiresLeadInGeneration']],
+          ['tab_flash_lite_preview', ['supportsCumulativeContext']],
+        ]),
+      })),
       getModelCatalogStatus: vi.fn(() => 'known'),
       getModelRouteAvailability: vi.fn(() => []),
     };
@@ -358,10 +388,21 @@ describe('ProxyController Integration', () => {
 
     expect(reply.send).toHaveBeenCalledWith(
       expect.objectContaining({
-        canonical_models: ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
+        canonical_models: ['chat_20706', 'chat_23310', 'gemini-3-flash', 'tab_flash_lite_preview'],
         unpublished_catalog_ids: [
-          { id: 'chat_20706', reason: 'override', roles: [] },
-          { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
+          {
+            id: 'chat_20706',
+            reason: 'completion_model',
+            flags: ['requiresLeadInGeneration'],
+            roles: [],
+          },
+          { id: 'chat_23310', reason: 'override', flags: [], roles: [] },
+          {
+            id: 'tab_flash_lite_preview',
+            reason: 'completion_model',
+            flags: ['supportsCumulativeContext'],
+            roles: [],
+          },
         ],
       }),
     );
@@ -379,6 +420,17 @@ describe('ProxyController Integration', () => {
         ]),
         chatModelIds: new Set(['gemini-3-pro']),
         hasChatRoleData: true,
+        completionFlags: new Map([
+          [
+            'chat_20706',
+            [
+              'requiresLeadInGeneration',
+              'supportsCumulativeContext',
+              'supportsEstimateTokenCounter',
+            ],
+          ],
+          ['tab_flash_lite_preview', ['requiresLeadInGeneration']],
+        ]),
       })),
       getModelCatalogStatus: vi.fn(() => 'known'),
       getModelRouteAvailability: vi.fn(() => []),
@@ -398,8 +450,22 @@ describe('ProxyController Integration', () => {
       expect.objectContaining({
         canonical_models: ['chat_20706', 'gemini-3-flash', 'tab_flash_lite_preview'],
         unpublished_catalog_ids: [
-          { id: 'chat_20706', reason: 'override', roles: ['tab'] },
-          { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
+          {
+            id: 'chat_20706',
+            reason: 'completion_model',
+            flags: [
+              'requiresLeadInGeneration',
+              'supportsCumulativeContext',
+              'supportsEstimateTokenCounter',
+            ],
+            roles: ['tab'],
+          },
+          {
+            id: 'tab_flash_lite_preview',
+            reason: 'completion_model',
+            flags: ['requiresLeadInGeneration'],
+            roles: [],
+          },
         ],
       }),
     );
@@ -412,6 +478,7 @@ describe('ProxyController Integration', () => {
         nonChatRoles: new Map([['gemini-3-flash', ['command']]]),
         chatModelIds: new Set(['gemini-3-pro']),
         hasChatRoleData: true,
+        completionFlags: new Map(),
       })),
     };
     const controller = new ProxyController(

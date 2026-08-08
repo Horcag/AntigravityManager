@@ -85,8 +85,17 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
 
   it('GET /v1beta/models excludes provider-advertised non-chat service ids', async () => {
     mockAccountLeaseService.getAllCollectedModels.mockReturnValueOnce(
-      new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
+      new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview', 'chat_23310']),
     );
+    mockAccountLeaseService.getCatalogModelRoleIndex.mockReturnValueOnce({
+      nonChatRoles: new Map(),
+      chatModelIds: new Set(),
+      hasChatRoleData: true,
+      completionFlags: new Map([
+        ['chat_20706', ['requiresLeadInGeneration', 'supportsCumulativeContext']],
+        ['tab_flash_lite_preview', ['supportsEstimateTokenCounter']],
+      ]),
+    });
 
     const res = await app.inject({
       method: 'GET',
@@ -113,6 +122,7 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
       ]),
       chatModelIds: new Set(['gemini-3-pro']),
       hasChatRoleData: true,
+      completionFlags: new Map(),
     });
 
     const res = await app.inject({

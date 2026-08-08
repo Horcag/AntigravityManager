@@ -1,45 +1,95 @@
 import { describe, expect, it } from 'vitest';
 import {
   type CatalogModelRoleIndex,
+  type CompletionModelFlag,
   getAllDynamicModels,
   getPublishedCatalogModelIds,
   getUnpublishedCatalogModelIds,
   isNonChatCatalogModelId,
   resolveCatalogWithholdReason,
+  resolveCompletionModelFlags,
 } from '@/modules/proxy-gateway/antigravity/ModelMapping';
+
+const ALL_COMPLETION_FLAGS: CompletionModelFlag[] = [
+  'requiresLeadInGeneration',
+  'supportsCumulativeContext',
+  'supportsEstimateTokenCounter',
+];
 
 function roleIndex(overrides: Partial<CatalogModelRoleIndex> = {}): CatalogModelRoleIndex {
   return {
     nonChatRoles: new Map(),
     chatModelIds: new Set(),
     hasChatRoleData: true,
+    completionFlags: new Map(),
     ...overrides,
   };
 }
 
+describe('resolveCompletionModelFlags', () => {
+  it('reports the markers the provider set, in a stable order', () => {
+    expect(
+      resolveCompletionModelFlags({
+        supports_estimate_token_counter: true,
+        requires_lead_in_generation: true,
+      }),
+    ).toEqual(['requiresLeadInGeneration', 'supportsEstimateTokenCounter']);
+  });
+
+  it('treats absent and false alike, and an absent detail as no markers', () => {
+    expect(
+      resolveCompletionModelFlags({
+        requires_lead_in_generation: false,
+        supports_cumulative_context: undefined,
+      }),
+    ).toEqual([]);
+    expect(resolveCompletionModelFlags(undefined)).toEqual([]);
+  });
+});
+
 describe('getPublishedCatalogModelIds', () => {
-  it('drops provider-advertised non-chat service ids while keeping every real model', () => {
+  it('drops ids the provider marks as editor completion models', () => {
+    const index = roleIndex({
+      completionFlags: new Map([
+        ['chat_20706', ALL_COMPLETION_FLAGS],
+        ['tab_flash_lite_preview', ALL_COMPLETION_FLAGS],
+      ]),
+    });
     const discovered = [
       'gemini-3-flash',
       'claude-sonnet-4-5',
       'chat_20706',
-      'chat_23310',
       'tab_flash_lite_preview',
-      'tab_jump_flash_lite_preview',
     ];
 
-    expect(getPublishedCatalogModelIds({}, discovered)).toEqual([
+    expect(getPublishedCatalogModelIds({}, discovered, index)).toEqual([
       'claude-sonnet-4-5',
       'gemini-3-flash',
     ]);
   });
 
+  it('drops a single marker as readily as the full set', () => {
+    const index = roleIndex({
+      completionFlags: new Map([['tab_next_preview', ['requiresLeadInGeneration']]]),
+    });
+
+    expect(getPublishedCatalogModelIds({}, ['gemini-3-flash', 'tab_next_preview'], index)).toEqual([
+      'gemini-3-flash',
+    ]);
+  });
+
+  it('still drops the unprobed ids the dated table names', () => {
+    const discovered = ['gemini-3-flash', 'chat_23310', 'tab_jump_flash_lite_preview'];
+
+    expect(getPublishedCatalogModelIds({}, discovered)).toEqual(['gemini-3-flash']);
+  });
+
   it('is case-insensitive and does not affect the raw routing engine list', () => {
-    expect(isNonChatCatalogModelId('Chat_20706')).toBe(true);
+    expect(isNonChatCatalogModelId('Chat_23310')).toBe(true);
     expect(isNonChatCatalogModelId('gemini-3-flash')).toBe(false);
 
-    expect(getAllDynamicModels({}, ['chat_20706', 'gemini-3-flash'])).toEqual([
-      'chat_20706',
+    expect(getAllDynamicModels({}, ['chat_23310', 'gemini-3-flash'])).toEqual([
+      'chat_23310',
       'gemini-3-flash',
     ]);
   });
@@ -50,7 +100,7 @@ describe('getPublishedCatalogModelIds', () => {
         {
           'custom-fast': 'gemini-3.1-flash-lite',
         },
-        ['chat_20706', 'gemini-3-flash'],
+        ['chat_23310', 'gemini-3-flash'],
       ),
     ).toEqual(['custom-fast', 'gemini-3-flash']);
   });
@@ -82,9 +132,9 @@ describe('getPublishedCatalogModelIds', () => {
         ['gemini-3.1-flash-lite', ['commit_message', 'mquery', 'web_search']],
         ['gemini-3.1-flash-image', ['image_generation']],
         ['chat_20706', ['tab']],
-        ['chat_23310', ['tab']],
       ]),
       chatModelIds: new Set(['gemini-3-pro', 'claude-sonnet-4-5']),
+      completionFlags: new Map([['chat_20706', ALL_COMPLETION_FLAGS]]),
     });
 
     expect(
@@ -97,7 +147,6 @@ describe('getPublishedCatalogModelIds', () => {
           'gemini-3.1-flash-lite',
           'gemini-3.1-flash-image',
           'chat_20706',
-          'chat_23310',
         ],
         index,
       ),
@@ -133,7 +182,7 @@ describe('getPublishedCatalogModelIds', () => {
   });
 
   it('behaves exactly as before when no role information is available', () => {
-    const discovered = ['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview'];
+    const discovered = ['gemini-3-flash', 'chat_23310', 'tab_flash_lite_preview'];
 
     expect(
       getPublishedCatalogModelIds({}, discovered, roleIndex({ hasChatRoleData: false })),
@@ -142,7 +191,7 @@ describe('getPublishedCatalogModelIds', () => {
 });
 
 describe('getUnpublishedCatalogModelIds', () => {
-  it('does not report a role member the id table does not withhold', () => {
+  it('does not report a role member no rule withholds', () => {
     const index = roleIndex({
       nonChatRoles: new Map([['tab_lite_preview', ['tab']]]),
       chatModelIds: new Set(['gemini-3-flash']),
@@ -153,21 +202,17 @@ describe('getUnpublishedCatalogModelIds', () => {
     );
   });
 
-  it('names the id table as the reason with no role data available', () => {
-    const index = roleIndex({ chatModelIds: new Set(['gemini-3-flash']) });
-
-    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'chat_20706'], index)).toEqual([
-      { id: 'chat_20706', reason: 'override', roles: [] },
-    ]);
-  });
-
-  it('reports the provider roles of an id the table withheld', () => {
+  it('names the matching markers and reports the roles as corroboration', () => {
     const index = roleIndex({
       nonChatRoles: new Map([
         ['chat_20706', ['tab']],
         ['gemini-3-flash', ['command']],
       ]),
       chatModelIds: new Set(['gemini-3-pro']),
+      completionFlags: new Map([
+        ['chat_20706', ALL_COMPLETION_FLAGS],
+        ['tab_flash_lite_preview', ['supportsCumulativeContext']],
+      ]),
     });
 
     expect(
@@ -176,8 +221,26 @@ describe('getUnpublishedCatalogModelIds', () => {
         index,
       ),
     ).toEqual([
-      { id: 'chat_20706', reason: 'override', roles: ['tab'] },
-      { id: 'tab_flash_lite_preview', reason: 'override', roles: [] },
+      {
+        id: 'chat_20706',
+        reason: 'completion_model',
+        flags: ALL_COMPLETION_FLAGS,
+        roles: ['tab'],
+      },
+      {
+        id: 'tab_flash_lite_preview',
+        reason: 'completion_model',
+        flags: ['supportsCumulativeContext'],
+        roles: [],
+      },
+    ]);
+  });
+
+  it('names the dated table for an id no marker classifies', () => {
+    const index = roleIndex({ chatModelIds: new Set(['gemini-3-flash']) });
+
+    expect(getUnpublishedCatalogModelIds(['gemini-3-flash', 'chat_23310'], index)).toEqual([
+      { id: 'chat_23310', reason: 'override', flags: [], roles: [] },
     ]);
   });
 });
