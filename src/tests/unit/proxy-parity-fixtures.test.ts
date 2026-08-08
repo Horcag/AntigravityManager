@@ -9,6 +9,7 @@ import { GenerationConstraintsService } from '../../modules/proxy-gateway/server
 import { ProxyRetryService } from '../../modules/proxy-gateway/server/modules/shared/services/proxy-retry.service';
 import { ModelAvailabilityService } from '../../modules/proxy-gateway/server/modules/shared/services/model-availability.service';
 import { ModelRoutingService } from '../../modules/proxy-gateway/server/modules/shared/services/model-routing.service';
+import { ModelRouteMissJournalService } from '../../modules/proxy-gateway/server/modules/shared/services/model-route-miss-journal.service';
 import { SignatureStore } from '../../modules/proxy-gateway/antigravity/SignatureStore';
 
 const mockAccountLeaseService = {
@@ -29,6 +30,7 @@ class TestableProxyService extends ProxyService {
       new GenerationConstraintsService(mockAccountLeaseService as any),
       new ProxyRetryService(mockAccountLeaseService as any, new ModelAvailabilityService()),
       new ModelRoutingService(),
+      new ModelRouteMissJournalService(),
       new SignatureStore(),
     );
   }
