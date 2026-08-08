@@ -22,6 +22,13 @@ import {
   isImageProxyExampleModel,
 } from '@/modules/proxy-gateway/components/proxy-example-models';
 import {
+  MODEL_ALIAS_PRESETS,
+  applyModelAliasPresetPlan,
+  planModelAliasPreset,
+  type ModelAliasPreset,
+  type ModelAliasPresetPlan,
+} from '@/modules/proxy-gateway/components/model-alias-presets';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -141,6 +148,8 @@ function ProxyPage() {
   // Local state for proxyConfig editing
   const [proxyConfig, setProxyConfig] = useState<ProxyConfig | undefined>(undefined);
   const [isRegenerateDialogOpen, setIsRegenerateDialogOpen] = useState(false);
+  const [presetTarget, setPresetTarget] = useState('');
+  const [presetPlan, setPresetPlan] = useState<ModelAliasPresetPlan | null>(null);
   const [showKey, setShowKey] = useState(false);
   const [gatewayError, setGatewayError] = useState<string | null>(null);
 
@@ -293,6 +302,30 @@ function ProxyPage() {
       ...proxyConfig,
       model_aliases: proxyConfig.model_aliases.filter((_, routeIndex) => routeIndex !== index),
     });
+  };
+
+  const previewModelAliasPreset = (preset: ModelAliasPreset) => {
+    if (!proxyConfig || !presetTarget.trim()) {
+      return;
+    }
+    setPresetPlan(planModelAliasPreset(preset, presetTarget, proxyConfig.model_aliases));
+  };
+
+  const applyPresetPlan = () => {
+    if (!proxyConfig || !presetPlan || presetPlan.additions.length === 0) {
+      return;
+    }
+    updateProxyConfig({
+      ...proxyConfig,
+      model_aliases: applyModelAliasPresetPlan(proxyConfig.model_aliases, presetPlan),
+    });
+    toast({
+      title: t('proxy.mapping.presets_applied', {
+        added: presetPlan.additions.length,
+        skipped: presetPlan.conflicts.length,
+      }),
+    });
+    setPresetPlan(null);
   };
 
   const createAliasFromMiss = (model: string) => {
@@ -751,6 +784,46 @@ print(response.choices[0].message.content)`;
             </div>
           )}
 
+          <div className="space-y-3 rounded-lg border p-4">
+            <div>
+              <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                {t('proxy.mapping.presets_title')}
+              </div>
+              <div className="text-xs text-gray-500">{t('proxy.mapping.presets_description')}</div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+              <div className="space-y-2">
+                <Label>{t('proxy.mapping.presets_target')}</Label>
+                <Select value={presetTarget} onValueChange={setPresetTarget}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder={t('proxy.mapping.presets_target_placeholder')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelAliasTargets.map((target) => (
+                      <SelectItem key={target} value={target}>
+                        {target}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {MODEL_ALIAS_PRESETS.map((preset) => (
+                  <Button
+                    key={preset.id}
+                    variant="outline"
+                    size="sm"
+                    disabled={!presetTarget || modelAliasTargets.length === 0}
+                    onClick={() => previewModelAliasPreset(preset)}
+                  >
+                    <Plus size={14} className="mr-2" />
+                    {t(`proxy.mapping.presets_pack_${preset.id}`)} ({preset.aliases.length})
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="space-y-2">
             <div className="text-sm font-medium text-gray-700 dark:text-gray-300">
               {t('proxy.mapping.recent_misses_title')}
@@ -857,6 +930,78 @@ print(response.choices[0].message.content)`;
               </Button>
             </div>
           </div>
+
+          <Dialog
+            open={presetPlan !== null}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPresetPlan(null);
+              }
+            }}
+          >
+            <DialogContent>
+              {presetPlan ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>
+                      {t('proxy.mapping.presets_preview_title', {
+                        pack: t(`proxy.mapping.presets_pack_${presetPlan.presetId}`),
+                      })}
+                    </DialogTitle>
+                    <DialogDescription>
+                      {t('proxy.mapping.presets_preview_description', {
+                        target: presetPlan.target,
+                      })}
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-4 text-sm">
+                    <div className="space-y-1">
+                      <div className="font-medium text-gray-800 dark:text-gray-100">
+                        {t('proxy.mapping.presets_preview_additions')} (
+                        {presetPlan.additions.length})
+                      </div>
+                      {presetPlan.additions.length > 0 ? (
+                        <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                          {presetPlan.additions.map((row) => (
+                            <li key={row.alias}>
+                              {row.alias} → {row.target}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="text-gray-500">
+                          {t('proxy.mapping.presets_preview_nothing')}
+                        </div>
+                      )}
+                    </div>
+                    {presetPlan.conflicts.length > 0 ? (
+                      <div className="space-y-1">
+                        <div className="font-medium text-gray-800 dark:text-gray-100">
+                          {t('proxy.mapping.presets_preview_conflicts')} (
+                          {presetPlan.conflicts.length})
+                        </div>
+                        <ul className="space-y-1 text-gray-600 dark:text-gray-300">
+                          {presetPlan.conflicts.map((conflict) => (
+                            <li key={conflict.alias}>
+                              {conflict.alias} → {conflict.existingTarget}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                  <DialogFooter>
+                    <Button variant="outline" onClick={() => setPresetPlan(null)}>
+                      {t('proxy.mapping.presets_cancel')}
+                    </Button>
+                    <Button disabled={presetPlan.additions.length === 0} onClick={applyPresetPlan}>
+                      {t('proxy.mapping.presets_apply')}
+                    </Button>
+                  </DialogFooter>
+                </>
+              ) : null}
+            </DialogContent>
+          </Dialog>
         </CardContent>
       </Card>
 
