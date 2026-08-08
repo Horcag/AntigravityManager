@@ -174,7 +174,6 @@ function parseEffort(effort: string | undefined): ModelVariantTier | null {
 function resolveNonVariantModel(
   model: string,
   tier: ModelVariantTier,
-  budgetTokens: number | undefined,
 ): ResolvedModelVariant | null {
   if (model === 'gpt-oss-120b-medium') {
     return {
@@ -212,7 +211,7 @@ export function resolveModelVariant(input: ResolveModelVariantInput): ResolvedMo
       Object.prototype.hasOwnProperty.call(candidate.aliases, model),
   );
   if (!family) {
-    return resolveNonVariantModel(model, requestedTier, input.budgetTokens);
+    return resolveNonVariantModel(model, requestedTier);
   }
 
   const aliasPolicy = family.aliases[model];
