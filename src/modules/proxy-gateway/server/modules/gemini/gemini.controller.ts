@@ -17,7 +17,7 @@ import { Observable } from 'rxjs';
 import { ProxyGuard } from '../../guards/proxy.guard';
 import { ProxyService } from '../../proxy.service';
 import { GeminiRequest } from '../../common/interfaces/request-interfaces';
-import { getAllDynamicModels } from '../../../antigravity/ModelMapping';
+import { getPublishedCatalogModelIds } from '../../../antigravity/ModelMapping';
 import { AccountLeaseService } from '../account-lease/account-lease.service';
 import { validateGeminiSystemInstruction, sanitizeUpstreamError } from './gemini-wire';
 import {
@@ -226,7 +226,7 @@ export class GeminiController {
   }
 
   private buildGeminiModelList(): GeminiModelMetadata[] {
-    const dynamicModelIds = getAllDynamicModels(
+    const dynamicModelIds = getPublishedCatalogModelIds(
       {},
       this.accountLeaseService?.getAllCollectedModels(),
     );

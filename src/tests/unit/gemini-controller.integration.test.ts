@@ -79,6 +79,25 @@ describe('GeminiController Integration (Fastify Injection Wire Suite)', () => {
     );
   });
 
+  it('GET /v1beta/models excludes provider-advertised non-chat service ids', async () => {
+    mockAccountLeaseService.getAllCollectedModels.mockReturnValueOnce(
+      new Set(['gemini-3-flash', 'chat_20706', 'tab_flash_lite_preview']),
+    );
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models',
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.models).toEqual([expect.objectContaining({ name: 'models/gemini-3-flash' })]);
+    expect(body.models).not.toContainEqual(expect.objectContaining({ name: 'models/chat_20706' }));
+    expect(body.models).not.toContainEqual(
+      expect.objectContaining({ name: 'models/tab_flash_lite_preview' }),
+    );
+  });
+
   it('returns native Gemini model route identity headers', async () => {
     mockProxyService.handleGeminiGenerateContent.mockResolvedValueOnce(
       attachModelRouteMetadata(

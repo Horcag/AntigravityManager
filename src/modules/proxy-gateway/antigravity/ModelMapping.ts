@@ -41,6 +41,37 @@ export function getSupportedModels(): string[] {
   return [...PUBLIC_SUPPORTED_MODELS];
 }
 
+/**
+ * 2026-08-08 (live, 0.19.17-local1, kanban-37): the provider's discovery
+ * response (`v1internal:fetchAvailableModels`) lists these ids next to real
+ * chat models, but they are not chat models:
+ *  - chat_20706, chat_23310 -> every /v1/messages and /v1/chat/completions
+ *    call against them returns 400 "Request contains an invalid argument."
+ *  - tab_flash_lite_preview, tab_jump_flash_lite_preview -> answer 200, but
+ *    they are Antigravity IDE's internal tab-completion functions, not
+ *    models a user would deliberately select in a client.
+ * The response's typed shape (ModelInfoRaw in GoogleAPIService.ts,
+ * QuotaApiResponse in antigravity/types.ts: quotaInfo/displayName/
+ * supportsImages/supportsThinking/thinkingBudget/recommended/maxTokens/
+ * maxOutputTokens/supportedMimeTypes) carries no type, capability, or
+ * generation-method field distinguishing them from chat models, and this
+ * task could not make a live discovery call to check the untyped payload
+ * directly. So, per the task instructions, this is an explicit id table in
+ * the shape of MODEL_FAMILY_SAFETY_OVERRIDES (ClaudeRequestMapper.ts)
+ * rather than a property-based filter. These ids stay visible, unfiltered,
+ * in GET /v1/model-routes so it stays evident the provider advertised them.
+ */
+export const NON_CHAT_CATALOG_MODEL_IDS: ReadonlySet<string> = new Set([
+  'chat_20706',
+  'chat_23310',
+  'tab_flash_lite_preview',
+  'tab_jump_flash_lite_preview',
+]);
+
+export function isNonChatCatalogModelId(modelId: string): boolean {
+  return NON_CHAT_CATALOG_MODEL_IDS.has(modelId.trim().toLowerCase());
+}
+
 export function getAllDynamicModels(
   customMapping: Record<string, string> = {},
   dynamicModelIds?: Iterable<string>,
@@ -60,11 +91,26 @@ export function getAllDynamicModels(
   return [...modelIds].sort();
 }
 
+/**
+ * The catalog actually published to clients: every discovered/configured
+ * model id, minus the ones in NON_CHAT_CATALOG_MODEL_IDS. Shared by both the
+ * OpenAI-compatible (/v1/models) and Gemini-native (/v1beta/models) listing
+ * endpoints so they stay in sync.
+ */
+export function getPublishedCatalogModelIds(
+  customMapping: Record<string, string> = {},
+  dynamicModelIds?: Iterable<string>,
+): string[] {
+  return getAllDynamicModels(customMapping, dynamicModelIds).filter(
+    (modelId) => !isNonChatCatalogModelId(modelId),
+  );
+}
+
 export function getOpenAICompatibleModels(
   customMapping: Record<string, string> = {},
   dynamicModelIds?: Iterable<string>,
 ): string[] {
-  return getAllDynamicModels(customMapping, dynamicModelIds);
+  return getPublishedCatalogModelIds(customMapping, dynamicModelIds);
 }
 
 export function mapClaudeModelToGemini(input: string): string {
