@@ -24,6 +24,8 @@ vi.mock('@nestjs/core', () => ({
   NestFactory: {
     create: mockCreate,
   },
+  // ProxyModule registers a global filter through this token.
+  APP_FILTER: 'APP_FILTER',
 }));
 
 vi.mock('@nestjs/platform-fastify', () => ({

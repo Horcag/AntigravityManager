@@ -15,6 +15,7 @@ import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
 import { normalizeFunctionCallArgs } from './function-call-args';
+import { StopSequenceScanner } from './stop-sequences';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
@@ -26,6 +27,8 @@ export interface StreamingSignatureState extends SignatureContext {
 export interface StreamingMappingOptions {
   /** See `ResponseMappingOptions.webSearch`; same gate, streaming side. */
   webSearch?: boolean;
+  /** See `ResponseMappingOptions.stopSequences`; same enforcement, streaming side. */
+  stopSequences?: readonly string[];
 }
 
 interface SignatureManager {
@@ -64,7 +67,12 @@ export class StreamingState {
   private usedTool: boolean = false;
   private signatures: SignatureManagerImpl = new SignatureManagerImpl();
   private latestResponseSignature: string | null = null;
-  public trailingSignature: string | null = null;
+  /**
+   * See `NonStreamingProcessor.pendingSignature`: a `thoughtSignature` from a
+   * part with no thought text, held for the next block that may carry one and
+   * never emitted as a block of its own.
+   */
+  public pendingSignature: string | null = null;
 
   // Web Search / Grounding buffers, filled by captureGrounding as frames arrive
   public webSearchQuery: string | null = null;
@@ -74,12 +82,31 @@ export class StreamingState {
   private streamedText = '';
 
   private parseErrorCount: number = 0;
+  private readonly stopScanner: StopSequenceScanner;
 
   constructor(
     public readonly signatureState?: StreamingSignatureState,
     private readonly fallbackModel: string = '',
     private readonly options: StreamingMappingOptions = {},
-  ) {}
+  ) {
+    this.stopScanner = new StopSequenceScanner(options.stopSequences ?? []);
+  }
+
+  /**
+   * Feeds answer text through the stop-sequence scanner.
+   *
+   * Returns the part of `text` that may be streamed now; the caller emits
+   * nothing when this is empty. See `stop-sequences.ts` for why the cut is made
+   * here rather than upstream.
+   */
+  public admitText(text: string): string {
+    return this.stopScanner.push(text);
+  }
+
+  /** True once a stop sequence has fired and no further content may be emitted. */
+  public get stopped(): boolean {
+    return this.stopScanner.stopped;
+  }
 
   /**
    * Records the grounding a streamed candidate carried.
@@ -168,6 +195,16 @@ export class StreamingState {
 
     const chunks: string[] = [];
 
+    // Text held back as a possible stop-sequence head belongs to the block being
+    // closed, whatever closes it — the end of the stream or the block that
+    // follows it. A sequence never straddles a block boundary.
+    if (this.blockType === 'Text') {
+      const withheld = this.stopScanner.flush();
+      if (withheld) {
+        chunks.push(this.emitDelta('text_delta', { text: withheld }));
+      }
+    }
+
     // Send stored signature when Thinking block ends
     if (this.blockType === 'Thinking' && this.signatures.hasPending()) {
       const sig = this.signatures.consume();
@@ -210,33 +247,12 @@ export class StreamingState {
     }
     const chunks: string[] = [];
 
-    // Close last block
+    // Close last block; `endBlock` releases any withheld tail it owns.
     chunks.push(...this.endBlock());
 
-    // Process trailing signature (PDF 776-778 logic)
-    if (this.trailingSignature) {
-      const sig = this.trailingSignature;
-      this.trailingSignature = null;
-
-      chunks.push(
-        this.emit('content_block_start', {
-          type: 'content_block_start',
-          index: this.blockIndex,
-          content_block: { type: 'thinking', thinking: '' },
-        }),
-      );
-
-      chunks.push(this.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.emitDelta('signature_delta', { signature: sig }));
-
-      chunks.push(
-        this.emit('content_block_stop', {
-          type: 'content_block_stop',
-          index: this.blockIndex,
-        }),
-      );
-      this.blockIndex++;
-    }
+    // An unattached signature is dropped rather than emitted as an empty
+    // thinking block, matching the non-streaming mapper.
+    this.pendingSignature = null;
 
     const webSearchResultSet = this.options.webSearch ? toWebSearchResultSet(this.grounding) : null;
 
@@ -269,8 +285,13 @@ export class StreamingState {
     }
 
     // Determine stop reason
+    const firedStopSequence = this.stopScanner.sequence;
     let stopReason = 'end_turn';
-    if (this.usedTool) {
+    if (firedStopSequence !== null) {
+      // See the non-streaming mapper: the generation was cut here, so this
+      // outranks whatever the upstream reported about a longer answer.
+      stopReason = 'stop_sequence';
+    } else if (this.usedTool) {
       stopReason = 'tool_use';
     } else if (finishReason === 'MAX_TOKENS') {
       stopReason = 'max_tokens';
@@ -310,7 +331,7 @@ export class StreamingState {
     chunks.push(
       this.emit('message_delta', {
         type: 'message_delta',
-        delta: { stop_reason: stopReason, stop_sequence: null },
+        delta: { stop_reason: stopReason, stop_sequence: firedStopSequence },
         usage: usage,
       }),
     );
@@ -481,24 +502,21 @@ export class PartProcessor {
 
   public process(part: GeminiPart): string[] {
     const chunks: string[] = [];
+    // Nothing the model produced after a stop sequence fired is part of the
+    // answer the caller asked for.
+    if (this.state.stopped) {
+      return chunks;
+    }
     const signature = decodeSignature(part.thoughtSignature ?? part.thought_signature);
     this.state.recordResponseSignature(signature);
 
     // 1. Handle FunctionCall
     if (part.functionCall) {
-      // Handle trailing signature logic
-      if (this.state.trailingSignature) {
-        chunks.push(...this.state.endBlock());
-        const trailingSig = this.state.trailingSignature;
-        this.state.trailingSignature = null;
-
-        chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
-        chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-        chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-        chunks.push(...this.state.endBlock());
-      }
-
-      chunks.push(...this.processFunctionCall(part.functionCall, signature));
+      // A signature banked from a text-only part belongs to the call it
+      // preceded; the tool_use block carries it.
+      const carried = signature ?? this.state.pendingSignature ?? undefined;
+      this.state.pendingSignature = null;
+      chunks.push(...this.processFunctionCall(part.functionCall, carried));
       return chunks;
     }
 
@@ -526,18 +544,6 @@ export class PartProcessor {
   private processThinking(text: string, signature?: string): string[] {
     const chunks: string[] = [];
 
-    // Handle trailing signature
-    if (this.state.trailingSignature) {
-      chunks.push(...this.state.endBlock());
-      const trailingSig = this.state.trailingSignature;
-      this.state.trailingSignature = null;
-
-      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-      chunks.push(...this.state.endBlock());
-    }
-
     if (this.state.currentBlockType() !== 'Thinking') {
       chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
     }
@@ -546,7 +552,11 @@ export class PartProcessor {
       chunks.push(this.state.emitDelta('thinking_delta', { thinking: text }));
     }
 
-    this.state.storeSignature(signature);
+    // A banked signature is adopted by this thought, which is a block that may
+    // legally carry one, rather than being emitted as a block of its own.
+    const carried = signature ?? this.state.pendingSignature ?? undefined;
+    this.state.pendingSignature = null;
+    this.state.storeSignature(carried);
 
     return chunks;
   }
@@ -554,47 +564,28 @@ export class PartProcessor {
   private processText(text: string, signature?: string): string[] {
     const chunks: string[] = [];
 
-    // Empty text with signature -> store trailing
+    // Empty text carrying only a signature: bank it, emit nothing.
     if (!text) {
       if (signature) {
-        this.state.trailingSignature = signature;
+        this.state.pendingSignature = signature;
       }
       return chunks;
     }
 
-    // Handle trailing signature
-    if (this.state.trailingSignature) {
-      chunks.push(...this.state.endBlock());
-      const trailingSig = this.state.trailingSignature;
-      this.state.trailingSignature = null;
-
-      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: trailingSig }));
-      chunks.push(...this.state.endBlock());
-    }
-
-    // Non-empty text with signature -> flush immediately
+    // A text part's signature is banked, not turned into a block: it would land
+    // after the text it is meant to precede and carry no thought content.
     if (signature) {
-      // Start text block
-      chunks.push(...this.state.startBlock('Text', { type: 'text', text: '' }));
-      chunks.push(this.state.emitDelta('text_delta', { text: text }));
-      chunks.push(...this.state.endBlock());
-
-      // Empty thinking block for signature
-      chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
-      chunks.push(this.state.emitDelta('thinking_delta', { thinking: '' }));
-      chunks.push(this.state.emitDelta('signature_delta', { signature: signature }));
-      chunks.push(...this.state.endBlock());
-
-      return chunks;
+      this.state.pendingSignature = signature;
     }
 
     // Normal text
+    const admitted = this.state.admitText(text);
     if (this.state.currentBlockType() !== 'Text') {
       chunks.push(...this.state.startBlock('Text', { type: 'text', text: '' }));
     }
-    chunks.push(this.state.emitDelta('text_delta', { text: text }));
+    if (admitted) {
+      chunks.push(this.state.emitDelta('text_delta', { text: admitted }));
+    }
 
     return chunks;
   }

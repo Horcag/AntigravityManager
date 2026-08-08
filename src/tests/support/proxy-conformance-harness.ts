@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Module } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { APP_FILTER, NestFactory } from '@nestjs/core';
 import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
 import fastifyMultipart from '@fastify/multipart';
 
@@ -24,8 +24,12 @@ import {
 } from '@/modules/proxy-gateway/server/modules/files/file-content-store.service';
 import { GeminiFilesController } from '@/modules/proxy-gateway/server/modules/files/gemini-files.controller';
 import { ClientFilesController } from '@/modules/proxy-gateway/server/modules/files/client-files.controller';
+import { OpenAIResponsesStoreController } from '@/modules/proxy-gateway/server/modules/openai/responses/openai-responses-store.controller';
+import { OpenAIResponsesSessionService } from '@/modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.service';
+import { OpenAIResponsesSessionStore } from '@/modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
 import { OPENAI_MEDIA_MULTIPART_OPTIONS } from '@/modules/proxy-gateway/server/modules/openai/media/openai-media-request-contract';
 import type { FileStoreOptions } from '@/modules/proxy-gateway/server/modules/files/file-store.types';
+import { UnimplementedRouteFilter } from '@/modules/proxy-gateway/server/common/unimplemented-route.filter';
 
 export interface ProxyConformanceService {
   handleAnthropicCountTokens(request: unknown): unknown;
@@ -122,9 +126,21 @@ export async function createProxyConformanceApp(
   };
 
   @Module({
-    controllers: [ProxyController, GeminiController, GeminiFilesController, ClientFilesController],
+    controllers: [
+      ProxyController,
+      GeminiController,
+      GeminiFilesController,
+      ClientFilesController,
+      OpenAIResponsesStoreController,
+    ],
     providers: [
+      // Registered exactly as ProxyModule does, so conformance tests see the
+      // same answer for an unserved route the real server gives.
+      { provide: APP_FILTER, useClass: UnimplementedRouteFilter },
       { provide: ProxyService, useValue: options.proxyService },
+      // The in-memory store the controller already falls back to when no
+      // durable service is bound, so behaviour is unchanged by binding it.
+      { provide: OpenAIResponsesSessionService, useValue: OpenAIResponsesSessionStore },
       { provide: AccountLeaseService, useValue: accountLeaseService },
       { provide: ProxyGuard, useValue: { canActivate: () => true } },
       { provide: IMAGE_QUOTA_REFRESH, useValue: async () => undefined },

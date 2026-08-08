@@ -269,7 +269,6 @@ export function transformClaudeRequestIn(
     requestConfig,
     innerRequest: reorderedInnerRequest,
     projectId,
-    sessionId: claudeReq.metadata?.user_id,
     userAgent,
   });
 
@@ -301,11 +300,21 @@ function resolveSafetySettings(model: string): SafetySetting[] {
   return SAFETY_SETTINGS.filter((setting) => !omitted.has(setting.category));
 }
 
+/**
+ * Builds the `v1internal` envelope.
+ *
+ * Deliberately carries no session identifier. An Anthropic client's advisory
+ * `metadata.user_id` (and the OpenAI `user` field that lands in the same place)
+ * used to be forwarded as `sessionId`, which the provider answers with
+ * `Invalid JSON payload received. Unknown name "sessionId": Cannot find field.`
+ * — a 400 on the whole request. No accepted destination for it exists on this
+ * transport, and both fields are advisory in their own APIs, so they are
+ * dropped here rather than costing the caller the request.
+ */
 function buildInternalRequestBody(params: {
   requestConfig: ResolvedRequestConfig;
   innerRequest: GeminiInternalRequest['request'];
   projectId?: string;
-  sessionId?: string;
   userAgent?: string;
 }): GeminiInternalRequest {
   const normalizedProjectId = params.projectId?.trim();
@@ -318,7 +327,6 @@ function buildInternalRequestBody(params: {
     userAgent: params.userAgent?.trim() || buildUserAgent(discoveryVersion),
     requestType: isAgentRequest ? 'agent' : 'image_gen',
     ...(isAgentRequest ? { enabledCreditTypes: [...AGENT_CREDIT_TYPES] } : {}),
-    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     requestId: createOfficialRequestId(),
   };
 
@@ -710,7 +718,6 @@ export interface WebSearchSubRequestParams {
   model: string;
   projectId?: string;
   userAgent?: string;
-  sessionId?: string;
 }
 
 /**
@@ -736,7 +743,6 @@ export function buildWebSearchSubRequest(params: WebSearchSubRequestParams): Gem
       contents: [{ role: 'user', parts: [{ text: params.query }] }],
     },
     projectId: params.projectId,
-    sessionId: params.sessionId,
     userAgent: params.userAgent,
   });
 }
@@ -1185,9 +1191,10 @@ function buildGenerationConfig(
   if (claudeReq.max_tokens !== undefined) {
     config.maxOutputTokens = claudeReq.max_tokens;
   }
-  if (claudeReq.stop_sequences && claudeReq.stop_sequences.length > 0) {
-    config.stopSequences = [...claudeReq.stop_sequences];
-  }
+  // `stop_sequences` is deliberately not forwarded on the Anthropic surface: the
+  // provider strips the matched sequence and reports the same finish reason as a
+  // natural ending, which makes `stop_reason: "stop_sequence"` unreportable. The
+  // response mappers cut the text instead. See `stop-sequences.ts`.
   return config;
 }
 
