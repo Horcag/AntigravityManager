@@ -11,6 +11,7 @@ import {
 } from '../modules/proxy-gateway/server/proxy.controller';
 import { ProxyService } from '../modules/proxy-gateway/server/proxy.service';
 import { attachOpenAIResponsesWebSocketServer } from '../modules/proxy-gateway/server/modules/openai/responses/openai-responses-websocket.server';
+import { OpenAIResponsesSessionService } from '../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.service';
 import {
   extractApiKeyToken,
   hasConfiguredApiKey,
@@ -94,6 +95,9 @@ export async function bootstrapNestServer(config: ProxyConfig): Promise<NestServ
     const proxyController = app.get(ProxyController);
     const proxyService = app.get(ProxyService);
     detachResponsesWebSocketServer = attachOpenAIResponsesWebSocketServer(app.getHttpServer(), {
+      // Share the durable store so a chain started over HTTP continues over the
+      // socket, and survives the restart in between.
+      sessionStore: app.get(OpenAIResponsesSessionService),
       isAuthorized: (request) => {
         const configuredApiKey = getConfiguredApiKey();
         return (

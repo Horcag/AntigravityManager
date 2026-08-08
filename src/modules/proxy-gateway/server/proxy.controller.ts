@@ -37,7 +37,9 @@ import {
   normalizeOpenAIResponsesInputItems,
   OpenAIResponsesSessionStore,
   type OpenAIResponsesSession,
+  type OpenAIResponsesSessionStoreLike,
 } from './modules/openai/responses/openai-responses-session.store';
+import { OpenAIResponsesSessionService } from './modules/openai/responses/openai-responses-session.service';
 import {
   normalizeOpenAIChatRequest,
   normalizeOpenAICompletionRequest,
@@ -49,6 +51,7 @@ import {
   normalizeAnthropicMessagesRequest,
 } from './modules/anthropic/anthropic-request-contract';
 import {
+  buildResponseNotFoundError,
   mapResponsesReasoningEffort,
   normalizeOpenAIResponsesRequest,
   type ResponsesRequestBody,
@@ -142,7 +145,18 @@ export class ProxyController {
     @Optional()
     @Inject(ModelRouteMissJournalService)
     private readonly modelRouteMissJournalService?: ModelRouteMissJournalService,
+    @Optional()
+    @Inject(OpenAIResponsesSessionService)
+    private readonly responsesSessionStore?: OpenAIResponsesSessionStoreLike,
   ) {}
+
+  /**
+   * The durable store when the module wired one, otherwise the in-memory
+   * default so a directly constructed controller still works.
+   */
+  private get responsesSessions(): OpenAIResponsesSessionStoreLike {
+    return this.responsesSessionStore ?? OpenAIResponsesSessionStore;
+  }
 
   @Get('models')
   listModels(@Res() res: FastifyReply) {
@@ -244,14 +258,9 @@ export class ProxyController {
     try {
       const prepared = this.prepareResponsesRequest(body);
       if (!prepared) {
-        res.status(HttpStatus.BAD_REQUEST).send({
-          error: {
-            code: 'previous_response_not_found',
-            message: `Unknown or expired previous_response_id: ${body.previous_response_id}`,
-            param: 'previous_response_id',
-            type: 'invalid_request_error',
-          },
-        });
+        res
+          .status(HttpStatus.NOT_FOUND)
+          .send(buildResponseNotFoundError(String(body.previous_response_id ?? '')));
         return;
       }
       const result = await this.proxyService.handleChatCompletions(prepared.request, 'responses');
@@ -624,7 +633,7 @@ export class ProxyController {
     const normalizedBody = normalizeOpenAIResponsesRequest(body);
     const currentInputItems = this.normalizeResponsesInputItems(normalizedBody.input);
     const previousSession = normalizedBody.previous_response_id
-      ? OpenAIResponsesSessionStore.get(normalizedBody.previous_response_id)
+      ? this.responsesSessions.get(normalizedBody.previous_response_id)
       : null;
     if (normalizedBody.previous_response_id && !previousSession) {
       return null;
@@ -734,9 +743,10 @@ export class ProxyController {
       return;
     }
 
-    OpenAIResponsesSessionStore.save(responseId, {
+    this.responsesSessions.save(responseId, {
       ...session,
       inputItems: [...session.inputItems, ...output],
+      response: responseRecord ?? undefined,
     });
   }
 

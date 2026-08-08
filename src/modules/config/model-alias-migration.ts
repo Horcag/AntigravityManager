@@ -28,6 +28,21 @@ function legacyEntries(value: unknown): Array<[string, unknown]> {
   return Object.entries(value);
 }
 
+/**
+ * Whether the legacy mapping tables still carry routes.
+ *
+ * This is the only condition under which the migration changes anything, so it
+ * is also the only condition under which the file on disk should be rewritten:
+ * a configuration already in the new shape must be left exactly as the user
+ * wrote it.
+ */
+export function hasLegacyModelAliasMappings(proxy: ProxyConfig): boolean {
+  return (
+    legacyEntries(proxy.custom_mapping).length > 0 ||
+    legacyEntries(proxy.anthropic_mapping).length > 0
+  );
+}
+
 export function migrateLegacyModelAliases(proxy: ProxyConfig): ProxyConfig {
   const routes: ModelAliasRoute[] = [];
   const seenAliases = new Set<string>();
