@@ -4,12 +4,15 @@ import { AppConfig, DEFAULT_APP_CONFIG } from '@/modules/config/types';
 import { getAgentDir } from '@/shared/platform/paths';
 import { logger } from '@/shared/logging/logger';
 import { migrateLegacyModelAliases } from '@/modules/config/model-alias-migration';
+import { persistMigratedModelAliases } from '@/modules/config/model-alias-migration-persistence';
+import { writeJsonFileAtomic } from '@/shared/persistence/atomic-json-file';
 
 const CONFIG_FILENAME = 'gui_config.json';
 
 export class ConfigManager {
   private static cachedConfig: AppConfig | null = null;
   private static saveQueue: Promise<void> = Promise.resolve();
+  private static modelAliasMigrationWritten = false;
 
   private static getConfigPath(): string {
     const managerDataDir = getAgentDir();
@@ -60,6 +63,7 @@ export class ConfigManager {
       // In JSON it's object
 
       this.cachedConfig = merged;
+      this.writeMigratedModelAliasesOnce(configPath, raw?.proxy, merged);
       return merged;
     } catch (e) {
       logger.error('Config: Failed to load config', e);
@@ -78,13 +82,14 @@ export class ConfigManager {
       ...config,
       proxy: migrateLegacyModelAliases(config.proxy),
     };
-    const content = JSON.stringify(migratedConfig, null, 2);
 
     this.saveQueue = this.saveQueue
       .catch(() => undefined)
       .then(async () => {
-        await fs.promises.writeFile(configPath, content, 'utf-8');
+        await writeJsonFileAtomic(configPath, migratedConfig, { space: 2 });
         this.cachedConfig = migratedConfig;
+        // The saved file is already in the new shape.
+        this.modelAliasMigrationWritten = true;
         logger.info(`Config: Saved to ${configPath}`);
       })
       .catch((e) => {
@@ -93,5 +98,34 @@ export class ConfigManager {
       });
 
     return this.saveQueue;
+  }
+
+  /** Resolves once every queued config write has settled. */
+  static async flushPendingWrites(): Promise<void> {
+    await this.saveQueue.catch(() => undefined);
+  }
+
+  /**
+   * Flushes the alias migration to disk the first time a load performs one.
+   *
+   * Loading is synchronous and must not be slowed down or made failable by a
+   * write, so the rewrite is queued behind any pending save. It is attempted at
+   * most once per process; the real idempotency guarantee is that a rewritten
+   * file no longer carries legacy mappings, so a later load skips it outright.
+   */
+  private static writeMigratedModelAliasesOnce(
+    configPath: string,
+    rawProxy: unknown,
+    migratedConfig: AppConfig,
+  ): void {
+    if (this.modelAliasMigrationWritten) {
+      return;
+    }
+    this.modelAliasMigrationWritten = true;
+
+    this.saveQueue = this.saveQueue
+      .catch(() => undefined)
+      .then(() => persistMigratedModelAliases(configPath, rawProxy, migratedConfig))
+      .then(() => undefined);
   }
 }

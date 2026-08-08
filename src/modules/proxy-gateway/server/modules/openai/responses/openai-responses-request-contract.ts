@@ -98,6 +98,37 @@ export function normalizeOpenAIResponsesRequest(
   };
 }
 
+export interface OpenAIResponsesErrorBody {
+  error: {
+    code: string;
+    message: string;
+    param: string;
+    type: string;
+  };
+}
+
+/**
+ * The error OpenAI returns when a response id is unknown or has aged out.
+ *
+ * Clients treat this as a protocol failure and start a fresh conversation
+ * deliberately; silently serving an empty chain instead reads to the user as
+ * the assistant losing its memory.
+ */
+export function buildResponseNotFoundError(
+  responseId: string,
+  param: 'id' | 'previous_response_id' = 'previous_response_id',
+): OpenAIResponsesErrorBody {
+  const subject = param === 'id' ? 'Response' : 'Previous response';
+  return {
+    error: {
+      code: param === 'id' ? 'response_not_found' : 'previous_response_not_found',
+      message: `${subject} with id '${responseId}' not found.`,
+      param,
+      type: 'invalid_request_error',
+    },
+  };
+}
+
 export function mapResponsesReasoningEffort(
   effort: string | undefined,
 ): 'low' | 'medium' | 'high' | undefined {

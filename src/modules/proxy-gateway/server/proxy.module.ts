@@ -18,11 +18,13 @@ import {
 import { ProxyRetryService } from './modules/shared/services/proxy-retry.service';
 import { GenerationConstraintsService } from './modules/shared/services/generation-constraints.service';
 import { CountTokensService } from './modules/shared/services/count-tokens.service';
+import { OpenAIResponsesSessionService } from './modules/openai/responses/openai-responses-session.service';
+import { OpenAIResponsesStoreController } from './modules/openai/responses/openai-responses-store.controller';
 import { SignatureStore } from '../antigravity/SignatureStore';
 
 @Module({
   imports: [],
-  controllers: [ProxyController, GeminiController],
+  controllers: [ProxyController, OpenAIResponsesStoreController, GeminiController],
   providers: [
     RateLimitTrackerService,
     ModelRoutingService,
@@ -32,6 +34,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     },
     ModelAvailabilityService,
     ModelRouteMissJournalService,
+    OpenAIResponsesSessionService,
     AccountLeaseService,
     ProxyRetryService,
     GenerationConstraintsService,
@@ -55,6 +58,7 @@ import { SignatureStore } from '../antigravity/SignatureStore';
     SignatureStore,
     ProxyService,
     CountTokensService,
+    OpenAIResponsesSessionService,
   ],
 })
 export class ProxyModule {}
