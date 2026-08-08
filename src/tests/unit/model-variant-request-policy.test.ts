@@ -162,15 +162,9 @@ describe('applyAnthropicModelVariant', () => {
     expect(applied.request).toMatchObject({
       model: 'claude-sonnet-4-6-thinking',
       max_tokens: 8,
-      thinking: {
-        type: 'enabled',
-        budget_tokens: 1024,
-      },
     });
-    expect(applied.variant).toMatchObject({
-      canonicalModel: 'claude-sonnet-4-6',
-      model: 'claude-sonnet-4-6',
-    });
+    expect(applied.variant).toBeNull();
+    expect(applied.request).not.toHaveProperty('thinking');
   });
 });
 

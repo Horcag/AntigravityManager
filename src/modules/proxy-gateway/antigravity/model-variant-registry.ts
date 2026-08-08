@@ -28,7 +28,6 @@ interface ModelVariantFamily {
 }
 
 const CLAUDE_OPUS_4_6_THINKING_BUDGET = 1024;
-const CLAUDE_SONNET_4_6_THINKING_BUDGET = 1024;
 
 const CLAUDE_OPUS_4_6_MIN_THINKING_BUDGET = CLAUDE_OPUS_4_6_THINKING_BUDGET;
 const CLAUDE_OPUS_4_6_VARIANTS: Record<
@@ -54,36 +53,6 @@ const CLAUDE_OPUS_4_6_VARIANTS: Record<
   high: {
     model: 'claude-opus-4-6-thinking',
     thinkingBudget: CLAUDE_OPUS_4_6_THINKING_BUDGET,
-    maxOutputTokens: 64000,
-    includeThoughts: true,
-    preserveClientBudget: true,
-    supportsTools: true,
-  },
-};
-
-const CLAUDE_SONNET_4_6_VARIANTS: Record<
-  ModelVariantTier,
-  Omit<ResolvedModelVariant, 'canonicalModel' | 'tier'>
-> = {
-  low: {
-    model: 'claude-sonnet-4-6',
-    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
-    maxOutputTokens: 64000,
-    includeThoughts: true,
-    preserveClientBudget: true,
-    supportsTools: true,
-  },
-  medium: {
-    model: 'claude-sonnet-4-6',
-    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
-    maxOutputTokens: 64000,
-    includeThoughts: true,
-    preserveClientBudget: true,
-    supportsTools: true,
-  },
-  high: {
-    model: 'claude-sonnet-4-6',
-    thinkingBudget: CLAUDE_SONNET_4_6_THINKING_BUDGET,
     maxOutputTokens: 64000,
     includeThoughts: true,
     preserveClientBudget: true,
@@ -180,14 +149,6 @@ const MODEL_VARIANT_FAMILIES: ModelVariantFamily[] = [
     },
     minimumThinkingBudget: CLAUDE_OPUS_4_6_MIN_THINKING_BUDGET,
     preserveClientThinkingBudget: true,
-  },
-  {
-    canonicalModel: 'claude-sonnet-4-6',
-    variants: CLAUDE_SONNET_4_6_VARIANTS,
-    aliases: {
-      'claude-sonnet-4-6-thinking': 'tier',
-      'claude-sonnet-4-6': 'tier',
-    },
   },
 ];
 
