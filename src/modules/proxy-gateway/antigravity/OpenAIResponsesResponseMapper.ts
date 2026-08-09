@@ -6,6 +6,7 @@ import { optimizeApplyPatch, validateApplyPatchV4A } from './ApplyPatchPreflight
 import { extractCustomToolInput, isCustomToolCall } from './CustomToolCall';
 import { toOpenAIResponsesUsage } from './OpenAIUsageMapper';
 import { buildOpenAIWebSearchCallItem, getWebSearchResults } from './openai-web-search';
+import { toOpenAIResponsesIncompleteReason } from '../server/modules/openai/responses/openai-responses-incomplete-reason';
 
 type ResponsesToolOutput =
   | {
@@ -118,7 +119,7 @@ export function toOpenAIResponsesResponse(
   const reasoningContent = choice?.message.reasoning_content;
   const refusal = choice?.message.refusal;
   const responseId = toOpenAIResponsesId(response.id);
-  const incompleteReason = toIncompleteReason(choice?.finish_reason);
+  const incompleteReason = toOpenAIResponsesIncompleteReason(choice?.finish_reason);
   const status: ResponsesOutputStatus = incompleteReason ? 'incomplete' : 'completed';
 
   if (typeof reasoningContent === 'string' && reasoningContent.length > 0) {
@@ -207,22 +208,4 @@ export function toOpenAIResponsesResponse(
     type: 'response',
     usage: response.usage ? toOpenAIResponsesUsage(response.usage) : undefined,
   };
-}
-
-function toIncompleteReason(finishReason: string | null | undefined): string | null {
-  const normalized = finishReason?.toLowerCase();
-  if (normalized === 'length' || normalized === 'max_tokens') {
-    return 'max_output_tokens';
-  }
-  if (
-    normalized === 'content_filter' ||
-    normalized === 'safety' ||
-    normalized === 'recitation' ||
-    normalized === 'blocklist' ||
-    normalized === 'prohibited_content' ||
-    normalized === 'spii'
-  ) {
-    return 'content_filter';
-  }
-  return null;
 }

@@ -9,7 +9,11 @@
  * codebase have drifted apart before.
  */
 
-import { NATURAL_PROMPT, RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS } from './fixtures.mjs';
+import {
+  LONG_PROMPT,
+  NATURAL_PROMPT,
+  RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS,
+} from './fixtures.mjs';
 
 const RESPONSES_PATH = '/v1/responses';
 
@@ -70,7 +74,7 @@ export const OPENAI_RESPONSES_CHECKS = [
     async run(ctx, t) {
       const cap = RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS;
       const response = await ctx.json(RESPONSES_PATH, {
-        body: { model: ctx.model, input: NATURAL_PROMPT, max_output_tokens: cap },
+        body: { model: ctx.model, input: LONG_PROMPT, max_output_tokens: cap },
       });
       t.equal(response.status, 200, 'HTTP status');
       t.equal(response.json?.status, 'incomplete', 'status');
@@ -165,7 +169,7 @@ export const OPENAI_RESPONSES_CHECKS = [
       const response = await ctx.sse(RESPONSES_PATH, {
         body: {
           model: ctx.model,
-          input: NATURAL_PROMPT,
+          input: LONG_PROMPT,
           max_output_tokens: cap,
           stream: true,
         },

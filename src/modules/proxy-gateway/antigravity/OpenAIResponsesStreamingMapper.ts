@@ -23,6 +23,7 @@ import {
   parsePotentialWrappedReasoning,
   type OpenAIResponsesReasoningOutputItem,
 } from '../server/modules/openai/responses/openai-responses-reasoning-events';
+import { toOpenAIResponsesIncompleteReason } from '../server/modules/openai/responses/openai-responses-incomplete-reason';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: {
@@ -251,7 +252,7 @@ export class OpenAIResponsesStreamingMapper {
     }
 
     this.completed = true;
-    const incompleteReason = toIncompleteReason(finishReason);
+    const incompleteReason = toOpenAIResponsesIncompleteReason(finishReason);
     const status = incompleteReason ? 'incomplete' : 'completed';
     const events = [
       ...this.closeThought(status),
@@ -665,22 +666,4 @@ export class OpenAIResponsesStreamingMapper {
     this.sequenceNumber += 1;
     return `event: ${type}\ndata: ${JSON.stringify(sequencedEvent)}\n\n`;
   }
-}
-
-function toIncompleteReason(finishReason: string | null | undefined): string | null {
-  const normalized = finishReason?.toUpperCase();
-  if (normalized === 'MAX_TOKENS' || normalized === 'LENGTH') {
-    return 'max_output_tokens';
-  }
-  if (
-    normalized === 'CONTENT_FILTER' ||
-    normalized === 'SAFETY' ||
-    normalized === 'RECITATION' ||
-    normalized === 'BLOCKLIST' ||
-    normalized === 'PROHIBITED_CONTENT' ||
-    normalized === 'SPII'
-  ) {
-    return 'content_filter';
-  }
-  return null;
 }
