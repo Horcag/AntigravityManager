@@ -54,6 +54,9 @@ describe('OpenAI media HTTP wire contract', () => {
     server.post('/v1/audio/transcriptions', async (request, reply) =>
       controller.audioTranscriptions(request, reply),
     );
+    server.post('/v1/audio/translations', async (request, reply) =>
+      controller.audioTranslations(request, reply),
+    );
     await server.ready();
   });
 
@@ -249,6 +252,76 @@ describe('OpenAI media HTTP wire contract', () => {
     expect(stream.body).toContain('"delta":"transcript"');
     expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledTimes(2);
     expect(proxyService.handleGeminiStreamGenerateContent).toHaveBeenCalledOnce();
+  });
+
+  it('translates audio through a transcription pass and returns English text', async () => {
+    proxyService.handleGeminiGenerateContent
+      .mockResolvedValueOnce({
+        candidates: [{ content: { parts: [{ text: 'Bonjour' }] } }],
+      })
+      .mockResolvedValueOnce({
+        candidates: [{ content: { parts: [{ text: 'Hello' }] } }],
+      });
+    const boundary = '----agm-wire-audio-translation';
+    const response = await server.inject({
+      method: 'POST',
+      url: '/v1/audio/translations',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload: createMultipartPayload(
+        boundary,
+        [
+          ['model', 'gemini-3-flash'],
+          ['prompt', 'Keep the greeting concise.'],
+          ['temperature', '0.2'],
+        ],
+        [{ bytes: wav, field: 'file', filename: 'bonjour.wav', mimeType: 'audio/wav' }],
+      ),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ text: 'Hello' });
+    expect(proxyService.handleGeminiGenerateContent).toHaveBeenCalledTimes(2);
+    expect(proxyService.handleGeminiGenerateContent.mock.calls[0][1]).toMatchObject({
+      contents: [
+        {
+          parts: expect.arrayContaining([
+            expect.objectContaining({ inlineData: expect.any(Object) }),
+          ]),
+        },
+      ],
+    });
+    expect(proxyService.handleGeminiGenerateContent.mock.calls[1][1]).toMatchObject({
+      contents: [
+        {
+          parts: [
+            expect.objectContaining({
+              text: expect.stringContaining('Translate the following transcription into English'),
+            }),
+          ],
+        },
+      ],
+      generationConfig: { temperature: 0.2 },
+    });
+  });
+
+  it('returns an OpenAI error envelope when translation input is unsupported', async () => {
+    const boundary = '----agm-wire-audio-translation-format';
+    const response = await server.inject({
+      method: 'POST',
+      url: '/v1/audio/translations',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload: createMultipartPayload(
+        boundary,
+        [['response_format', 'verbose_json']],
+        [{ bytes: wav, field: 'file', filename: 'speech.wav', mimeType: 'audio/wav' }],
+      ),
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: { code: 'unsupported_parameter', param: 'response_format' },
+    });
+    expect(response.body).not.toContain('Cannot POST');
   });
 
   it('preserves an upstream audio failure instead of relabeling it as bad multipart', async () => {

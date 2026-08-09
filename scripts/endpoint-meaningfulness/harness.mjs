@@ -201,6 +201,41 @@ export class CheckContext {
     };
   }
 
+  /** Sends one multipart file without setting a JSON content type over its boundary. */
+  async multipart(path, { fields, file }) {
+    const body = new FormData();
+    for (const [name, value] of Object.entries(fields)) {
+      body.append(name, value);
+    }
+    body.append(file.field, new Blob([file.bytes], { type: file.mimeType }), file.filename);
+
+    this.upstreamCalls += 1;
+    const { 'content-type': _contentType, ...headers } = this.headers();
+    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers,
+      body,
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const text = await response.text();
+    let json;
+    let parseError;
+    try {
+      json = text.length > 0 ? JSON.parse(text) : undefined;
+    } catch (error) {
+      parseError = error instanceof Error ? error.message : String(error);
+    }
+
+    return {
+      status: response.status,
+      headers: response.headers,
+      contentType: response.headers.get('content-type') ?? '',
+      text,
+      json,
+      parseError,
+    };
+  }
+
   async send(path, init) {
     const body = init.body === undefined ? undefined : JSON.stringify(init.body);
     if (init.countsAsUpstreamCall !== false) {
