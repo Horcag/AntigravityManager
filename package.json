@@ -19,6 +19,7 @@
     "make": "electron-forge make",
     "updater:serve-feed": "node scripts/serve-local-update-feed.mjs",
     "audit:size:win32:x64": "node scripts/audit-windows-x64-size.mjs",
+    "check:endpoints": "node scripts/check-endpoint-meaningfulness.mjs",
     "publish": "electron-forge publish",
     "lint": "eslint .",
     "format": "prettier --check .",
