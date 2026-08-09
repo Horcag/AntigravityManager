@@ -299,7 +299,6 @@ describe('adapter conformance defects (kanban #50)', () => {
       'vector_stores',
       'fine_tuning/jobs',
       'audio/speech',
-      'audio/translations',
     ])('answers POST /v1/%s in the OpenAI error shape', async (route) => {
       const response = await app.inject({ method: 'POST', url: `/v1/${route}`, payload: {} });
 

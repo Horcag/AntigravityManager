@@ -10,6 +10,7 @@ interface ProxyRouteOptions {
 
 const LARGE_INLINE_MEDIA_ROUTES = new Set([
   '/v1/audio/transcriptions',
+  '/v1/audio/translations',
   '/v1/chat/completions',
   '/v1/images/edits',
   '/v1/images/generations',

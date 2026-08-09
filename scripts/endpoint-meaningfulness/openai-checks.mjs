@@ -10,6 +10,7 @@
 import {
   CITY_JSON_PROMPT,
   CITY_SCHEMA,
+  FRENCH_OUI_AUDIO,
   SCHEMA_MAX_OUTPUT_TOKENS,
   LONG_PROMPT,
   NATURAL_PROMPT,
@@ -24,6 +25,8 @@ import {
 import { validateAgainstSchema } from './schema.mjs';
 
 const CHAT_PATH = '/v1/chat/completions';
+const AUDIO_TRANSLATIONS_PATH = '/v1/audio/translations';
+const ENGLISH_AFFIRMATION = /\b(?:affirmative|certainly|yeah|yes)\b/iu;
 
 function chatBody(ctx, overrides) {
   return {
@@ -35,6 +38,10 @@ function chatBody(ctx, overrides) {
 
 function firstChoice(body) {
   return Array.isArray(body?.choices) ? body.choices[0] : undefined;
+}
+
+function isEnglishAffirmation(value) {
+  return typeof value === 'string' && ENGLISH_AFFIRMATION.test(value);
 }
 
 /** Shared shape assertions so every chat check states the same expectations. */
@@ -221,6 +228,39 @@ export const OPENAI_CHECKS = [
         `the model under test is advertised`,
         `data[] contains ${ctx.model}`,
         body.data.map((entry) => entry?.id),
+      );
+    },
+  },
+  {
+    name: 'openai.audio.translations.english',
+    surface: 'openai',
+    endpoint: `POST ${AUDIO_TRANSLATIONS_PATH}`,
+    title: 'a non-English recording is translated into non-empty English text',
+    upstreamCalls: 2,
+    async run(ctx, t) {
+      const response = await ctx.multipart(AUDIO_TRANSLATIONS_PATH, {
+        fields: {
+          model: ctx.model,
+          prompt: 'Translate the recording to English only.',
+          response_format: 'json',
+          temperature: '0',
+        },
+        file: {
+          bytes: FRENCH_OUI_AUDIO,
+          field: 'file',
+          filename: 'french-oui.mp3',
+          mimeType: 'audio/mpeg',
+        },
+      });
+
+      t.equal(response.status, 200, 'HTTP status');
+      t.equal(response.parseError, undefined, 'response parses as JSON');
+      t.nonEmptyString(response.json?.text, 'text');
+      t.ok(
+        isEnglishAffirmation(response.json?.text),
+        'text is an English affirmation rather than the French recording',
+        'English text such as yes, yeah, certainly or affirmative',
+        response.json?.text,
       );
     },
   },

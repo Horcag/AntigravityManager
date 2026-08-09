@@ -22,10 +22,12 @@ import { applyResponseHeaders, writeSseResponse } from '../../../common/sse-resp
 import { inheritUpstreamBackpressure } from '../../../common/stream-backpressure';
 import type {
   GeminiRequest,
+  GeminiResponse,
   OpenAIChatRequest,
   OpenAIContentPart,
 } from '../../../common/interfaces/request-interfaces';
 import { parseAudioMultipartRequest } from './audio-multipart-request';
+import { createAudioTranslationRequest } from './audio-translation';
 import {
   IMAGE_GENERATION_ROLE,
   resolveImageGenerationModel,
@@ -210,30 +212,7 @@ export class OpenAIMediaController {
       return;
     }
 
-    const instruction = [
-      body.prompt ?? 'Transcribe the provided speech audio accurately.',
-      body.language ? `The expected language is ${body.language}.` : undefined,
-    ]
-      .filter((value): value is string => Boolean(value))
-      .join('\n');
-    const request: GeminiRequest = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: instruction },
-            {
-              inlineData: {
-                data: body.file.data,
-                mimeType: body.file.mimeType,
-              },
-            },
-          ],
-        },
-      ],
-      generationConfig:
-        body.temperature === undefined ? undefined : { temperature: body.temperature },
-    };
+    const request = this.createAudioTranscriptionRequest(body);
 
     try {
       if (body.stream) {
@@ -255,11 +234,7 @@ export class OpenAIMediaController {
 
       const result = await this.proxyService.handleGeminiGenerateContent(body.model, request);
       applyResponseHeaders(res, this.getModelRouteResponseHeaders(result, body.model));
-      const transcript =
-        result.candidates?.[0]?.content?.parts
-          ?.map((part) => part.text ?? '')
-          .join('')
-          .trim() ?? '';
+      const transcript = this.getAudioText(result);
 
       if (body.response_format === 'text') {
         res.header('Content-Type', 'text/plain; charset=utf-8');
@@ -267,6 +242,61 @@ export class OpenAIMediaController {
       } else {
         res.status(HttpStatus.OK).send({ text: transcript });
       }
+    } catch (error) {
+      sendOpenAIErrorResponse(this.logger, res, path, error);
+    }
+  }
+
+  @Post('audio/translations')
+  async audioTranslations(@Req() req: FastifyRequest, @Res() res: FastifyReply) {
+    const path = '/v1/audio/translations';
+    if (!this.hasMultipartBoundary(req)) {
+      sendOpenAIErrorResponse(
+        this.logger,
+        res,
+        path,
+        new OpenAIMediaRequestError(
+          'Expected a multipart/form-data request with a valid boundary',
+          'content-type',
+        ),
+      );
+      return;
+    }
+
+    let body;
+    try {
+      body = await parseAudioMultipartRequest(req);
+      if (body.stream) {
+        throw new OpenAIMediaRequestError(
+          'stream is unsupported for audio translations because the translation begins after transcription completes',
+          'stream',
+          'unsupported_parameter',
+        );
+      }
+    } catch (error) {
+      sendOpenAIErrorResponse(this.logger, res, path, normalizeMultipartMediaError(error));
+      return;
+    }
+
+    try {
+      const transcriptionResult = await this.proxyService.handleGeminiGenerateContent(
+        body.model,
+        this.createAudioTranscriptionRequest(body),
+      );
+      const translationResult = await this.proxyService.handleGeminiGenerateContent(
+        body.model,
+        createAudioTranslationRequest(body, this.getAudioText(transcriptionResult)),
+      );
+      applyResponseHeaders(res, this.getModelRouteResponseHeaders(translationResult, body.model));
+      const translation = this.getAudioText(translationResult);
+
+      if (body.response_format === 'text') {
+        res.header('Content-Type', 'text/plain; charset=utf-8');
+        res.status(HttpStatus.OK).send(translation);
+        return;
+      }
+
+      res.status(HttpStatus.OK).send({ text: translation });
     } catch (error) {
       sendOpenAIErrorResponse(this.logger, res, path, error);
     }
@@ -312,6 +342,45 @@ export class OpenAIMediaController {
     requestedModel: string | undefined,
   ): Record<string, string> {
     return buildModelRouteResponseHeaders(result, requestedModel, this.modelRoutingService);
+  }
+
+  private createAudioTranscriptionRequest(
+    body: Awaited<ReturnType<typeof parseAudioMultipartRequest>>,
+  ): GeminiRequest {
+    const instruction = [
+      body.prompt ?? 'Transcribe the provided speech audio accurately.',
+      body.language ? `The expected language is ${body.language}.` : undefined,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join('\n');
+
+    return {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: instruction },
+            {
+              inlineData: {
+                data: body.file.data,
+                mimeType: body.file.mimeType,
+              },
+            },
+          ],
+        },
+      ],
+      generationConfig:
+        body.temperature === undefined ? undefined : { temperature: body.temperature },
+    };
+  }
+
+  private getAudioText(result: GeminiResponse): string {
+    return (
+      result.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text ?? '')
+        .join('')
+        .trim() ?? ''
+    );
   }
 
   private hasMultipartBoundary(req: FastifyRequest): boolean {
