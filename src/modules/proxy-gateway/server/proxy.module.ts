@@ -37,6 +37,8 @@ import { AnthropicMessageBatchesController } from './modules/batch/anthropic-mes
 import { GeminiOperationsController } from './modules/batch/gemini-operations.controller';
 import { AnthropicCompleteController } from './modules/anthropic/anthropic-complete.controller';
 import { ClientModelsController } from './modules/models/client-models.controller';
+import { OpenAIUploadsController } from './modules/uploads/openai-uploads.controller';
+import { OpenAIUploadsService } from './modules/uploads/openai-uploads.service';
 import {
   getV1InternalPassthroughControllers,
   V1InternalPassthroughService,
@@ -51,6 +53,7 @@ import {
     GeminiController,
     GeminiFilesController,
     ClientFilesController,
+    OpenAIUploadsController,
     OpenAIBatchesController,
     AnthropicMessageBatchesController,
     GeminiOperationsController,
@@ -70,6 +73,7 @@ import {
       useFactory: resolveFileStoreOptions,
     },
     FileContentStore,
+    OpenAIUploadsService,
     {
       provide: BATCH_RUNNER_OPTIONS,
       useFactory: resolveBatchRunnerOptions,

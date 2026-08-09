@@ -81,6 +81,21 @@ function assertErrorEnvelope(t, body, { expectedCode, expectedParam } = {}) {
   }
 }
 
+async function multipartPart(ctx, path, bytes) {
+  const form = new FormData();
+  form.set('data', new Blob([bytes], { type: 'application/octet-stream' }), 'part.bin');
+  const headers = ctx.headers();
+  delete headers['content-type'];
+  const response = await ctx.fetchImpl(`${ctx.baseUrl}${path}`, {
+    method: 'POST',
+    headers,
+    body: form,
+    signal: AbortSignal.timeout(ctx.timeoutMs),
+  });
+  const text = await response.text();
+  return { status: response.status, json: text ? JSON.parse(text) : undefined };
+}
+
 function markTruncatedJsonFailure(t, parsed, finishReason, usage, endpointLabel) {
   if (!parsed.error) {
     return false;
@@ -100,6 +115,85 @@ function markTruncatedJsonFailure(t, parsed, finishReason, usage, endpointLabel)
 }
 
 export const OPENAI_CHECKS = [
+  {
+    name: 'openai.uploads.round-trip',
+    surface: 'openai',
+    endpoint: 'POST /v1/uploads, POST /v1/uploads/{id}/parts, POST /v1/uploads/{id}/complete',
+    title: 'two parts complete into a Files API handle with byte-identical content',
+    upstreamCalls: 0,
+    async run(ctx, t) {
+      const source = Buffer.from('upload parts retain their requested order', 'utf8');
+      const splitAt = 13;
+      const first = source.subarray(0, splitAt);
+      const second = source.subarray(splitAt);
+      const created = await ctx.json('/v1/uploads', {
+        body: {
+          bytes: source.length,
+          filename: 'meaningfulness-upload.txt',
+          purpose: 'user_data',
+          mime_type: 'text/plain',
+        },
+        countsAsUpstreamCall: false,
+      });
+      t.equal(created.status, 200, 'create HTTP status');
+      t.nonEmptyString(created.json?.id, 'upload id');
+      t.ok(
+        /^upload_[0-9a-f]{32}$/u.test(created.json?.id ?? ''),
+        'upload id prefix',
+        'upload_…',
+        created.json?.id,
+      );
+      t.equal(created.json?.status, 'pending', 'upload status');
+      t.positiveInteger(created.json?.expires_at, 'upload expires_at');
+
+      const secondPart = await multipartPart(ctx, `/v1/uploads/${created.json?.id}/parts`, second);
+      const firstPart = await multipartPart(ctx, `/v1/uploads/${created.json?.id}/parts`, first);
+      t.equal(secondPart.status, 200, 'second part HTTP status');
+      t.equal(firstPart.status, 200, 'first part HTTP status');
+      t.equal(secondPart.json?.object, 'upload.part', 'second part object');
+      t.nonEmptyString(firstPart.json?.id, 'first part id');
+
+      const completed = await ctx.json(`/v1/uploads/${created.json?.id}/complete`, {
+        body: { part_ids: [firstPart.json?.id, secondPart.json?.id] },
+        countsAsUpstreamCall: false,
+      });
+      t.equal(completed.status, 200, 'complete HTTP status');
+      t.equal(completed.json?.object, 'file', 'completed object');
+      t.equal(completed.json?.bytes, source.length, 'completed bytes');
+
+      const contentResponse = await ctx.fetchImpl(
+        `${ctx.baseUrl}/v1/files/${completed.json?.id}/content`,
+        { headers: ctx.headers(), signal: AbortSignal.timeout(ctx.timeoutMs) },
+      );
+      const content = Buffer.from(await contentResponse.arrayBuffer());
+      t.equal(contentResponse.status, 200, 'file content HTTP status');
+      t.equal(content.equals(source), true, 'completed content matches source');
+
+      const mismatched = await ctx.json('/v1/uploads', {
+        body: {
+          bytes: source.length + 1,
+          filename: 'wrong-length.txt',
+          purpose: 'user_data',
+          mime_type: 'text/plain',
+        },
+        countsAsUpstreamCall: false,
+      });
+      const mismatchPart = await multipartPart(
+        ctx,
+        `/v1/uploads/${mismatched.json?.id}/parts`,
+        source,
+      );
+      const rejected = await ctx.json(`/v1/uploads/${mismatched.json?.id}/complete`, {
+        body: { part_ids: [mismatchPart.json?.id] },
+        countsAsUpstreamCall: false,
+      });
+      t.equal(rejected.status, 400, 'wrong bytes HTTP status');
+      assertErrorEnvelope(t, rejected.json, {
+        expectedCode: 'byte_count_mismatch',
+        expectedParam: 'bytes',
+      });
+    },
+  },
   {
     name: 'openai.models.catalog',
     surface: 'openai',

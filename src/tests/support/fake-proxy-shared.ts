@@ -71,8 +71,48 @@ export interface FakeProxyRequest {
   query: URLSearchParams;
   headers: Record<string, string | string[] | undefined>;
   body: Record<string, unknown>;
+  /** Untouched bytes, for the endpoints whose payload is not JSON. */
+  rawBody: Buffer;
   defects: ReadonlySet<FakeProxyDefect>;
   storedChatCompletions: Map<string, Record<string, unknown>>;
+}
+
+/**
+ * Pulls the single file payload out of a `multipart/form-data` body.
+ *
+ * Deliberately minimal: the fake only ever receives one part, written by
+ * `FormData` in the checker, so finding the blank line that ends the part
+ * headers and trimming the trailing boundary is enough. It is not a general
+ * parser and should not grow into one.
+ */
+/** Blank line that ends a multipart part's headers. */
+const SEPARATOR = Buffer.from([0x0d, 0x0a, 0x0d, 0x0a]);
+
+export function extractMultipartPayload(
+  raw: Buffer,
+  contentType: string | undefined,
+): Buffer | null {
+  const boundaryMatch = /boundary=(?:"([^"]+)"|([^;]+))/u.exec(contentType ?? '');
+  const boundary = boundaryMatch?.[1] ?? boundaryMatch?.[2];
+  if (!boundary) {
+    return null;
+  }
+
+  const delimiter = Buffer.from(`--${boundary}`, 'utf8');
+  const start = raw.indexOf(delimiter);
+  if (start < 0) {
+    return null;
+  }
+
+  const headerEnd = raw.indexOf(SEPARATOR, start);
+  if (headerEnd < 0) {
+    return null;
+  }
+
+  const payloadStart = headerEnd + SEPARATOR.length;
+  const closing = raw.indexOf(delimiter, payloadStart);
+  const payloadEnd = closing < 0 ? raw.length : closing - 2;
+  return raw.subarray(payloadStart, Math.max(payloadStart, payloadEnd));
 }
 
 export interface FakeProxyReply {

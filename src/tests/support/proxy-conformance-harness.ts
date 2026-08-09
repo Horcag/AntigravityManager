@@ -40,6 +40,8 @@ import { AnthropicMessageBatchesController } from '@/modules/proxy-gateway/serve
 import { GeminiOperationsController } from '@/modules/proxy-gateway/server/modules/batch/gemini-operations.controller';
 import { AnthropicCompleteController } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-complete.controller';
 import { ClientModelsController } from '@/modules/proxy-gateway/server/modules/models/client-models.controller';
+import { OpenAIUploadsController } from '@/modules/proxy-gateway/server/modules/uploads/openai-uploads.controller';
+import { OpenAIUploadsService } from '@/modules/proxy-gateway/server/modules/uploads/openai-uploads.service';
 import type { BatchRunnerOptions } from '@/modules/proxy-gateway/server/modules/batch/batch-job.types';
 import { registerProxyBodyParsers } from '@/server/proxy-body-parsers';
 
@@ -146,6 +148,7 @@ export async function createProxyConformanceApp(
       GeminiController,
       GeminiFilesController,
       ClientFilesController,
+      OpenAIUploadsController,
       OpenAIResponsesStoreController,
       OpenAIBatchesController,
       AnthropicMessageBatchesController,
@@ -173,6 +176,7 @@ export async function createProxyConformanceApp(
       { provide: ModelAvailabilityService, useValue: { getSnapshot: () => [] } },
       { provide: FILE_STORE_OPTIONS, useValue: fileStoreOptions },
       FileContentStore,
+      OpenAIUploadsService,
     ],
   })
   class ProxyConformanceModule {}

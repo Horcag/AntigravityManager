@@ -296,7 +296,6 @@ describe('adapter conformance defects (kanban #50)', () => {
     it.each([
       'embeddings',
       'moderations',
-      'uploads',
       'vector_stores',
       'fine_tuning/jobs',
       'audio/speech',
