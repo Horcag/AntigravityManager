@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * Endpoint meaningfulness checker.
  *
@@ -30,6 +29,13 @@
  *
  * Exit codes: 0 when every check passed or was inconclusive, 1 when any check
  * failed or threw, 2 on a usage error.
+ *
+ * No `#!` line, deliberately. Node strips a shebang, but the test runner's
+ * transform does not: with one present, importing this module from
+ * `endpoint-meaningfulness-checker.test.ts` threw `SyntaxError: Invalid or
+ * unexpected token` at the first character on one checkout while passing on a
+ * byte-identical one. Nothing else under `scripts/` carries a shebang either, and
+ * the npm alias already runs this through `node`.
  */
 
 import { pathToFileURL } from 'node:url';
