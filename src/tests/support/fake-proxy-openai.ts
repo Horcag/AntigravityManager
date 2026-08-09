@@ -31,6 +31,7 @@ interface ChatBody {
   input?: string;
   stop?: string[];
   store?: boolean;
+  logit_bias?: Record<string, number>;
   stream?: boolean;
   stream_options?: { include_usage?: boolean };
   tools?: { function?: { name?: string } }[];
@@ -147,6 +148,20 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
 }
 
 function handleChatCompletions(request: FakeProxyRequest, body: ChatBody): FakeProxyReply {
+  if (body.logit_bias !== undefined) {
+    // The transport cannot express per-token bias, so the real proxy refuses it
+    // by name; the fake mirrors that because a check asserts the shape of the
+    // refusal, not just its status.
+    return jsonReply(400, {
+      error: {
+        message: 'logit_bias is not available through the Gemini transport',
+        type: 'invalid_request_error',
+        param: 'logit_bias',
+        code: 'unsupported_parameter',
+      },
+    });
+  }
+
   if (body.store === true && body.stream === true) {
     return jsonReply(400, {
       error: {

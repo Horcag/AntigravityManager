@@ -606,6 +606,29 @@ export const OPENAI_CHECKS = [
     },
   },
   {
+    name: 'openai.rejects-unsupported-parameter',
+    surface: 'openai',
+    endpoint: `POST ${CHAT_PATH}`,
+    title: 'an unsupported parameter is rejected explicitly with param and code',
+    upstreamCalls: 0,
+    async run(ctx, t) {
+      // `logit_bias` rather than something the proxy might grow support for:
+      // this check previously used `store`, and when stored completions were
+      // implemented the check was deleted instead of repointed, taking the
+      // whole assertion with it. A parameter the transport cannot express keeps
+      // the check honest for longer.
+      const response = await ctx.json(CHAT_PATH, {
+        body: chatBody(ctx, { logit_bias: { 1: 1 } }),
+        countsAsUpstreamCall: false,
+      });
+      t.equal(response.status, 400, 'HTTP status');
+      assertErrorEnvelope(t, response.json, {
+        expectedCode: 'unsupported_parameter',
+        expectedParam: 'logit_bias',
+      });
+    },
+  },
+  {
     name: 'openai.rejects-unknown-model',
     surface: 'openai',
     endpoint: `POST ${CHAT_PATH}`,
