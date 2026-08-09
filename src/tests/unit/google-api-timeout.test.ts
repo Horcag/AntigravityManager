@@ -712,8 +712,14 @@ describe('GoogleAPIService fetchQuota fallback policy', () => {
           models: {
             'gemini-3-flash': {
               quotaInfo: { remainingFraction: 0.65, resetTime: '2026-05-05T00:00:00Z' },
+              maxTokens: 32768,
+              maxOutputTokens: 16384,
+              supportsThinking: true,
+              thinkingBudget: 8192,
+              supportsImages: true,
               supportsPdf: true,
               supportsVideo: false,
+              supportedMimeTypes: { 'application/pdf': true, 'image/png': true },
               tokenizerType: 'GEMINI',
               vertexModelId: 'publishers/google/models/gemini-3-flash',
               isInternal: false,
@@ -762,8 +768,14 @@ describe('GoogleAPIService fetchQuota fallback policy', () => {
       tab: ['tab_lite_preview'],
     });
     expect(quota.models['gemini-3-flash']).toMatchObject({
+      max_tokens: 32768,
+      max_output_tokens: 16384,
+      supports_thinking: true,
+      thinking_budget: 8192,
+      supports_images: true,
       supports_pdf: true,
       supports_video: false,
+      supported_mime_types: { 'application/pdf': true, 'image/png': true },
       tokenizer_type: 'GEMINI',
       vertex_model_id: 'publishers/google/models/gemini-3-flash',
       is_internal: false,

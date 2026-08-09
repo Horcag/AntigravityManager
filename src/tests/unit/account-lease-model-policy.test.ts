@@ -169,19 +169,24 @@ describe('AccountLeaseModelPolicy', () => {
     expect(policy.getModelAvailabilityForAccount('missing', 'gemini-3-flash')).toBe('unknown');
   });
 
-  it('reads output limits and thinking budgets from account quota state', () => {
+  it('prefers ModelDetails limits and budgets, then keeps legacy snapshots as a fallback', () => {
     const tokenCache = new Map([
       [
         'acc-1',
         createToken({
-          model_limits: { 'MODELS/GEMINI-3-PRO': 8192 },
+          model_limits: {
+            'MODELS/GEMINI-3-PRO': 8192,
+            'gemini-silent': 4096,
+          },
           quota: {
             models: {
               'MODELS/GEMINI-3-PRO': {
                 percentage: 100,
                 resetTime: '2026-06-20T00:00:00.000Z',
+                max_output_tokens: 16384,
                 thinking_budget: 32768.8,
               },
+              'gemini-silent': { percentage: 100, resetTime: '' },
             },
           },
         }),
@@ -189,8 +194,10 @@ describe('AccountLeaseModelPolicy', () => {
     ]);
     const { policy } = createPolicy(tokenCache);
 
-    expect(policy.getModelOutputLimitForAccount('acc-1', 'models/gemini-3-pro')).toBe(8192);
+    expect(policy.getModelOutputLimitForAccount('acc-1', 'models/gemini-3-pro')).toBe(16384);
     expect(policy.getModelThinkingBudgetForAccount('acc-1', 'gemini-3-pro')).toBe(32768);
+    expect(policy.getModelOutputLimitForAccount('acc-1', 'gemini-silent')).toBe(4096);
+    expect(policy.getModelThinkingBudgetForAccount('acc-1', 'gemini-silent')).toBeUndefined();
   });
 
   it('projects provider model roles onto published catalog ids', () => {

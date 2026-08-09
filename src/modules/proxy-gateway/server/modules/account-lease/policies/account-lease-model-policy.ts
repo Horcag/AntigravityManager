@@ -1,4 +1,3 @@
-import { isNumber } from 'lodash-es';
 import type { CloudModelRoleId } from '@/modules/cloud-account/types';
 import {
   COMPLETION_MODEL_FLAGS,
@@ -11,6 +10,10 @@ import {
   type AccountLeaseTokenData,
   normalizeModelId,
 } from '../interfaces/account-lease-token-types';
+import {
+  type ProviderModelDetails,
+  toProviderModelDetails,
+} from '../model-details/provider-model-details';
 
 /**
  * `agent` is the provider's chat surface; every other role in
@@ -357,6 +360,12 @@ export class AccountLeaseModelPolicy {
       return undefined;
     }
 
+    const providerLimit = this.getProviderModelDetails(tokenData, normalizedModel)?.maxOutputTokens;
+    if (providerLimit !== undefined) {
+      return providerLimit;
+    }
+
+    // Compatibility fallback for cache entries persisted before ModelDetails parsing.
     const entry = Object.entries(tokenData.model_limits ?? {}).find(
       ([candidate]) => normalizeModelId(candidate)?.toLowerCase() === normalizedModel,
     );
@@ -383,15 +392,32 @@ export class AccountLeaseModelPolicy {
       return undefined;
     }
 
+    return this.getProviderModelDetails(tokenData, normalizedModel)?.thinkingBudget;
+  }
+
+  getModelDetailsForAccount(
+    accountId: string,
+    modelName: string,
+  ): ProviderModelDetails | undefined {
+    const tokenData = this.options.getTokenCache().get(accountId);
+    const normalizedModel = normalizeModelId(modelName)?.toLowerCase();
+    if (!tokenData || !normalizedModel) {
+      return undefined;
+    }
+
+    return this.getProviderModelDetails(tokenData, normalizedModel);
+  }
+
+  private getProviderModelDetails(
+    tokenData: AccountLeaseTokenData,
+    normalizedModel: string,
+  ): ProviderModelDetails | undefined {
     for (const [quotaModelName, modelInfo] of Object.entries(tokenData.quota?.models ?? {})) {
-      if (normalizeModelId(quotaModelName)?.toLowerCase() !== normalizedModel) {
-        continue;
-      }
-      const budget = modelInfo?.thinking_budget;
-      if (isNumber(budget) && Number.isFinite(budget) && budget >= 0) {
-        return Math.floor(budget);
+      if (normalizeModelId(quotaModelName)?.toLowerCase() === normalizedModel) {
+        return toProviderModelDetails(modelInfo);
       }
     }
+
     return undefined;
   }
 }
