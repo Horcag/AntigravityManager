@@ -521,7 +521,12 @@ export class PartProcessor {
     const carried = signature ?? this.state.pendingSignature ?? undefined;
     this.state.pendingSignature = null;
 
-    if (!text && !carried) {
+    if (!text) {
+      // Match unary mapping: an empty thought cannot become a client-visible
+      // thinking block, even when upstream attached a signature to it.
+      if (carried) {
+        this.state.pendingSignature = carried;
+      }
       return chunks;
     }
 
