@@ -9,6 +9,7 @@ import {
 } from './types';
 import { applyGroundingCitations, renderGroundingMarkdown } from './grounding-citations';
 import { toAnthropicUsage } from '../server/common/usage/anthropic-usage';
+import { toAnthropicMessageId } from '../server/modules/anthropic/anthropic-message-resource';
 import {
   ANTHROPIC_WEB_SEARCH_TOOL_NAME,
   buildAnthropicWebSearchBlocks,
@@ -394,7 +395,7 @@ class NonStreamingProcessor {
     };
 
     return {
-      id: geminiResponse.responseId || `msg_${uuidv4()}`,
+      id: toAnthropicMessageId(geminiResponse.responseId),
       type: 'message',
       role: 'assistant',
       model: geminiResponse.modelVersion || '',

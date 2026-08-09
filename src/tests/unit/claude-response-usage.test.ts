@@ -1,8 +1,29 @@
 import { describe, expect, it } from 'vitest';
 
 import { transformResponse } from '@/modules/proxy-gateway/antigravity/ClaudeResponseMapper';
+import { toAnthropicMessageId } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-message-resource';
 
 describe('ClaudeResponseMapper usage', () => {
+  it('keeps upstream Anthropic message ids untouched', () => {
+    const response = transformResponse({ responseId: 'msg_existing' });
+
+    expect(response.id).toBe('msg_existing');
+  });
+
+  it('generates a prefixed id for missing upstream message ids', () => {
+    const response = transformResponse({});
+
+    expect(response.id).toMatch(/^msg_/u);
+    expect(response.id).not.toBe('msg_unknown');
+  });
+
+  it('uses the shared Anthropic message-id helper', () => {
+    const responseId = 'msg_shared';
+    const response = transformResponse({ responseId });
+
+    expect(response.id).toBe(toAnthropicMessageId(responseId));
+  });
+
   it('maps Gemini implicit cache and thinking counts into Claude-compatible usage', () => {
     const response = transformResponse({
       usageMetadata: {

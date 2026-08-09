@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { SignatureContext, SignatureStore } from './SignatureStore';
 import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
+import { toAnthropicMessageId } from '../server/modules/anthropic/anthropic-message-resource';
 import { normalizeFunctionCallArgs } from './function-call-args';
 import { StopSequenceScanner } from './stop-sequences';
 import { toAnthropicUsage } from '../server/common/usage/anthropic-usage';
@@ -140,7 +141,7 @@ export class StreamingState {
       : { input_tokens: 0, output_tokens: 0 };
 
     const message = {
-      id: rawJson.responseId || 'msg_unknown',
+      id: toAnthropicMessageId(rawJson.responseId),
       type: 'message',
       role: 'assistant',
       content: [],
