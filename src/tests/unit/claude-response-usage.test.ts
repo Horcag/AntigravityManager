@@ -17,8 +17,7 @@ describe('ClaudeResponseMapper usage', () => {
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 700,
       input_tokens: 1000,
-      output_tokens: 260,
-      reasoning_tokens: 140,
+      output_tokens: 260 + 140,
     });
   });
 
@@ -37,8 +36,7 @@ describe('ClaudeResponseMapper usage', () => {
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 900,
       input_tokens: 1200,
-      output_tokens: 80,
-      reasoning_tokens: 35,
+      output_tokens: 80 + 35,
     });
   });
 

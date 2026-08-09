@@ -2,13 +2,14 @@ import { isNil, isNumber, isString } from 'lodash-es';
 import { v4 as uuidv4 } from 'uuid';
 import { transformResponse } from '../../../../antigravity/ClaudeResponseMapper';
 import type { StreamingSignatureState } from '../../../../antigravity/ClaudeStreamingMapper';
+import { toOpenAIUsage } from '../../../../antigravity/OpenAIUsageMapper';
+import { toOpenAIUsageFromGeminiUsageMetadata } from '../../../common/usage/openai-usage';
 import {
   extractCustomToolInput,
   isCustomToolCall,
   toCustomToolArguments,
 } from '../../../../antigravity/CustomToolCall';
 import { optimizeApplyPatch } from '../../../../antigravity/ApplyPatchPreflight';
-import { toOpenAIUsage } from '../../../../antigravity/OpenAIUsageMapper';
 import { resolveShellToolName } from '../../../../antigravity/ShellToolName';
 import { splitNamespaceToolName } from '../../../../antigravity/ToolNamespace';
 import {
@@ -111,8 +112,10 @@ export function convertClaudeToOpenAIResponse(
  * Renders a buffered upstream answer as a chat completion.
  *
  * Each candidate is mapped through the Claude response mapper on its own so a
- * multi-candidate answer produces independent choices, and usage is taken from
- * the first candidate because upstream reports it once per response.
+ * multi-candidate answer produces independent choices. Usage is read straight
+ * off the upstream metadata, which is reported once per response rather than
+ * per candidate, so it does not travel through the Anthropic-shaped detour the
+ * choices take.
  */
 export function convertGeminiToOpenAIResponse(
   geminiResponse: GeminiResponse,
@@ -144,18 +147,13 @@ export function convertGeminiToOpenAIResponse(
         : null,
     );
   });
-  const usageSource = transformResponse(
-    { ...geminiResponse, candidates: candidates[0] ? [candidates[0]] : [] },
-    undefined,
-  );
-
   const openaiResponse: OpenAIChatResponse = {
     id: `chatcmpl-${uuidv4()}`,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model,
     choices,
-    usage: toOpenAIUsage(usageSource.usage),
+    usage: toOpenAIUsageFromGeminiUsageMetadata(geminiResponse.usageMetadata),
     ...(serviceTier ? { service_tier: serviceTier } : {}),
   };
 
