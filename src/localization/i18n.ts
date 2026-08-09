@@ -20,6 +20,13 @@ i18n
     },
     supportedLngs: ['en', 'zh-CN', 'ru', 'vi', 'tr', 'fr'],
     load: 'currentOnly', // Only load the exact language code, not variants
+    /**
+     * React escapes everything it renders, so i18next escaping again turns any
+     * interpolated value containing HTML-special characters into entities the
+     * user actually sees. It showed up as `Last seen 8&#x2F;9&#x2F;2026` on the
+     * proxy tab, and would do the same to an imported file name carrying `&`.
+     */
+    interpolation: { escapeValue: false },
     resources: {
       en: {
         translation: en,
@@ -41,3 +48,5 @@ i18n
       },
     },
   });
+
+export default i18n;
