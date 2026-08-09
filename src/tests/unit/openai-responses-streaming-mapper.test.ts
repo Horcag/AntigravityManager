@@ -588,6 +588,22 @@ describe('OpenAIResponsesStreamingMapper', () => {
     });
   });
 
+  it('maps max_output_tokens finish reasons to response.incomplete', () => {
+    const mapper = createMapper();
+    mapper.processPart({ text: 'Partial output' });
+
+    const terminal = parseEvent(mapper.complete('max_output_tokens').at(-1) ?? '');
+
+    expect(terminal).toMatchObject({
+      type: 'response.incomplete',
+      response: {
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output: [expect.objectContaining({ status: 'incomplete', type: 'message' })],
+      },
+    });
+  });
+
   it('emits response.failed with a structured error', () => {
     const mapper = createMapper();
 

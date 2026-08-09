@@ -211,6 +211,29 @@ describe('OpenAI Responses non-stream mapper', () => {
     });
   });
 
+  it('maps max-output-token finish reasons to incomplete responses', () => {
+    const response = toOpenAIResponsesResponse({
+      id: 'chatcmpl-max-output',
+      object: 'chat.completion',
+      created: 1,
+      model: 'gemini-3-flash',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'max_output_tokens',
+          message: { role: 'assistant', content: 'Partial' },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+
+    expect(response).toMatchObject({
+      status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens' },
+      output: [expect.objectContaining({ status: 'incomplete' })],
+    });
+  });
+
   it('does not throw when upstream usage metadata is absent', () => {
     const response = toOpenAIResponsesResponse({
       id: 'chatcmpl-no-usage',
