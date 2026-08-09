@@ -17,6 +17,7 @@ import {
 } from './explicit-context-cache.store';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 import { extractGoogleErrorDetails } from '../../common/google-error-details';
+import { markUpstreamStreamDispatch } from '../../common/streaming/upstream-stream-trace';
 import {
   attachUpstreamResponseMetadata,
   parseUpstreamResponseMetadata,
@@ -122,6 +123,7 @@ export class GeminiClient {
     extraHeaders?: Record<string, string>,
     deadlineAt?: number,
   ): Promise<NodeJS.ReadableStream> {
+    const dispatchedAt = Date.now();
     const response = await this.executeInternalWithExplicitContextCache<NodeJS.ReadableStream>(
       ':streamGenerateContent?alt=sse',
       body,
@@ -135,6 +137,7 @@ export class GeminiClient {
       deadlineAt,
     );
 
+    markUpstreamStreamDispatch(response.data, dispatchedAt);
     return response.data;
   }
 
