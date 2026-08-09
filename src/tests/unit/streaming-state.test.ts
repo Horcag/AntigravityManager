@@ -3,6 +3,8 @@ import {
   PartProcessor,
   StreamingState,
 } from '../../modules/proxy-gateway/antigravity/ClaudeStreamingMapper';
+import { transformResponse } from '@/modules/proxy-gateway/antigravity/ClaudeResponseMapper';
+import { toAnthropicMessageId } from '@/modules/proxy-gateway/server/modules/anthropic/anthropic-message-resource';
 
 describe('StreamingState', () => {
   let state: StreamingState;
@@ -63,6 +65,47 @@ describe('StreamingState', () => {
   });
 
   describe('stream aggregation compatibility', () => {
+    it('reuses an upstream msg_ id in message_start', () => {
+      const streamStart = state.emitMessageStart({ responseId: 'msg_existing' });
+      const dataLine = streamStart
+        .split('\n')
+        .find((line): line is string => line.startsWith('data: '));
+      const startPayload = JSON.parse(dataLine?.slice('data: '.length) ?? '{}') as {
+        message?: { id?: string };
+      };
+
+      expect(startPayload.message?.id).toBe(toAnthropicMessageId('msg_existing'));
+      expect(startPayload.message?.id).toBe('msg_existing');
+    });
+
+    it('aligns stream and non-stream mappings for the same upstream id', () => {
+      const response = transformResponse({ responseId: 'msg_existing' });
+      const streamStart = state.emitMessageStart({ responseId: 'msg_existing' });
+      const dataLine = streamStart
+        .split('\n')
+        .find((line): line is string => line.startsWith('data: '));
+      const startPayload = JSON.parse(dataLine?.slice('data: '.length) ?? '{}') as {
+        message?: { id?: string };
+      };
+
+      expect(response.id).toBe(startPayload.message?.id);
+      expect(response.id).toBe(toAnthropicMessageId('msg_existing'));
+    });
+
+    it('generates a msg_ id when streaming lacks responseId', () => {
+      const streamStart = state.emitMessageStart({ modelVersion: 'gemini-3-flash' });
+      const dataLine = streamStart
+        .split('\n')
+        .find((line): line is string => line.startsWith('data: '));
+      const startPayload = JSON.parse(dataLine?.slice('data: '.length) ?? '{}') as {
+        message?: { id?: string };
+      };
+
+      expect(startPayload.message?.id).toMatch(/^msg_/u);
+      expect(startPayload.message?.id).toMatch(/^msg_[0-9a-f-]{36}$/u);
+      expect(startPayload.message?.id).not.toBe('msg_unknown');
+    });
+
     it('always starts with zeroed usage when upstream omits usage metadata', () => {
       const event = state.emitMessageStart({ responseId: 'msg_1', modelVersion: 'gemini-3-flash' });
 
