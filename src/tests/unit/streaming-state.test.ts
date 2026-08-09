@@ -230,6 +230,17 @@ describe('StreamingState', () => {
       expect(payload).not.toContain('signature_delta');
     });
 
+    it('emits no empty thinking block when thought content is empty and unsigned', () => {
+      const processor = new PartProcessor(state);
+      const payload = [
+        ...processor.process({ thought: true, text: '' }),
+        ...state.emitFinish('STOP'),
+      ].join('');
+
+      expect(payload).not.toContain('"content_block":{"type":"thinking"');
+      expect(payload).not.toContain('"thinking_delta"');
+    });
+
     it('hands a banked signature to the following function call, not to a new block', () => {
       const processor = new PartProcessor(state);
       const signature = Buffer.from('trailing-signature').toString('base64');

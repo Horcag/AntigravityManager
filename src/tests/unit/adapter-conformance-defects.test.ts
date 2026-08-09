@@ -482,5 +482,69 @@ describe('adapter conformance defects (kanban #50)', () => {
         },
       ]);
     });
+
+    it('streams thought content exactly as unary thinking content and keeps reasoned frames before answer', () => {
+      const upstream = {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                { thought: true, text: 'I should use the weather tool.' },
+                { text: 'The weather is cloudy.' },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: {
+          thoughtsTokenCount: 4,
+        },
+      };
+
+      const unary = transformResponse(upstream);
+      const unaryThinkingBlock = unary.content.find((block) => block.type === 'thinking');
+
+      const state = new StreamingState(undefined, 'gemini-2.5-pro');
+      const processor = new PartProcessor(state);
+      const streamPayload = [
+        state.emitMessageStart(upstream),
+        ...upstream.candidates.flatMap((candidate) =>
+          candidate.content.parts.map((part) => processor.process(part)).flat(),
+        ),
+        ...state.emitFinish('STOP', upstream.usageMetadata),
+      ].join('');
+
+      const frames = sseFrames(streamPayload);
+      const thinkingDelta = frames
+        .filter((frame) => frame.event === 'content_block_delta' && 'thinking' in frame.data.delta)
+        .map((frame) => frame.data.delta.thinking)
+        .join('');
+      const firstThinkingStart = frames.findIndex(
+        (frame) =>
+          frame.event === 'content_block_start' && frame.data.content_block.type === 'thinking',
+      );
+      const firstTextStart = frames.findIndex(
+        (frame) =>
+          frame.event === 'content_block_start' && frame.data.content_block.type === 'text',
+      );
+      const firstThinkingDelta = frames.findIndex(
+        (frame) => frame.event === 'content_block_delta' && 'thinking' in frame.data.delta,
+      );
+      const firstTextDelta = frames.findIndex(
+        (frame) => frame.event === 'content_block_delta' && 'text' in frame.data.delta,
+      );
+
+      expect(unaryThinkingBlock).toEqual({
+        type: 'thinking',
+        thinking: 'I should use the weather tool.',
+        signature: undefined,
+      });
+      expect(firstThinkingStart).toBeGreaterThan(-1);
+      expect(firstTextStart).toBeGreaterThan(-1);
+      expect(firstThinkingStart).toBeLessThan(firstTextStart);
+      expect(firstThinkingDelta).toBeLessThan(firstTextDelta);
+      expect(thinkingDelta).toBe('I should use the weather tool.');
+    });
   });
 });

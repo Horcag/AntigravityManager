@@ -518,6 +518,12 @@ export class PartProcessor {
 
   private processThinking(text: string, signature?: string): string[] {
     const chunks: string[] = [];
+    const carried = signature ?? this.state.pendingSignature ?? undefined;
+    this.state.pendingSignature = null;
+
+    if (!text && !carried) {
+      return chunks;
+    }
 
     if (this.state.currentBlockType() !== 'Thinking') {
       chunks.push(...this.state.startBlock('Thinking', { type: 'thinking', thinking: '' }));
@@ -529,8 +535,6 @@ export class PartProcessor {
 
     // A banked signature is adopted by this thought, which is a block that may
     // legally carry one, rather than being emitted as a block of its own.
-    const carried = signature ?? this.state.pendingSignature ?? undefined;
-    this.state.pendingSignature = null;
     this.state.storeSignature(carried);
 
     return chunks;
