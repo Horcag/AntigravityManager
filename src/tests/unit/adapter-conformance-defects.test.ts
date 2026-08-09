@@ -429,6 +429,44 @@ describe('adapter conformance defects (kanban #50)', () => {
       expect(payload).not.toContain('"thinking"');
     });
 
+    it('does not fabricate an empty thinking block for a signed thought in either mapper', () => {
+      const upstream = {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                {
+                  thought: true,
+                  text: '',
+                  thoughtSignature: Buffer.from('empty-thought-signature').toString('base64'),
+                },
+                { text: 'OK' },
+              ],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      };
+      const unary = transformResponse(upstream);
+
+      const state = new StreamingState(undefined, 'gemini-3-flash');
+      const processor = new PartProcessor(state);
+      const streamPayload = [
+        ...upstream.candidates.flatMap((candidate) =>
+          candidate.content.parts.map((part) => processor.process(part)).flat(),
+        ),
+        ...state.emitFinish('STOP', {}),
+      ].join('');
+      const streamedBlockTypes = sseFrames(streamPayload)
+        .filter((frame) => frame.event === 'content_block_start')
+        .map((frame) => frame.data.content_block.type);
+
+      expect(unary.content).toEqual([{ type: 'text', text: 'OK' }]);
+      expect(streamedBlockTypes).toEqual(['text']);
+      expect(streamPayload).not.toContain('signature_delta');
+    });
+
     it('keeps a real thought, with its signature, ordered before the text', () => {
       const signature = Buffer.from('real-thought-signature').toString('base64');
       const response = transformResponse({
@@ -484,6 +522,7 @@ describe('adapter conformance defects (kanban #50)', () => {
     });
 
     it('streams thought content exactly as unary thinking content and keeps reasoned frames before answer', () => {
+      const answerSignature = Buffer.from('answer-part-signature').toString('base64');
       const upstream = {
         candidates: [
           {
@@ -491,7 +530,7 @@ describe('adapter conformance defects (kanban #50)', () => {
               role: 'model',
               parts: [
                 { thought: true, text: 'I should use the weather tool.' },
-                { text: 'The weather is cloudy.' },
+                { text: 'The weather is cloudy.', thoughtSignature: answerSignature },
               ],
             },
             finishReason: 'STOP',
@@ -545,6 +584,12 @@ describe('adapter conformance defects (kanban #50)', () => {
       expect(firstThinkingStart).toBeLessThan(firstTextStart);
       expect(firstThinkingDelta).toBeLessThan(firstTextDelta);
       expect(thinkingDelta).toBe('I should use the weather tool.');
+      expect(
+        frames.some(
+          (frame) =>
+            frame.event === 'content_block_delta' && frame.data.delta.type === 'signature_delta',
+        ),
+      ).toBe(false);
     });
   });
 });
