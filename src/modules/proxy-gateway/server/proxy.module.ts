@@ -37,6 +37,10 @@ import { AnthropicMessageBatchesController } from './modules/batch/anthropic-mes
 import { GeminiOperationsController } from './modules/batch/gemini-operations.controller';
 import { AnthropicCompleteController } from './modules/anthropic/anthropic-complete.controller';
 import { ClientModelsController } from './modules/models/client-models.controller';
+import {
+  getV1InternalPassthroughControllers,
+  V1InternalPassthroughService,
+} from './modules/v1internal-passthrough/v1internal-passthrough.module';
 
 @Module({
   imports: [],
@@ -52,6 +56,7 @@ import { ClientModelsController } from './modules/models/client-models.controlle
     GeminiOperationsController,
     AnthropicCompleteController,
     ClientModelsController,
+    ...getV1InternalPassthroughControllers(),
   ],
   providers: [
     // Answers an unrouted `/v1...` or `/v1beta...` request in the error shape of
@@ -87,6 +92,7 @@ import { ClientModelsController } from './modules/models/client-models.controlle
     CountTokensService,
     GeminiClient,
     ProxyGuard,
+    V1InternalPassthroughService,
     {
       provide: IMAGE_QUOTA_REFRESH,
       useValue: () => CloudMonitorService.poll(),

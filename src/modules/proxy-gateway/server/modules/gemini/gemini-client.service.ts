@@ -29,7 +29,11 @@ interface PreparedInternalRequest {
   cacheKey?: string;
 }
 
-type InternalEndpointRequestBody = GeminiInternalRequest | GeminiCountTokensRequest;
+type V1InternalRawResponse = {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+};
 
 @Injectable()
 export class GeminiClient {
@@ -198,6 +202,44 @@ export class GeminiClient {
     );
 
     return this.toCountTokensResponse(response.data);
+  }
+
+  /**
+   * Sends an intentionally unmodelled v1internal request through the normal authorised transport.
+   *
+   * This is diagnostic-only: unlike product-facing methods, it preserves the upstream HTTP status
+   * and text payload so an operator can measure an unimplemented vendor verb without a mapper
+   * manufacturing a compatibility response.
+   */
+  async postV1InternalRaw(
+    verb: string,
+    body: unknown,
+    accessToken: string,
+    upstreamProxyUrl?: string,
+  ): Promise<V1InternalRawResponse> {
+    const response = await this.executeRequestWithEndpointFailover<string>(
+      `:${verb}`,
+      body,
+      accessToken,
+      upstreamProxyUrl,
+      {
+        responseType: 'text',
+        transformResponse: [(value) => value],
+        validateStatus: () => true,
+      },
+      `v1internal-${verb}`,
+    );
+
+    return {
+      status: response.status,
+      headers: Object.fromEntries(
+        Object.entries(response.headers).map(([key, value]) => [
+          key,
+          Array.isArray(value) ? value.join(', ') : String(value),
+        ]),
+      ),
+      body: response.data,
+    };
   }
 
   /**
@@ -463,7 +505,7 @@ export class GeminiClient {
 
   private async executeRequestWithEndpointFailover<T>(
     path: string,
-    body: InternalEndpointRequestBody,
+    body: unknown,
     accessToken: string,
     upstreamProxyUrl: string | undefined,
     config: AxiosRequestConfig,
@@ -536,10 +578,7 @@ export class GeminiClient {
     return await this.throwUpstreamRequestError(lastError, operation);
   }
 
-  private createInternalRequestBody(
-    path: string,
-    body: InternalEndpointRequestBody,
-  ): string | Readable {
+  private createInternalRequestBody(path: string, body: unknown): string | Readable {
     const bodyText = JSON.stringify(body);
     if (path.startsWith(':streamGenerateContent')) {
       return Readable.from([bodyText]);
@@ -551,8 +590,10 @@ export class GeminiClient {
   /**
    * `countTokens` bodies carry no `project`, so they intentionally produce no project header.
    */
-  private createProjectHeaders(body: InternalEndpointRequestBody): Record<string, string> {
-    const project = 'project' in body ? body.project?.trim() : undefined;
+  private createProjectHeaders(body: unknown): Record<string, string> {
+    const projectValue =
+      typeof body === 'object' && body !== null ? Reflect.get(body, 'project') : undefined;
+    const project = isString(projectValue) ? projectValue.trim() : undefined;
     if (!project) {
       return {};
     }
