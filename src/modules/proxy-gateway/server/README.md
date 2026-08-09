@@ -185,6 +185,15 @@ npm run test:proxy:media       # multipart, image, audio, and media streaming co
 
 The shared harness in `src/tests/support/proxy-conformance-harness.ts` boots the real Nest/Fastify controllers with deterministic service and account fixtures. `src/tests/support/http-payloads.ts` owns reusable SSE parsing and multipart builders so protocol tests do not maintain divergent wire helpers. Scoped suites supplement rather than replace `npm run test`.
 
+### Upstream Stream Tracing
+
+Streaming complaints ("it stalls before the first word", "it arrives in big lumps") are about what **upstream** sent, which our own response cannot show. `PROXY_STREAM_TRACE=1` turns on a per-stream trace in `common/streaming/upstream-stream-trace.ts`, logged under `UpstreamStreamTrace` at `log` level:
+
+- one line per upstream SSE frame — offset from request dispatch, gap since the previous frame, byte size, thinking characters, answer characters, function calls, finish reason;
+- one `SUMMARY` line per stream — frame count, total bytes, `dispatchToHeadersMs`, `headersToFirstFrameMs`, `firstThoughtFrameMs` versus `firstTextFrameMs`, mean bytes per frame, and max/median inter-frame gap.
+
+It counts characters and never logs them, because frames carry user content. It is off unless the variable is `1` or `true`, and every call site guards on it, so nothing — not even a byte count — is computed while it is off. Instrumented surfaces: `openai-chat` and `gemini-native`.
+
 ---
 
 ## 7. Native Gemini API Support & Honest Limitations

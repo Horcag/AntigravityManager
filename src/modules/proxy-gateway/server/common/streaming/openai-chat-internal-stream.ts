@@ -25,6 +25,7 @@ import { OpenAIChatWebSearchStream } from '../../modules/openai/chat/openai-chat
 import { mapGeminiFinishReasonToOpenAIFinishReason } from '../../modules/openai/chat/openai-chat-response-conversion';
 import { toGeminiUsageMetadata } from '../../modules/openai/responses/openai-responses-stream-values';
 import { attachUpstreamBackpressure } from '../stream-backpressure';
+import { createUpstreamStreamTrace } from './upstream-stream-trace';
 import { toRecord } from '../utils/json-record';
 import type { OpenAIUsage } from '../interfaces/request-interfaces';
 import type { CloudCodeMetaRuntime, ProxyStreamRuntime } from './proxy-stream-runtime';
@@ -80,6 +81,7 @@ export function processStreamResponse(
       const latestResponseSignatures = new Map<number, string>();
       const webSearchStream = new OpenAIChatWebSearchStream(streamContract.webSearch === true);
       const toolCallIntegrityByChoice = new Map<number, ToolCallIdIntegrityTracker>();
+      const trace = createUpstreamStreamTrace('openai-chat', upstreamStream);
       let heartbeatTimer: NodeJS.Timeout | undefined;
 
       const streamId = `chatcmpl-${uuidv4()}`;
@@ -142,6 +144,7 @@ export function processStreamResponse(
         }
         idleTimer.clear();
         clearHeartbeat();
+        trace?.finish('completed');
         if (streamContract.includeUsage) {
           pushChunk({
             id: streamId,
@@ -165,6 +168,7 @@ export function processStreamResponse(
         settled = true;
         idleTimer.clear();
         clearHeartbeat();
+        trace?.finish('failed');
         subscriber.error(error);
       };
 
@@ -190,6 +194,7 @@ export function processStreamResponse(
 
         try {
           const decoded = decodeInternalSseData(trimmed.slice(6));
+          trace?.recordFrame(trimmed, decoded.kind === 'response' ? decoded.response : undefined);
           if (decoded.kind !== 'response') {
             return;
           }
@@ -485,6 +490,7 @@ export function processStreamResponse(
       return () => {
         clearHeartbeat();
         idleTimer.dispose();
+        trace?.finish('unsubscribed');
       };
     }),
     upstreamStream,

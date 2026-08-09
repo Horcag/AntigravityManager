@@ -4,6 +4,7 @@ import { decodeInternalSseData } from '../../../antigravity/internal-sse';
 import { sanitizeGeminiResponse } from './gemini-wire';
 import { UpstreamRequestError } from '../../common/exceptions/upstream-request-exception';
 import { attachUpstreamBackpressure } from '../../common/stream-backpressure';
+import { createUpstreamStreamTrace } from '../../common/streaming/upstream-stream-trace';
 import {
   parseUpstreamResponseMetadata,
   type UpstreamResponseMetadata,
@@ -57,12 +58,14 @@ export function createGeminiSseObservable(
       let diagnosticsReported = false;
       let upstreamMetadata: UpstreamResponseMetadata | undefined;
       let idleTimer: NodeJS.Timeout | null = null;
+      const trace = createUpstreamStreamTrace('gemini-native', upstreamStream);
 
       const reportDiagnostics = () => {
         if (diagnosticsReported) {
           return;
         }
         diagnosticsReported = true;
+        trace?.finish(hasEmittedData ? 'ended' : 'empty');
         if (skippedFrames > 0) {
           logger.warn(`Skipped ${skippedFrames} malformed Gemini SSE frame(s) on this stream.`);
         }
@@ -121,6 +124,10 @@ export function createGeminiSseObservable(
 
         const combinedData = dataLines.join('\n');
         const decoded = decodeInternalSseData(combinedData);
+        trace?.recordFrame(
+          combinedData,
+          decoded.kind === 'response' ? decoded.response : undefined,
+        );
 
         if (decoded.kind === 'ignored') {
           return;
