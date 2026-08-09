@@ -4,7 +4,10 @@ import { EventEmitter } from 'node:events';
 
 import { ProxyController } from '../../modules/proxy-gateway/server/proxy.controller';
 import { OpenAIMediaController } from '../../modules/proxy-gateway/server/modules/openai/media/openai-media.controller';
-import { OpenAIResponsesSessionStore } from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
+import {
+  OpenAIResponsesSessionStore,
+  OpenAIResponsesSessionStoreImpl,
+} from '../../modules/proxy-gateway/server/modules/openai/responses/openai-responses-session.store';
 import { UpstreamRequestError } from '../../modules/proxy-gateway/server/common/exceptions/upstream-request-exception';
 import { ModelRouteError } from '../../modules/proxy-gateway/server/common/exceptions/model-route-exception';
 import {
@@ -786,7 +789,65 @@ describe('ProxyController Integration', () => {
     );
   });
 
-  it('returns an OpenAI validation envelope without calling upstream', async () => {
+  it('stores unary Chat Completions only when store=true', async () => {
+    const stored = {
+      id: 'chatcmpl_stored',
+      object: 'chat.completion',
+      created: 1_700_000_000,
+      model: 'gemini-3-flash',
+      choices: [
+        { index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'Saved' } },
+      ],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    };
+    const notStored = { ...stored, id: 'chatcmpl_ephemeral' };
+    const implicitNotStored = { ...stored, id: 'chatcmpl_implicit' };
+    const sessionStore = new OpenAIResponsesSessionStoreImpl({});
+    const controller = new ProxyController(
+      {
+        handleChatCompletions: vi
+          .fn()
+          .mockResolvedValueOnce(stored)
+          .mockResolvedValueOnce(notStored)
+          .mockResolvedValueOnce(implicitNotStored),
+      } as any,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sessionStore,
+    );
+
+    await controller.chatCompletions(
+      {
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+        store: true,
+      },
+      createReplyMock() as any,
+    );
+    await controller.chatCompletions(
+      {
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+        store: false,
+      },
+      createReplyMock() as any,
+    );
+    await controller.chatCompletions(
+      {
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      createReplyMock() as any,
+    );
+
+    expect(sessionStore.getStoredChatCompletion('chatcmpl_stored')).toEqual(stored);
+    expect(sessionStore.getStoredChatCompletion('chatcmpl_ephemeral')).toBeNull();
+    expect(sessionStore.getStoredChatCompletion('chatcmpl_implicit')).toBeNull();
+  });
+
+  it('rejects store=true for streamed Chat Completions before calling upstream', async () => {
     const proxyService = { handleChatCompletions: vi.fn() };
     const controller = new ProxyController(proxyService as any);
     const reply = createReplyMock();
@@ -796,6 +857,7 @@ describe('ProxyController Integration', () => {
         model: 'gemini-3-flash',
         messages: [{ role: 'user', content: 'hello' }],
         store: true,
+        stream: true,
       },
       reply as any,
     );
@@ -804,10 +866,51 @@ describe('ProxyController Integration', () => {
     expect(reply.status).toHaveBeenCalledWith(400);
     expect(reply.send).toHaveBeenCalledWith({
       error: {
-        message: 'stored Chat Completions are not implemented by this proxy',
+        message:
+          'store=true is unavailable for streamed Chat Completions because this proxy does not assemble stream chunks',
         type: 'invalid_request_error',
         param: 'store',
         code: 'unsupported_parameter',
+      },
+    });
+  });
+
+  it('replays stored Chat Completions and returns OpenAI-shaped 404s', () => {
+    const sessionStore = new OpenAIResponsesSessionStoreImpl({});
+    const completion = {
+      id: 'chatcmpl_replay',
+      object: 'chat.completion',
+      created: 1_700_000_000,
+      model: 'gemini-3-flash',
+      choices: [
+        { index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'Saved' } },
+      ],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    };
+    sessionStore.saveStoredChatCompletion(completion);
+    const controller = new ProxyController(
+      { handleChatCompletions: vi.fn() } as any,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      sessionStore,
+    );
+    const replayReply = createReplyMock();
+    const missingReply = createReplyMock();
+
+    controller.getStoredChatCompletion('chatcmpl_replay', replayReply as any);
+    controller.getStoredChatCompletion('chatcmpl_missing', missingReply as any);
+
+    expect(replayReply.status).toHaveBeenCalledWith(200);
+    expect(replayReply.send).toHaveBeenCalledWith(completion);
+    expect(missingReply.status).toHaveBeenCalledWith(404);
+    expect(missingReply.send).toHaveBeenCalledWith({
+      error: {
+        code: 'chat_completion_not_found',
+        message: "Chat completion with id 'chatcmpl_missing' not found.",
+        param: 'id',
+        type: 'invalid_request_error',
       },
     });
   });

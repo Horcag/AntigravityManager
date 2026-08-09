@@ -72,6 +72,7 @@ export interface FakeProxyRequest {
   headers: Record<string, string | string[] | undefined>;
   body: Record<string, unknown>;
   defects: ReadonlySet<FakeProxyDefect>;
+  storedChatCompletions: Map<string, Record<string, unknown>>;
 }
 
 export interface FakeProxyReply {

@@ -56,6 +56,15 @@ describe('OpenAIResponsesSessionStore durability', () => {
     });
   });
 
+  it('replays a stored Chat Completion created before the restart', async () => {
+    const storedCompletion = completion('chatcmpl_restart_1', 'Persisted answer');
+    const before = createStore();
+    before.saveStoredChatCompletion(storedCompletion);
+    await before.flush();
+
+    expect(createStore().getStoredChatCompletion('chatcmpl_restart_1')).toEqual(storedCompletion);
+  });
+
   it('keeps the tool calls a continuation needs to repair orphan outputs', async () => {
     const before = createStore();
     before.save('resp_tools', {
@@ -229,7 +238,7 @@ function completion(id: string, content: string) {
     object: 'chat.completion',
     created: 1_700_000_000,
     model: 'gpt-4o',
-    choices: [{ index: 0, finish_reason: 'stop', message: { content } }],
+    choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }],
     usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
   };
 }

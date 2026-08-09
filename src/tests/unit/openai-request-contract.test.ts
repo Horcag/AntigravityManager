@@ -96,7 +96,7 @@ describe('OpenAI request contract', () => {
     ['logprobs', { stream: true, logprobs: true }],
     ['parallel_tool_calls', { tools: [{ type: 'function' }], parallel_tool_calls: false }],
     ['logit_bias', { logit_bias: { '42': 1 } }],
-    ['store', { store: true }],
+    ['store', { stream: true, store: true }],
     ['service_tier', { service_tier: 'priority' }],
     ['reasoning_effort', { reasoning_effort: 'minimal' }],
     [
@@ -117,6 +117,16 @@ describe('OpenAI request contract', () => {
         param,
       }),
     );
+  });
+
+  it('accepts store=true for unary Chat Completions', () => {
+    expect(
+      normalizeOpenAIChatRequest({
+        model: 'gemini-3-flash',
+        messages: [{ role: 'user', content: 'hello' }],
+        store: true,
+      }),
+    ).toMatchObject({ store: true });
   });
 
   it('requires a named JSON schema for structured output', () => {

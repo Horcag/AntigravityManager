@@ -414,7 +414,22 @@ Expansion is **fail-closed**. A handle this proxy never issued, or one that has 
 
 ---
 
-## 11. Batch API — A Local Deferred-Job Runner, Not a Provider Batch Service
+## 11. Stored Chat Completions — A Local Replay Store, Not a Provider Cache
+
+`POST /v1/chat/completions` accepts `store: true` for unary requests and persists the full
+`chat.completion` object. `GET /v1/chat/completions/{id}` replays that exact object, including its
+choices, finish reasons, usage, model, and creation time, across an app restart. `store: false` and
+an omitted `store` field leave no record. Streamed Chat Completions with `store: true` are rejected
+with `param: "store"`: this route passes SSE chunks through and does not assemble a completion to
+persist.
+
+This store is **local**. It preserves the client contract and makes a completed answer retrievable
+after a dropped connection, but it creates no server-side cache, saves no tokens, and is unreadable
+from another machine.
+
+---
+
+## 12. Batch API — A Local Deferred-Job Runner, Not a Provider Batch Service
 
 ### What this actually is
 

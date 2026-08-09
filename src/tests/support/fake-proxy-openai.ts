@@ -82,6 +82,21 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
     });
   }
 
+  if (request.method === 'GET' && request.path.startsWith('/v1/chat/completions/')) {
+    const completionId = decodeURIComponent(request.path.slice('/v1/chat/completions/'.length));
+    const stored = request.storedChatCompletions.get(completionId);
+    return stored
+      ? jsonReply(200, stored)
+      : jsonReply(404, {
+          error: {
+            message: `Chat completion with id '${completionId}' not found.`,
+            type: 'invalid_request_error',
+            param: 'id',
+            code: 'chat_completion_not_found',
+          },
+        });
+  }
+
   if (request.method !== 'POST') {
     return undefined;
   }
@@ -106,10 +121,11 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
 }
 
 function handleChatCompletions(request: FakeProxyRequest, body: ChatBody): FakeProxyReply {
-  if (body.store === true) {
+  if (body.store === true && body.stream === true) {
     return jsonReply(400, {
       error: {
-        message: 'stored Chat Completions are not implemented by this proxy',
+        message:
+          'store=true is unavailable for streamed Chat Completions because this proxy does not assemble stream chunks',
         type: 'invalid_request_error',
         param: 'store',
         code: 'unsupported_parameter',
@@ -176,14 +192,19 @@ function handleChatCompletions(request: FakeProxyRequest, body: ChatBody): FakeP
     return streamChatCompletion(body, content, finishReason, chatUsage);
   }
 
-  return jsonReply(200, {
+  const completion = {
     id: CHAT_ID,
     object: 'chat.completion',
     created: CREATED,
     model: body.model,
     choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finishReason }],
     usage: chatUsage,
-  });
+  };
+  if (body.store === true) {
+    request.storedChatCompletions.set(CHAT_ID, completion);
+  }
+
+  return jsonReply(200, completion);
 }
 
 function streamChatCompletion(

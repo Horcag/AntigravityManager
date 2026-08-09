@@ -73,8 +73,11 @@ export function normalizeOpenAIChatRequest(request: OpenAIChatRequest): OpenAICh
 
   validateLogitBias(raw.logit_bias);
   validateOptionalBoolean(raw.store, 'store');
-  if (raw.store === true) {
-    unsupported('store', 'stored Chat Completions are not implemented by this proxy');
+  if (raw.store === true && raw.stream === true) {
+    unsupported(
+      'store',
+      'store=true is unavailable for streamed Chat Completions because this proxy does not assemble stream chunks',
+    );
   }
   validateMetadata(raw.metadata);
   validateOptionalString(raw.user, 'user');
@@ -154,6 +157,24 @@ export function normalizeOpenAICompletionRequest(body: OpenAICompletionRequest):
       stream: raw.stream as boolean | undefined,
       stream_options: raw.stream_options as OpenAIChatRequest['stream_options'],
       user: raw.user as string | undefined,
+    },
+  };
+}
+
+export function buildStoredChatCompletionNotFoundError(completionId: string): {
+  error: {
+    code: 'chat_completion_not_found';
+    message: string;
+    param: 'id';
+    type: 'invalid_request_error';
+  };
+} {
+  return {
+    error: {
+      code: 'chat_completion_not_found',
+      message: `Chat completion with id '${completionId}' not found.`,
+      param: 'id',
+      type: 'invalid_request_error',
     },
   };
 }

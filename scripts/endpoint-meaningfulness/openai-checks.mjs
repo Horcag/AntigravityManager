@@ -442,22 +442,33 @@ export const OPENAI_CHECKS = [
     },
   },
   {
-    name: 'openai.rejects-unsupported-parameter',
+    name: 'openai.stores-chat-completion',
     surface: 'openai',
-    endpoint: `POST ${CHAT_PATH}`,
-    title: 'an unsupported parameter is rejected explicitly with param and code',
-    upstreamCalls: 0,
+    endpoint: `POST ${CHAT_PATH}, GET ${CHAT_PATH}/{id}`,
+    title: 'a stored Chat Completion can be fetched as the exact object returned by creation',
+    upstreamCalls: 1,
     async run(ctx, t) {
-      const response = await ctx.json(CHAT_PATH, {
+      const created = await ctx.json(CHAT_PATH, {
         body: chatBody(ctx, { store: true }),
+      });
+      t.equal(created.status, 200, 'create HTTP status');
+      assertChatEnvelope(t, created.json);
+      assertChatUsage(t, created.json?.usage);
+
+      if (typeof created.json?.id !== 'string' || created.json.id.length === 0) {
+        return;
+      }
+
+      const fetched = await ctx.json(`${CHAT_PATH}/${encodeURIComponent(created.json.id)}`, {
         countsAsUpstreamCall: false,
       });
-      t.equal(response.status, 400, 'HTTP status');
-      assertErrorEnvelope(t, response.json, {
-        expectedCode: 'unsupported_parameter',
-        expectedParam: 'store',
-      });
-      t.equal(response.json?.error?.type, 'invalid_request_error', 'error.type');
+      t.equal(fetched.status, 200, 'fetch HTTP status');
+      t.ok(
+        JSON.stringify(fetched.json) === JSON.stringify(created.json),
+        'fetched completion is exactly the object returned from create',
+        created.json,
+        fetched.json,
+      );
     },
   },
   {
