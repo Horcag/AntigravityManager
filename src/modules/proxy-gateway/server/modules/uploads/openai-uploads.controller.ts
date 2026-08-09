@@ -1,4 +1,14 @@
-import { Body, Controller, HttpStatus, Param, Post, Req, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  HttpStatus,
+  Inject,
+  Param,
+  Post,
+  Req,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { ProxyGuard } from '../../guards/proxy.guard';
@@ -15,7 +25,14 @@ import { OpenAIUploadsService } from './openai-uploads.service';
 @Controller('v1/uploads')
 @UseGuards(ProxyGuard)
 export class OpenAIUploadsController {
-  public constructor(private readonly uploads: OpenAIUploadsService) {}
+  /**
+   * Injected by token rather than by type: the packaged build is minified, the
+   * emitted design-time metadata no longer names the class, and Nest hands the
+   * controller `undefined`. Unit tests never see it because they run unminified.
+   */
+  public constructor(
+    @Inject(OpenAIUploadsService) private readonly uploads: OpenAIUploadsService,
+  ) {}
 
   @Post()
   public create(@Body() body: unknown, @Res() res: FastifyReply): void {
