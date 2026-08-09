@@ -102,7 +102,7 @@ server/
 | Directory / File | Responsibilities & Design Purpose |
 | :--- | :--- |
 | **`server/proxy.module.ts`** | **Root Composite Module**. Imports `OpenAIModule`, `AnthropicModule`, `GeminiModule`, and `AccountLeaseModule`, registers shared services, and exports `ProxyService`. |
-| **`server/proxy.service.ts`** | **Backward-Compatible Facade**. Keeps external invocation signatures stable while delegating actual protocol handling to sub-services (`OpenAIService`, `AnthropicService`, `GeminiService`). |
+| **`server/proxy.service.ts`** | **The four upstream handlers, and the one flow behind them**. Keeps external invocation signatures stable and holds the four entry points — Anthropic Messages, Gemini `generateContent`, Gemini `streamGenerateContent`, OpenAI chat/Responses. Protocol-specific mapping lives in `modules/<protocol>/` and `common/streaming/`; what remains here is the lease/spend/penalise retry skeleton that binds those modules to the injected services. Read §5.6 before splitting it. |
 | **`common/`** | Provides **shared base classes** (`BaseProxyController`, `BaseProxyService`) for protocol controllers and services, alongside cross-protocol request/response types (`request-interfaces.ts`) and exception definitions. |
 | **`guards/`** | Enforces NestJS guards for API Key authentication, admin endpoint authorization, and OpenCode token scope verification. |
 | **`modules/openai/`** | Manages OpenAI HTTP controllers and service orchestration; the `responses/` sub-directory handles WebSocket protocol state and session lifecycle. |
@@ -152,6 +152,44 @@ When reading, updating, or refactoring code within this directory, strictly foll
 
 5. **NestJS Dependency Injection Standard**
    - All Services and Policies must be annotated with `@Injectable()` and provided via module metadata. Do not use `new` to instantiate Nest-managed services manually.
+
+6. **`proxy.service.ts` is one flow with four entry points — do not split it into four**
+
+   Kanban #52 took this file from 2806 lines to 1195 by moving the stream translators and the
+   cross-surface conversions out. Kanban #60 examined the four handlers that remain and deliberately
+   left them in place. The reasoning, so it is not re-litigated every time the line count is noticed:
+
+   - **The four handlers run one identical sequence.** `createRequestDeadline` →
+     `createTokenRetryState` → for each of 3 attempts: `waitBeforeRetry` → `selectRetryToken` (null ⇒
+     no-available-account error) → `resolveDynamicModelForAccount` → build body →
+     `applyInternalGenerationConstraints` → upstream call → `markUpstreamSuccess` →
+     `attachModelRouteMetadata`; on `isProjectContextError` rebuild the body with an empty
+     `projectId` and repeat the call once, otherwise `prepareGraceRetry` ⇒ continue, else
+     `applyUpstreamPenalty`.
+   - **They share state, not just shape.** One deadline is created before the loop and spent by every
+     attempt, and `retryState` is carried across iterations so a grace retry can skip backoff — what
+     attempt 3 does depends on what attempts 1 and 2 did to the lease.
+   - **Fifteen members of `this` are touched by all four**, spanning lease/retry, routing, request
+     shaping and failure handling. What is unique per handler is 1 member (each Gemini handler), 3
+     (Anthropic) and 7 (OpenAI) — and every one of those is a three-line delegate to a module #52
+     already extracted.
+   - **Splitting would be a rewrite, not a move.** These handlers read `protected` members of
+     `BaseProxyService`. In separate files each would need those passed as an explicit runtime object
+     — the `streamRuntime()` pattern grown from 6 members to roughly 20, three more times. The only
+     way to avoid that is importing the services instead of injecting them, which rule 5 forbids.
+   - Four files would each carry a partial copy of one retry contract, so a change to backoff or
+     penalty policy would need applying in four places. That is worse than 1195 cohesive lines.
+
+   The duplication genuinely worth removing is *inside* each handler: the project-context `catch`
+   re-runs that handler's own happy path with `projectId: ''`. Collapsing it changes control flow, so
+   it belongs in its own card with its own verification, not in a file-splitting change.
+
+7. **Some `private` members of `ProxyService` are test seams — do not delete them as dead code**
+   - `processStreamResponse`, `toInternalGeminiRequest`, `convertOpenAIToClaude` and
+     `convertClaudeToOpenAIResponse` look unreferenced inside the class. Tests reach them by name
+     through `Reflect.get` and `as any` (`proxy-internal-request-mapping.test.ts`,
+     `openai-native-route-payload-contract.test.ts`, `proxy-parity-fixtures.test.ts`,
+     `proxy-retry-mock.test.ts`). Removing or renaming one breaks those suites.
 
 ---
 
