@@ -37,19 +37,33 @@ export interface FakeProxyOptions {
 
 const SURFACE_HANDLERS = [handleOpenAI, handleAnthropic, handleGemini];
 
-async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+async function readRawBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(Buffer.from(chunk));
   }
 
-  const raw = Buffer.concat(chunks).toString('utf8');
-  if (raw.trim().length === 0) {
+  return Buffer.concat(chunks);
+}
+
+/**
+ * The uploads check posts parts as multipart, so the body is no longer always
+ * JSON. Anything that does not parse is handed on as an empty object and the
+ * raw bytes travel beside it — a fake that threw here would report a transport
+ * failure for a request the real proxy handles.
+ */
+function parseJsonBody(raw: Buffer): Record<string, unknown> {
+  const text = raw.toString('utf8');
+  if (text.trim().length === 0) {
     return {};
   }
 
-  const parsed: unknown = JSON.parse(raw);
-  return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function send(response: ServerResponse, reply: FakeProxyReply): void {
@@ -67,12 +81,14 @@ export async function startFakeProxy(options: FakeProxyOptions = {}): Promise<Fa
     void (async () => {
       try {
         const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+        const rawBody = await readRawBody(request);
         const fakeRequest: FakeProxyRequest = {
           method: request.method ?? 'GET',
           path: url.pathname,
           query: url.searchParams,
           headers: request.headers,
-          body: await readJsonBody(request),
+          body: parseJsonBody(rawBody),
+          rawBody,
           defects,
         };
 

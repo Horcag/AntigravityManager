@@ -9,6 +9,7 @@ import {
   TINY_PNG_BASE64,
   TRUNCATION_THRESHOLD,
   countTokens,
+  extractMultipartPayload,
   isKnownModel,
   jsonReply,
   resolveAnswer,
@@ -82,6 +83,19 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
     });
   }
 
+  const contentMatch = /^\/v1\/files\/([^/]+)\/content$/u.exec(request.path);
+  if (request.method === 'GET' && contentMatch) {
+    const stored = COMPLETED_UPLOADS.get(contentMatch[1]);
+    if (!stored) {
+      return uploadError(404, 'No such file', 'invalid_request_error', 'unknown_file', 'file_id');
+    }
+    return {
+      status: 200,
+      contentType: 'application/octet-stream',
+      body: stored.toString('binary'),
+    };
+  }
+
   if (request.method !== 'POST') {
     return undefined;
   }
@@ -89,6 +103,11 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
   // The body is JSON this fixture itself receives; narrowing it once here keeps
   // the per-endpoint code free of repeated casts.
   const body = request.body as ChatBody;
+
+  const uploadsReply = handleUploads(request);
+  if (uploadsReply) {
+    return uploadsReply;
+  }
 
   switch (request.path) {
     case '/v1/chat/completions':
@@ -283,4 +302,176 @@ function handleResponses(request: FakeProxyRequest, body: ChatBody): FakeProxyRe
   const terminalType = truncated ? 'response.incomplete' : 'response.completed';
   frames.push(sseData({ type: terminalType, response: completed }, terminalType));
   return sseReply(frames);
+}
+
+/**
+ * A faithful-enough Uploads plane for the round-trip check: create, add parts,
+ * complete in the order `part_ids` asks for, and serve the assembled bytes back
+ * through the Files content route. State is per-process and never swept — the
+ * fake lives for one test run.
+ */
+const PENDING_UPLOADS = new Map<string, { bytes: number; parts: Map<string, Buffer> }>();
+const COMPLETED_UPLOADS = new Map<string, Buffer>();
+
+let idCounter = 0;
+
+/** 32 hex characters, unique per process — the checker asserts that shape. */
+function hexId(): string {
+  idCounter += 1;
+  return idCounter.toString(16).padStart(32, '0');
+}
+
+function uploadError(
+  status: number,
+  message: string,
+  type: string,
+  code: string,
+  param: string,
+): FakeProxyReply {
+  return jsonReply(status, { error: { message, type, code, param } });
+}
+
+function handleUploads(request: FakeProxyRequest): FakeProxyReply | undefined {
+  if (request.method !== 'POST' || !request.path.startsWith('/v1/uploads')) {
+    return undefined;
+  }
+
+  if (request.path === '/v1/uploads') {
+    const declared = request.body.bytes;
+    if (typeof declared !== 'number' || !Number.isSafeInteger(declared) || declared <= 0) {
+      return uploadError(
+        400,
+        'bytes must be a positive integer',
+        'invalid_request_error',
+        'invalid_value',
+        'bytes',
+      );
+    }
+    const id = `upload_${hexId()}`;
+    PENDING_UPLOADS.set(id, { bytes: declared, parts: new Map() });
+    return jsonReply(200, {
+      id,
+      object: 'upload',
+      bytes: declared,
+      created_at: CREATED,
+      expires_at: CREATED + 3600,
+      filename: String(request.body.filename ?? 'upload.bin'),
+      purpose: String(request.body.purpose ?? 'user_data'),
+      status: 'pending',
+    });
+  }
+
+  const partsMatch = /^\/v1\/uploads\/([^/]+)\/parts$/u.exec(request.path);
+  if (partsMatch) {
+    const upload = PENDING_UPLOADS.get(partsMatch[1]);
+    if (!upload) {
+      return uploadError(
+        404,
+        'No such upload',
+        'invalid_request_error',
+        'unknown_upload',
+        'upload_id',
+      );
+    }
+    const payload = extractMultipartPayload(
+      request.rawBody,
+      typeof request.headers['content-type'] === 'string'
+        ? request.headers['content-type']
+        : undefined,
+    );
+    if (!payload) {
+      return uploadError(
+        400,
+        'A part must carry multipart data',
+        'invalid_request_error',
+        'invalid_value',
+        'data',
+      );
+    }
+    const partId = `part_${hexId()}`;
+    upload.parts.set(partId, payload);
+    return jsonReply(200, {
+      id: partId,
+      object: 'upload.part',
+      created_at: CREATED,
+      upload_id: partsMatch[1],
+    });
+  }
+
+  const completeMatch = /^\/v1\/uploads\/([^/]+)\/complete$/u.exec(request.path);
+  if (completeMatch) {
+    const uploadId = completeMatch[1];
+    const upload = PENDING_UPLOADS.get(uploadId);
+    if (!upload) {
+      return uploadError(
+        404,
+        'No such upload',
+        'invalid_request_error',
+        'unknown_upload',
+        'upload_id',
+      );
+    }
+    const partIds = Array.isArray(request.body.part_ids) ? request.body.part_ids : null;
+    if (!partIds) {
+      return uploadError(
+        400,
+        'part_ids must be an array',
+        'invalid_request_error',
+        'invalid_value',
+        'part_ids',
+      );
+    }
+    const ordered: Buffer[] = [];
+    for (const partId of partIds) {
+      const part = typeof partId === 'string' ? upload.parts.get(partId) : undefined;
+      if (!part) {
+        return uploadError(
+          400,
+          `Part '${String(partId)}' does not belong to this upload`,
+          'invalid_request_error',
+          'invalid_part',
+          'part_ids',
+        );
+      }
+      ordered.push(part);
+    }
+    const assembled = Buffer.concat(ordered);
+    if (assembled.length !== upload.bytes) {
+      return uploadError(
+        400,
+        `Upload declared ${upload.bytes} bytes but assembled ${assembled.length}`,
+        'invalid_request_error',
+        'byte_count_mismatch',
+        'bytes',
+      );
+    }
+    PENDING_UPLOADS.delete(uploadId);
+    const fileId = `file_${hexId()}`;
+    COMPLETED_UPLOADS.set(fileId, assembled);
+    return jsonReply(200, {
+      id: fileId,
+      object: 'file',
+      bytes: assembled.length,
+      created_at: CREATED,
+      filename: 'upload.bin',
+      purpose: 'user_data',
+    });
+  }
+
+  const cancelMatch = /^\/v1\/uploads\/([^/]+)\/cancel$/u.exec(request.path);
+  if (cancelMatch) {
+    const existed = PENDING_UPLOADS.delete(cancelMatch[1]);
+    if (!existed) {
+      return uploadError(
+        404,
+        'No such upload',
+        'invalid_request_error',
+        'unknown_upload',
+        'upload_id',
+      );
+    }
+    return jsonReply(200, { id: cancelMatch[1], object: 'upload', status: 'cancelled' });
+  }
+
+  return undefined;
 }

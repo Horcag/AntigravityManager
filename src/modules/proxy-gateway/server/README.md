@@ -68,6 +68,9 @@ server/
 │  │  ├─ gemini-files.controller.ts        # /upload/v1beta/files and /v1beta/files
 │  │  ├─ client-files.controller.ts        # /v1/files for both the OpenAI and Anthropic dialects
 │  │  └─ {gemini,openai,anthropic}-file-resource.ts  # Per-dialect shapes, errors and upload rules
+│  ├─ uploads/                             # OpenAI multipart upload-session protocol over the file store
+│  │  ├─ openai-uploads.controller.ts      # /v1/uploads create/parts/complete/cancel routes
+│  │  └─ openai-uploads.service.ts         # Expiring partial parts, then one Files commit
 │  └─ account-lease/                       # Account lease and scheduling sub-module
 │     ├─ account-lease.service.ts          # Main Account Lease facade service
 │     ├─ account-lease.module.ts           # Account Lease module assembly
@@ -392,6 +395,10 @@ It is **not** provider-side storage, and it delivers **none of the token savings
 **Why one controller serves two dialects.** OpenAI and Anthropic both publish their Files API at exactly `/v1/files`, so a single route table has to answer both. `ClientFilesController` picks the dialect per request: any `anthropic-version` or `anthropic-beta` header means the Anthropic dialect, everything else is OpenAI. Each dialect's shapes, errors and upload rules live in its own adapter module (`openai-file-resource.ts`, `anthropic-file-resource.ts`) beside the controller. **The Anthropic beta header is required** — deliberately, since it is also how a request declares which dialect it wants; the error when it is missing names the header. Gemini has its own controller (`GeminiFilesController`) because its paths do not collide.
 
 All three are views over the same store, so a file uploaded through one surface can be referenced from any of them.
+
+### OpenAI Uploads protocol
+
+`POST /v1/uploads` creates an expiring in-memory upload session; `POST /v1/uploads/{id}/parts` retains multipart parts only until `POST /v1/uploads/{id}/complete` names their ids in assembly order. Completion checks the declared byte count before writing one ordinary `file-…` record through `FileContentStore`; cancellation, expiry (one hour), and process shutdown discard the partial buffers. As with Files, this is **local** state: each later request that names the resulting file handle still expands the bytes inline to the upstream provider. It provides no provider-side cache and **no token saving** there.
 
 ### Reference expansion
 
