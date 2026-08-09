@@ -124,6 +124,13 @@ export function handleOpenAI(request: FakeProxyRequest): FakeProxyReply | undefi
     return uploadsReply;
   }
 
+  if (request.path === '/v1/audio/translations') {
+    // The real endpoint transcribes and then translates; the fake only has to
+    // answer in English so the check can tell a translation from an echo of the
+    // French recording it posted.
+    return jsonReply(200, { text: 'Yes, certainly.' });
+  }
+
   switch (request.path) {
     case '/v1/chat/completions':
       return handleChatCompletions(request, body);
