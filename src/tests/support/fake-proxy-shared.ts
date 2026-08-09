@@ -13,6 +13,8 @@
 export type FakeProxyDefect =
   /** `json_object` content comes back wrapped in a markdown fence. */
   | 'openai-json-object-fence'
+  /** The json_schema content is truncated before it can be completed. */
+  | 'openai-json-schema-truncated'
   /** `usage.total_tokens` is not the sum of its parts. */
   | 'openai-usage-total-mismatch'
   /** The Responses stream deltas do not add up to the completed response. */
@@ -30,6 +32,7 @@ export type FakeProxyDefect =
 
 export const FAKE_PROXY_DEFECTS: readonly FakeProxyDefect[] = [
   'openai-json-object-fence',
+  'openai-json-schema-truncated',
   'openai-usage-total-mismatch',
   'openai-responses-stream-drift',
   'openai-client-error-typed-server-error',

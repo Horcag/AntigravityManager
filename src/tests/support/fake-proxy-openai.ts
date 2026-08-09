@@ -34,7 +34,7 @@ interface ChatBody {
   stream_options?: { include_usage?: boolean };
   tools?: { function?: { name?: string } }[];
   tool_choice?: string;
-  response_format?: { type?: string };
+  response_format?: { type?: string; json_schema?: unknown };
 }
 
 const CHAT_ID = 'chatcmpl-fake-conformance';
@@ -123,7 +123,10 @@ function handleChatCompletions(request: FakeProxyRequest, body: ChatBody): FakeP
 
   const prompt = lastUserMessage(body);
   const wantsJson = body.response_format?.type?.startsWith('json') ?? false;
-  const truncated = (body.max_tokens ?? Number.MAX_SAFE_INTEGER) <= TRUNCATION_THRESHOLD;
+  const wantsJsonSchema = Boolean(body.response_format?.json_schema);
+  const truncated =
+    (body.max_tokens ?? Number.MAX_SAFE_INTEGER) <= TRUNCATION_THRESHOLD ||
+    (request.defects.has('openai-json-schema-truncated') && wantsJsonSchema);
   const { text } = resolveAnswer(prompt, {
     json: wantsJson,
     stopSequences: body.stop,
@@ -163,7 +166,9 @@ function handleChatCompletions(request: FakeProxyRequest, body: ChatBody): FakeP
   const content =
     wantsJson && request.defects.has('openai-json-object-fence')
       ? `\`\`\`json\n${JSON_ANSWER}\n\`\`\``
-      : text;
+      : request.defects.has('openai-json-schema-truncated') && wantsJsonSchema
+        ? '{"city":'
+        : text;
   const finishReason = truncated ? 'length' : 'stop';
   const chatUsage = usage(prompt, content, request.defects.has('openai-usage-total-mismatch'));
 
@@ -226,26 +231,29 @@ function handleResponses(request: FakeProxyRequest, body: ChatBody): FakeProxyRe
   const prompt = lastUserMessage(body);
   const truncated = (body.max_output_tokens ?? Number.MAX_SAFE_INTEGER) <= TRUNCATION_THRESHOLD;
   const { text } = resolveAnswer(prompt, { truncated });
-  const tokens = usage(prompt, text, false);
+  const usageCounters = usage(prompt, text, false);
+  const status = truncated ? 'incomplete' : 'completed';
+
   const completed = {
     id: RESPONSE_ID,
     object: 'response',
     created_at: CREATED,
     model: body.model,
-    status: 'completed',
+    status,
+    ...(truncated ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
     output: [
       {
         id: 'msg_fake_1',
         type: 'message',
-        status: 'completed',
+        status,
         role: 'assistant',
         content: [{ type: 'output_text', text, annotations: [] }],
       },
     ],
     usage: {
-      input_tokens: tokens.prompt_tokens,
-      output_tokens: tokens.completion_tokens,
-      total_tokens: tokens.prompt_tokens + tokens.completion_tokens,
+      input_tokens: usageCounters.prompt_tokens,
+      output_tokens: usageCounters.completion_tokens,
+      total_tokens: usageCounters.prompt_tokens + usageCounters.completion_tokens,
     },
   };
 
@@ -272,6 +280,7 @@ function handleResponses(request: FakeProxyRequest, body: ChatBody): FakeProxyRe
     );
   }
 
-  frames.push(sseData({ type: 'response.completed', response: completed }, 'response.completed'));
+  const terminalType = truncated ? 'response.incomplete' : 'response.completed';
+  frames.push(sseData({ type: terminalType, response: completed }, terminalType));
   return sseReply(frames);
 }

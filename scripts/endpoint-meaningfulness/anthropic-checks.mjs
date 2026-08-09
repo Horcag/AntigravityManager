@@ -304,10 +304,14 @@ export const ANTHROPIC_CHECKS = [
       t.nonEmptyString(streamed, 'the concatenated text deltas');
 
       const messageDelta = events.find((event) => event.json.type === 'message_delta')?.json;
-      t.equal(messageDelta?.delta?.stop_reason, 'end_turn', 'message_delta.delta.stop_reason');
-      t.positiveInteger(messageDelta?.usage?.output_tokens, 'message_delta.usage.output_tokens');
-
       const natural = ctx.recall('anthropic.stop_reason.natural');
+      const expectedStopReason = natural ?? 'end_turn';
+      t.equal(
+        messageDelta?.delta?.stop_reason,
+        expectedStopReason,
+        'message_delta.delta.stop_reason',
+      );
+      t.positiveInteger(messageDelta?.usage?.output_tokens, 'message_delta.usage.output_tokens');
       if (natural !== undefined) {
         t.equal(
           messageDelta?.delta?.stop_reason,

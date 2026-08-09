@@ -15,6 +15,18 @@ export const LONG_PROMPT =
   'List the first forty prime numbers, one per line, and explain in a sentence why each is prime.';
 
 /**
+ * Shared ceiling for content checks that must finish structured output.
+ *
+ * The budget is shared with thinking, so it has to cover both. Measured on
+ * 2026-08-09 against a live `gemini-3-flash`: the same schema and prompt spent
+ * 243 tokens thinking and returned prose cut mid-sentence at 256, and returned
+ * clean JSON six runs out of six at this value.
+ */
+export const SCHEMA_MAX_OUTPUT_TOKENS = 2048;
+/** A deliberately small budget that always truncates structured-content paths. */
+export const RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS = 16;
+
+/**
  * Drives a stop sequence. The stop text sits in the middle of a list the model
  * is told to reproduce verbatim, so a working stop cut removes the tail; the
  * assertion is only ever "the stop text is absent", which a correct

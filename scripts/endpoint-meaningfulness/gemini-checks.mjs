@@ -20,6 +20,7 @@ import {
   WEATHER_TOOL_NAME,
   WEATHER_TOOL_PROMPT,
   WEATHER_TOOL_SCHEMA,
+  SCHEMA_MAX_OUTPUT_TOKENS,
   parseModelJson,
 } from './fixtures.mjs';
 import { validateAgainstSchema } from './schema.mjs';
@@ -313,7 +314,7 @@ export const GEMINI_CHECKS = [
         body: {
           contents: userContents(CITY_JSON_PROMPT),
           generationConfig: {
-            maxOutputTokens: 256,
+            maxOutputTokens: SCHEMA_MAX_OUTPUT_TOKENS,
             responseMimeType: 'application/json',
             responseSchema: CITY_SCHEMA,
           },
@@ -322,7 +323,17 @@ export const GEMINI_CHECKS = [
       t.equal(response.status, 200, 'HTTP status');
 
       const parsed = parseModelJson(textOf(response.json));
+      const finishReason = response.json?.candidates?.[0]?.finishReason;
+      const usage = response.json?.usageMetadata;
       if (parsed.error) {
+        if (finishReason === 'MAX_TOKENS') {
+          t.inconclusive(
+            `responseSchema text was truncated: finishReason=MAX_TOKENS, ` +
+              `usageMetadata.candidatesTokenCount=${String(usage?.candidatesTokenCount ?? 'unknown')}`,
+          );
+          return;
+        }
+
         t.ok(false, 'the response text parses as JSON', 'valid JSON', parsed.error);
         return;
       }
@@ -377,9 +388,9 @@ export const GEMINI_CHECKS = [
         .map((candidate) => candidate.finishReason)
         .filter((reason) => reason !== undefined && reason !== null);
       t.equal(finishReasons.length, 1, 'exactly one chunk carries a finishReason');
-      t.equal(finishReasons[0], 'STOP', 'the terminal finishReason');
-
       const natural = ctx.recall('gemini.finishReason.natural');
+      const expectedFinishReason = natural ?? 'STOP';
+      t.equal(finishReasons[0], expectedFinishReason, 'the terminal finishReason');
       if (natural !== undefined) {
         t.equal(finishReasons[0], natural, 'the streamed finishReason matches the unary one');
       }

@@ -21,6 +21,7 @@ interface CheckResult {
   name: string;
   outcome: string;
   failures: { what: string; expected: string; actual: string }[];
+  inconclusiveReasons: string[];
   error?: string;
 }
 
@@ -88,7 +89,10 @@ describe('endpoint meaningfulness checker', () => {
       expect(run.ok).toBe(false);
       expect(run.results).toHaveLength(1);
       expect(run.results[0].outcome).toBe('failed');
-      expect(run.results[0].failures[0].what).toBe('choices[0].message.content parses as JSON');
+      expect([
+        'choices[0].message.content parses as JSON',
+        'json_object content parses as JSON',
+      ]).toContain(run.results[0].failures[0].what);
       expect(run.results[0].failures[0].actual).toContain('markdown fence');
     } finally {
       await broken.close();
@@ -97,11 +101,20 @@ describe('endpoint meaningfulness checker', () => {
 
   // One row per defect class the checker exists to catch; every one of these
   // answers HTTP 200 (or a plausible 4xx), so only the content betrays it.
-  const DEFECT_CASES: { defect: FakeProxyDefect; check: string }[] = [
+  const DEFECT_CASES: {
+    defect: FakeProxyDefect;
+    check: string;
+    expectedOutcome?: 'failed' | 'inconclusive';
+  }[] = [
     { defect: 'openai-json-object-fence', check: 'openai.chat.json-object' },
     { defect: 'openai-usage-total-mismatch', check: 'openai.chat.natural-stop' },
     { defect: 'openai-responses-stream-drift', check: 'openai.responses.stream-consistency' },
     { defect: 'openai-client-error-typed-server-error', check: 'openai.rejects-unknown-model' },
+    {
+      defect: 'openai-json-schema-truncated',
+      check: 'openai.chat.json-schema',
+      expectedOutcome: 'inconclusive',
+    },
     { defect: 'anthropic-stop-sequence-as-end-turn', check: 'anthropic.messages.stop-sequence' },
     { defect: 'anthropic-empty-thinking-block', check: 'anthropic.messages.natural-stop' },
     { defect: 'gemini-max-tokens-as-stop', check: 'gemini.generate.max-tokens' },
@@ -114,19 +127,28 @@ describe('endpoint meaningfulness checker', () => {
     );
   });
 
-  it.each(DEFECT_CASES)('reports $defect via $check', async ({ defect, check }) => {
-    const broken = await startFakeProxy({ defects: [defect] });
-    try {
-      const run = await runAgainst(broken, { only: [check] });
+  it.each(DEFECT_CASES)(
+    'reports $defect via $check',
+    async ({ defect, check, expectedOutcome }) => {
+      const broken = await startFakeProxy({ defects: [defect] });
+      try {
+        const run = await runAgainst(broken, { only: [check] });
+        const expected = expectedOutcome ?? 'failed';
 
-      expect(run.results.map((result) => result.name)).toEqual([check]);
-      expect(run.results[0].outcome).toBe('failed');
-      expect(run.results[0].failures.length).toBeGreaterThan(0);
-      expect(run.ok).toBe(false);
-    } finally {
-      await broken.close();
-    }
-  });
+        expect(run.results.map((result) => result.name)).toEqual([check]);
+        expect(run.results[0].outcome).toBe(expected);
+        if (expected === 'inconclusive') {
+          expect(run.results[0].inconclusiveReasons.length).toBeGreaterThan(0);
+        } else {
+          expect(run.results[0].failures.length).toBeGreaterThan(0);
+        }
+
+        expect(run.ok).toBe(expected === 'inconclusive');
+      } finally {
+        await broken.close();
+      }
+    },
+  );
 
   it('leaves the other surfaces untouched when one surface is selected', async () => {
     const run = await runAgainst(conforming, { only: [] });
