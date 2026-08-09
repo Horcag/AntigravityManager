@@ -62,6 +62,7 @@ function send(response: ServerResponse, reply: FakeProxyReply): void {
 
 export async function startFakeProxy(options: FakeProxyOptions = {}): Promise<FakeProxyServer> {
   const defects = new Set(options.defects ?? []);
+  const storedChatCompletions = new Map<string, Record<string, unknown>>();
 
   const server: Server = createServer((request, response) => {
     void (async () => {
@@ -74,6 +75,7 @@ export async function startFakeProxy(options: FakeProxyOptions = {}): Promise<Fa
           headers: request.headers,
           body: await readJsonBody(request),
           defects,
+          storedChatCompletions,
         };
 
         for (const handler of SURFACE_HANDLERS) {

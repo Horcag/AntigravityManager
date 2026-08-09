@@ -1,5 +1,8 @@
 import { DurableRecordStore } from '@/shared/persistence/durable-record-store';
-import type { OpenAIChatRequest } from '../../../common/interfaces/request-interfaces';
+import type {
+  OpenAIChatRequest,
+  OpenAIChatResponse,
+} from '../../../common/interfaces/request-interfaces';
 
 export interface OpenAIResponsesSession {
   inputItems: unknown[];
@@ -9,6 +12,8 @@ export interface OpenAIResponsesSession {
   requestDefaults?: Record<string, unknown>;
   /** The completed Responses payload, so GET /v1/responses/{id} can replay it. */
   response?: Record<string, unknown>;
+  /** The completed Chat Completions payload, so its GET route can replay it. */
+  storedChatCompletion?: OpenAIChatResponse;
   store?: boolean;
   tools?: OpenAIChatRequest['tools'];
   toolCallItems?: unknown[];
@@ -18,7 +23,9 @@ export interface OpenAIResponsesSessionStoreLike {
   clear(): void;
   delete(responseId: string): void;
   get(responseId: string): OpenAIResponsesSession | null;
+  getStoredChatCompletion(completionId: string): OpenAIChatResponse | null;
   save(responseId: string, session: OpenAIResponsesSession): void;
+  saveStoredChatCompletion(completion: OpenAIChatResponse): void;
 }
 
 export interface OpenAIResponsesSessionStoreOptions {
@@ -67,6 +74,18 @@ export class OpenAIResponsesSessionStoreImpl implements OpenAIResponsesSessionSt
     });
   }
 
+  public getStoredChatCompletion(completionId: string): OpenAIChatResponse | null {
+    return this.sessions.get(completionId)?.storedChatCompletion ?? null;
+  }
+
+  public saveStoredChatCompletion(completion: OpenAIChatResponse): void {
+    this.save(completion.id, {
+      inputItems: [],
+      model: completion.model,
+      storedChatCompletion: completion,
+    });
+  }
+
   public clear(): void {
     this.sessions.clear();
   }
@@ -91,6 +110,7 @@ function cloneOpenAIResponsesSession(session: OpenAIResponsesSession): OpenAIRes
     prewarm: session.prewarm,
     requestDefaults: session.requestDefaults ? { ...session.requestDefaults } : undefined,
     response: session.response,
+    storedChatCompletion: session.storedChatCompletion,
     store: session.store,
     tools: session.tools,
     toolCallItems: [...(session.toolCallItems ?? [])],

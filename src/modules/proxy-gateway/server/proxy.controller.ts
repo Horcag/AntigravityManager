@@ -10,6 +10,7 @@ import {
   Inject,
   Logger,
   Optional,
+  Param,
 } from '@nestjs/common';
 import { FastifyReply } from 'fastify';
 import { ProxyService } from './proxy.service';
@@ -27,6 +28,7 @@ import { toOpenAIResponsesResponse } from '../antigravity/OpenAIResponsesRespons
 import {
   normalizeOpenAIChatRequest,
   normalizeOpenAICompletionRequest,
+  buildStoredChatCompletionNotFoundError,
 } from './modules/openai/chat/openai-request-contract';
 import {
   AnthropicRequestValidationError,
@@ -206,6 +208,20 @@ export class ProxyController {
     await this.respondOpenAIChatCompletions(body, res);
   }
 
+  @Get('chat/completions/:completionId')
+  getStoredChatCompletion(
+    @Param('completionId') completionId: string,
+    @Res() res: FastifyReply,
+  ): void {
+    const completion = this.responsesSessions.getStoredChatCompletion(completionId);
+    if (!completion) {
+      res.status(HttpStatus.NOT_FOUND).send(buildStoredChatCompletionNotFoundError(completionId));
+      return;
+    }
+
+    res.status(HttpStatus.OK).send(completion);
+  }
+
   @Post('completions')
   async completions(@Body() body: OpenAICompletionRequest, @Res() res: FastifyReply) {
     try {
@@ -270,6 +286,9 @@ export class ProxyController {
         writeSseResponse(res, result, 'openai', routeHeaders);
         return;
       } else {
+        if (request.store === true) {
+          this.responsesSessions.saveStoredChatCompletion(result as OpenAIChatResponse);
+        }
         applyResponseHeaders(res, routeHeaders);
         res.status(HttpStatus.OK).send(result);
       }
