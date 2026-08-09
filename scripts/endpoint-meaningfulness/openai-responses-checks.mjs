@@ -9,7 +9,7 @@
  * codebase have drifted apart before.
  */
 
-import { NATURAL_PROMPT } from './fixtures.mjs';
+import { NATURAL_PROMPT, RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS } from './fixtures.mjs';
 
 const RESPONSES_PATH = '/v1/responses';
 
@@ -56,6 +56,38 @@ export const OPENAI_RESPONSES_CHECKS = [
           usage.total_tokens,
           (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
           'usage.total_tokens === input_tokens + output_tokens',
+        );
+      }
+    },
+  },
+  {
+    name: 'openai.responses.truncated',
+    surface: 'openai',
+    endpoint: `POST ${RESPONSES_PATH}`,
+    title:
+      'max_output_tokens truncates and is reported as status=incomplete with reason=max_output_tokens',
+    upstreamCalls: 1,
+    async run(ctx, t) {
+      const cap = RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS;
+      const response = await ctx.json(RESPONSES_PATH, {
+        body: { model: ctx.model, input: NATURAL_PROMPT, max_output_tokens: cap },
+      });
+      t.equal(response.status, 200, 'HTTP status');
+      t.equal(response.json?.status, 'incomplete', 'status');
+      t.equal(
+        response.json?.incomplete_details?.reason,
+        'max_output_tokens',
+        'incomplete_details.reason',
+      );
+
+      const usage = response.json?.usage;
+      if (t.plainObject(usage, 'usage')) {
+        t.positiveInteger(usage.output_tokens, 'usage.output_tokens');
+        t.ok(
+          usage.output_tokens <= cap,
+          'usage.output_tokens respects max_output_tokens',
+          `an integer <= ${cap}`,
+          usage.output_tokens,
         );
       }
     },
@@ -119,6 +151,78 @@ export const OPENAI_RESPONSES_CHECKS = [
       t.positiveInteger(
         completed.json.response?.usage?.output_tokens,
         'the terminal usage.output_tokens',
+      );
+    },
+  },
+  {
+    name: 'openai.responses.stream-truncates',
+    surface: 'openai',
+    endpoint: `POST ${RESPONSES_PATH} (stream)`,
+    title: 'max_output_tokens truncates and is reported as response.incomplete',
+    upstreamCalls: 1,
+    async run(ctx, t) {
+      const cap = RESPONSES_TRUNCATION_MAX_OUTPUT_TOKENS;
+      const response = await ctx.sse(RESPONSES_PATH, {
+        body: {
+          model: ctx.model,
+          input: NATURAL_PROMPT,
+          max_output_tokens: cap,
+          stream: true,
+        },
+      });
+      t.equal(response.status, 200, 'HTTP status');
+
+      const events = response.events.filter((event) => event.json !== undefined);
+      if (!t.nonEmptyArray(events, 'parsed stream events')) {
+        return;
+      }
+
+      t.ok(
+        events.every((event) => event.event === undefined || event.event === event.json.type),
+        'every SSE event name matches the payload type',
+        'event name === data.type',
+        events
+          .filter((event) => event.event !== undefined && event.event !== event.json.type)
+          .map((event) => ({ event: event.event, type: event.json.type })),
+      );
+
+      const streamed = events
+        .filter((event) => event.json.type === 'response.output_text.delta')
+        .map((event) => event.json.delta ?? '')
+        .join('');
+      t.nonEmptyString(streamed, 'the concatenated output_text deltas');
+
+      const incomplete = events.find((event) => event.json.type === 'response.incomplete');
+      if (
+        !t.ok(
+          incomplete !== undefined,
+          'a response.incomplete event arrives',
+          'response.incomplete',
+          events.map((event) => event.json.type),
+        )
+      ) {
+        return;
+      }
+
+      t.equal(
+        incomplete.json.response?.status,
+        'incomplete',
+        'response.incomplete carries status=incomplete',
+      );
+      t.equal(
+        incomplete.json.response?.incomplete_details?.reason,
+        'max_output_tokens',
+        'incomplete_details.reason',
+      );
+      t.positiveInteger(
+        incomplete.json.response?.usage?.output_tokens,
+        'the terminal usage.output_tokens is reported',
+      );
+      t.ok(
+        incomplete.json.response?.usage?.output_tokens <= cap,
+        'usage.output_tokens respects max_output_tokens',
+        `an integer <= ${cap}`,
+        incomplete.json.response?.usage?.output_tokens,
       );
     },
   },

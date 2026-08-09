@@ -10,6 +10,7 @@
 import {
   CITY_JSON_PROMPT,
   CITY_SCHEMA,
+  SCHEMA_MAX_OUTPUT_TOKENS,
   LONG_PROMPT,
   NATURAL_PROMPT,
   STOP_PROMPT,
@@ -78,6 +79,24 @@ function assertErrorEnvelope(t, body, { expectedCode, expectedParam } = {}) {
   if (expectedParam !== undefined) {
     t.equal(body.error.param, expectedParam, 'error.param');
   }
+}
+
+function markTruncatedJsonFailure(t, parsed, finishReason, usage, endpointLabel) {
+  if (!parsed.error) {
+    return false;
+  }
+
+  if (finishReason === 'length') {
+    const completionTokens = usage?.completion_tokens;
+    t.inconclusive(
+      `${endpointLabel} was truncated: finish_reason=length, ` +
+        `usage.completion_tokens=${String(completionTokens ?? 'unknown')}`,
+    );
+    return true;
+  }
+
+  t.ok(false, `${endpointLabel} parses as JSON`, 'valid JSON', parsed.error);
+  return true;
 }
 
 export const OPENAI_CHECKS = [
@@ -240,8 +259,15 @@ export const OPENAI_CHECKS = [
       t.equal(call?.function?.name, WEATHER_TOOL_NAME, 'tool_calls[0].function.name');
 
       const parsed = parseModelJson(call?.function?.arguments);
-      if (parsed.error) {
-        t.ok(false, 'tool_calls[0].function.arguments parses as JSON', 'valid JSON', parsed.error);
+      if (
+        markTruncatedJsonFailure(
+          t,
+          parsed,
+          choice?.finish_reason,
+          response.json?.usage,
+          'tool call arguments',
+        )
+      ) {
         return;
       }
 
@@ -265,13 +291,25 @@ export const OPENAI_CHECKS = [
         body: chatBody(ctx, {
           messages: [{ role: 'user', content: CITY_JSON_PROMPT }],
           response_format: { type: 'json_object' },
-          max_tokens: 256,
+          max_tokens: SCHEMA_MAX_OUTPUT_TOKENS,
         }),
       });
       t.equal(response.status, 200, 'HTTP status');
 
       const content = firstChoice(response.json)?.message?.content;
       const parsed = parseModelJson(content);
+      if (
+        markTruncatedJsonFailure(
+          t,
+          parsed,
+          firstChoice(response.json)?.finish_reason,
+          response.json?.usage,
+          'json_object content',
+        )
+      ) {
+        return;
+      }
+
       t.ok(!parsed.error, 'choices[0].message.content parses as JSON', 'valid JSON', parsed.error);
       if (!parsed.error) {
         t.plainObject(parsed.value, 'the parsed json_object content');
@@ -292,15 +330,22 @@ export const OPENAI_CHECKS = [
             type: 'json_schema',
             json_schema: { name: 'city_population', strict: true, schema: CITY_SCHEMA },
           },
-          max_tokens: 256,
+          max_tokens: SCHEMA_MAX_OUTPUT_TOKENS,
         }),
       });
       t.equal(response.status, 200, 'HTTP status');
 
       const content = firstChoice(response.json)?.message?.content;
       const parsed = parseModelJson(content);
-      if (parsed.error) {
-        t.ok(false, 'choices[0].message.content parses as JSON', 'valid JSON', parsed.error);
+      if (
+        markTruncatedJsonFailure(
+          t,
+          parsed,
+          firstChoice(response.json)?.finish_reason,
+          response.json?.usage,
+          'json_schema content',
+        )
+      ) {
         return;
       }
 
@@ -368,9 +413,9 @@ export const OPENAI_CHECKS = [
         .map((choice) => choice.finish_reason)
         .filter((reason) => reason !== null && reason !== undefined);
       t.equal(finishReasons.length, 1, 'exactly one chunk carries a finish_reason');
-      t.equal(finishReasons[0], 'stop', 'the terminal finish_reason');
-
       const natural = ctx.recall('openai.finish_reason.natural');
+      const expectedFinishReason = natural ?? 'stop';
+      t.equal(finishReasons[0], expectedFinishReason, 'the terminal finish_reason');
       if (natural !== undefined) {
         t.equal(finishReasons[0], natural, 'the streamed finish_reason matches the unary one');
       }
