@@ -16,6 +16,7 @@ import { decodeSignature } from './signature-utils';
 import { logger } from '@/shared/logging/logger';
 import { normalizeFunctionCallArgs } from './function-call-args';
 import { StopSequenceScanner } from './stop-sequences';
+import { toAnthropicUsage } from '../server/common/usage/anthropic-usage';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
 
 type BlockType = 'None' | 'Text' | 'Thinking' | 'Function';
@@ -135,20 +136,7 @@ export class StreamingState {
 
     const usageMeta = rawJson.usageMetadata;
     const usage: Usage = usageMeta
-      ? {
-          input_tokens: usageMeta.total_input_tokens ?? usageMeta.promptTokenCount ?? 0,
-          output_tokens: usageMeta.total_output_tokens ?? usageMeta.candidatesTokenCount ?? 0,
-          cache_read_input_tokens:
-            usageMeta.total_cached_tokens ??
-            usageMeta.cachedContentTokenCount ??
-            usageMeta.cachedTokens ??
-            0,
-          reasoning_tokens:
-            usageMeta.total_thought_tokens ??
-            usageMeta.totalThoughtTokens ??
-            usageMeta.thoughtsTokenCount ??
-            0,
-        }
+      ? toAnthropicUsage(usageMeta)
       : { input_tokens: 0, output_tokens: 0 };
 
     const message = {
@@ -308,21 +296,7 @@ export class StreamingState {
     }
 
     const usage: Usage = usageMetadata
-      ? {
-          input_tokens: usageMetadata.total_input_tokens ?? usageMetadata.promptTokenCount ?? 0,
-          output_tokens:
-            usageMetadata.total_output_tokens ?? usageMetadata.candidatesTokenCount ?? 0,
-          cache_read_input_tokens:
-            usageMetadata.total_cached_tokens ??
-            usageMetadata.cachedContentTokenCount ??
-            usageMetadata.cachedTokens ??
-            0,
-          reasoning_tokens:
-            usageMetadata.total_thought_tokens ??
-            usageMetadata.totalThoughtTokens ??
-            usageMetadata.thoughtsTokenCount ??
-            0,
-        }
+      ? toAnthropicUsage(usageMetadata)
       : { input_tokens: 0, output_tokens: 0 };
     if (webSearchResultSet) {
       usage.server_tool_use = { web_search_requests: webSearchResultSet.requestCount };

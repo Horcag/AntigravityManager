@@ -3,10 +3,8 @@ import { Observable } from 'rxjs';
 import { v4 as uuidv4 } from 'uuid';
 import type { StreamingSignatureState } from '../../../antigravity/ClaudeStreamingMapper';
 import { OpenAIResponsesStreamingMapper } from '../../../antigravity/OpenAIResponsesStreamingMapper';
-import {
-  toOpenAIResponsesUsage,
-  toOpenAIUsageFromGeminiUsageMetadata,
-} from '../../../antigravity/OpenAIUsageMapper';
+import { toOpenAIResponsesUsage } from '../../../antigravity/OpenAIUsageMapper';
+import { toOpenAIUsageFromGeminiUsageMetadata } from '../usage/openai-usage';
 import { decodeInternalSseData } from '../../../antigravity/internal-sse';
 import { InvalidFunctionCallArgumentsError } from '../../../antigravity/function-call-args';
 import { ToolCallIdConflictError } from '../../../antigravity/tool-call-id-integrity';

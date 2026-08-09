@@ -8,6 +8,7 @@ import {
   GroundingMetadata,
 } from './types';
 import { applyGroundingCitations, renderGroundingMarkdown } from './grounding-citations';
+import { toAnthropicUsage } from '../server/common/usage/anthropic-usage';
 import {
   ANTHROPIC_WEB_SEARCH_TOOL_NAME,
   buildAnthropicWebSearchBlocks,
@@ -385,25 +386,8 @@ class NonStreamingProcessor {
     }
 
     const usage: Usage = {
-      input_tokens:
-        geminiResponse.usageMetadata?.total_input_tokens ??
-        geminiResponse.usageMetadata?.promptTokenCount ??
-        0,
-      output_tokens:
-        geminiResponse.usageMetadata?.total_output_tokens ??
-        geminiResponse.usageMetadata?.candidatesTokenCount ??
-        0,
+      ...toAnthropicUsage(geminiResponse.usageMetadata),
       cache_creation_input_tokens: 0,
-      cache_read_input_tokens:
-        geminiResponse.usageMetadata?.total_cached_tokens ??
-        geminiResponse.usageMetadata?.cachedContentTokenCount ??
-        geminiResponse.usageMetadata?.cachedTokens ??
-        0,
-      reasoning_tokens:
-        geminiResponse.usageMetadata?.total_thought_tokens ??
-        geminiResponse.usageMetadata?.totalThoughtTokens ??
-        geminiResponse.usageMetadata?.thoughtsTokenCount ??
-        0,
       ...(this.webSearchResultSet
         ? { server_tool_use: { web_search_requests: this.webSearchResultSet.requestCount } }
         : {}),

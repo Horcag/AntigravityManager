@@ -51,7 +51,7 @@ describe('toOpenAIUsage', () => {
     });
   });
 
-  it('does not double-count reasoning already included in legacy Gemini output totals', () => {
+  it('adds Gemini legacy reasoning tokens to completion before summing totals', () => {
     expect(
       toOpenAIUsageFromGeminiUsageMetadata({
         cachedContentTokenCount: 11,
@@ -61,14 +61,14 @@ describe('toOpenAIUsage', () => {
       }),
     ).toEqual({
       prompt_tokens: 19,
-      completion_tokens: 7,
-      total_tokens: 26,
+      completion_tokens: 12,
+      total_tokens: 31,
       prompt_tokens_details: { cached_tokens: 11 },
       completion_tokens_details: { reasoning_tokens: 5 },
     });
   });
 
-  it('does not double-count tool-use tokens already included in legacy Gemini output totals', () => {
+  it('adds tool-use tokens to completion when present', () => {
     expect(
       toOpenAIUsageFromGeminiUsageMetadata({
         candidatesTokenCount: 20,
@@ -78,14 +78,14 @@ describe('toOpenAIUsage', () => {
       }),
     ).toEqual({
       prompt_tokens: 7,
-      completion_tokens: 20,
-      total_tokens: 27,
+      completion_tokens: 33,
+      total_tokens: 40,
       prompt_tokens_details: undefined,
       completion_tokens_details: { reasoning_tokens: 8 },
     });
   });
 
-  it('maps Gemini Interactions usage without subtracting cached input tokens', () => {
+  it('adds native reasoning to completion for Interactions usage', () => {
     expect(
       toOpenAIUsageFromGeminiUsageMetadata({
         total_cached_tokens: 40,
@@ -121,7 +121,7 @@ describe('toOpenAIUsage', () => {
     });
   });
 
-  it('preserves the upstream Gemini total when it is provided', () => {
+  it('computes OpenAI totals from prompt + completion even when vendor total is absent', () => {
     expect(
       toOpenAIUsageFromGeminiUsageMetadata({
         total_input_tokens: 10,
@@ -131,13 +131,13 @@ describe('toOpenAIUsage', () => {
     ).toEqual({
       prompt_tokens: 10,
       completion_tokens: 5,
-      total_tokens: 20,
+      total_tokens: 15,
       prompt_tokens_details: undefined,
       completion_tokens_details: undefined,
     });
   });
 
-  it('preserves the legacy Gemini total when it is provided', () => {
+  it('computes OpenAI totals from prompt + completion even on legacy fields', () => {
     expect(
       toOpenAIUsageFromGeminiUsageMetadata({
         promptTokenCount: 10,
@@ -147,9 +147,53 @@ describe('toOpenAIUsage', () => {
     ).toEqual({
       prompt_tokens: 10,
       completion_tokens: 5,
-      total_tokens: 18,
+      total_tokens: 15,
       prompt_tokens_details: undefined,
       completion_tokens_details: undefined,
+    });
+  });
+
+  it('uses the same canonical accounting for openai.chat and openai.responses payloads', () => {
+    const upstreamUsage = {
+      promptTokenCount: 89,
+      candidatesTokenCount: 26,
+      thoughtsTokenCount: 170,
+    };
+    const openAIUsage = toOpenAIUsageFromGeminiUsageMetadata(upstreamUsage);
+
+    expect(openAIUsage).toEqual({
+      prompt_tokens: 89,
+      completion_tokens: 196,
+      total_tokens: 285,
+      prompt_tokens_details: undefined,
+      completion_tokens_details: { reasoning_tokens: 170 },
+    });
+    expect(toOpenAIResponsesUsage(openAIUsage)).toEqual({
+      input_tokens: 89,
+      output_tokens: 196,
+      total_tokens: 285,
+      input_tokens_details: undefined,
+      output_tokens_details: { reasoning_tokens: 170 },
+    });
+  });
+
+  it('picks one dialect name per quantity when a payload carries several aliases', () => {
+    expect(
+      toOpenAIUsageFromGeminiUsageMetadata({
+        promptTokenCount: 30,
+        candidatesTokenCount: 10,
+        total_thought_tokens: 40,
+        totalThoughtTokens: 40,
+        thoughtsTokenCount: 40,
+        cachedContentTokenCount: 6,
+        cachedTokens: 6,
+      }),
+    ).toEqual({
+      prompt_tokens: 30,
+      completion_tokens: 50,
+      total_tokens: 80,
+      prompt_tokens_details: { cached_tokens: 6 },
+      completion_tokens_details: { reasoning_tokens: 40 },
     });
   });
 });

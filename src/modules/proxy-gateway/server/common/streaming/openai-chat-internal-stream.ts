@@ -8,7 +8,7 @@ import {
   isCustomToolCall,
   toCustomToolArguments,
 } from '../../../antigravity/CustomToolCall';
-import { toOpenAIUsageFromGeminiUsageMetadata } from '../../../antigravity/OpenAIUsageMapper';
+import { toOpenAIUsageFromGeminiUsageMetadata } from '../usage/openai-usage';
 import { resolveShellToolName } from '../../../antigravity/ShellToolName';
 import { splitNamespaceToolName } from '../../../antigravity/ToolNamespace';
 import { decodeInternalSseData } from '../../../antigravity/internal-sse';

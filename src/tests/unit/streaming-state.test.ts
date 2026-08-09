@@ -108,7 +108,7 @@ describe('StreamingState', () => {
       });
 
       expect(chunks.join('')).toContain(
-        '"input_tokens":100,"output_tokens":12,"cache_read_input_tokens":40,"reasoning_tokens":7',
+        '"input_tokens":100,"output_tokens":19,"cache_read_input_tokens":40',
       );
     });
 

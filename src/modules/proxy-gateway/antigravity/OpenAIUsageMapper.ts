@@ -1,5 +1,7 @@
 import type { Usage } from './types';
-import type { GeminiUsageMetadata, OpenAIUsage } from '../server/common/interfaces/request-interfaces';
+import type { OpenAIUsage } from '../server/common/interfaces/request-interfaces';
+
+export { toOpenAIUsageFromGeminiUsageMetadata } from '../server/common/usage/openai-usage';
 
 export interface OpenAIResponsesUsage {
   input_tokens: number;
@@ -31,44 +33,6 @@ export function toOpenAIUsage(usage: Usage | undefined): OpenAIUsage {
     completion_tokens_details:
       reasoningTokens > 0 ? { reasoning_tokens: reasoningTokens } : undefined,
   };
-}
-
-/**
- * Converts the upstream Gemini usage shape before applying the shared OpenAI
- * normalization, so streamed and non-streamed responses report the same fields.
- */
-export function toOpenAIUsageFromGeminiUsageMetadata(
-  usage: GeminiUsageMetadata | undefined,
-): OpenAIUsage {
-  const reasoningTokens =
-    usage?.total_thought_tokens ?? usage?.totalThoughtTokens ?? usage?.thoughtsTokenCount ?? 0;
-  const toolUseTokens = usage?.total_tool_use_tokens ?? 0;
-  /**
-   * Gemini's legacy candidatesTokenCount already includes thought/tool-use
-   * tokens. The Interactions-style total_output_tokens field reports generated
-   * output separately, so only that format needs the supplemental counts.
-   */
-  const outputTokens =
-    usage?.total_output_tokens === undefined
-      ? (usage?.candidatesTokenCount ?? 0)
-      : usage.total_output_tokens + reasoningTokens + toolUseTokens;
-
-  const normalizedUsage = toOpenAIUsage(
-    usage
-      ? {
-          input_tokens: usage.total_input_tokens ?? usage.promptTokenCount ?? 0,
-          output_tokens: outputTokens,
-          cache_read_input_tokens:
-            usage.total_cached_tokens ?? usage.cachedContentTokenCount ?? usage.cachedTokens ?? 0,
-          reasoning_tokens: reasoningTokens,
-        }
-      : undefined,
-  );
-  const upstreamTotalTokens = usage?.total_tokens ?? usage?.totalTokenCount;
-
-  return upstreamTotalTokens === undefined
-    ? normalizedUsage
-    : { ...normalizedUsage, total_tokens: upstreamTotalTokens };
 }
 
 /**
