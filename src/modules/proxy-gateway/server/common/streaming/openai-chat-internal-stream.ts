@@ -24,6 +24,7 @@ import {
 import { OpenAIChatWebSearchStream } from '../../modules/openai/chat/openai-chat-web-search-stream';
 import { mapGeminiFinishReasonToOpenAIFinishReason } from '../../modules/openai/chat/openai-chat-response-conversion';
 import { toGeminiUsageMetadata } from '../../modules/openai/responses/openai-responses-stream-values';
+import { parsePotentialWrappedReasoning } from '../../modules/openai/responses/openai-responses-reasoning-events';
 import { attachUpstreamBackpressure } from '../stream-backpressure';
 import { createUpstreamStreamTrace } from './upstream-stream-trace';
 import { toRecord } from '../utils/json-record';
@@ -235,15 +236,11 @@ export function processStreamResponse(
               }
 
               if (isString(part.text)) {
-                const cleanText = part.text
-                  .replaceAll('<think>\n', '')
-                  .replaceAll('<think>', '')
-                  .replaceAll('\n</think>', '')
-                  .replaceAll('</think>', '');
-                if (part.thought === true) {
-                  reasoningContent += cleanText;
+                const parsed = parsePotentialWrappedReasoning(part.text);
+                if (part.thought === true || parsed.isWrappedReasoning) {
+                  reasoningContent += parsed.text;
                 } else {
-                  responseContent += cleanText;
+                  responseContent += parsed.text;
                 }
               }
 

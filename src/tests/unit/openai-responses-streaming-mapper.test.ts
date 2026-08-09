@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { OpenAIResponsesStreamingMapper } from '@/modules/proxy-gateway/antigravity/OpenAIResponsesStreamingMapper';
 import { SignatureStore } from '@/modules/proxy-gateway/antigravity/SignatureStore';
+import { toOpenAIResponsesResponse } from '@/modules/proxy-gateway/antigravity/OpenAIResponsesResponseMapper';
 
 function parseEvent(serializedEvent: string): Record<string, unknown> {
   const dataLine = serializedEvent.split('\n').find((line) => line.startsWith('data: '));
@@ -294,6 +295,69 @@ describe('OpenAIResponsesStreamingMapper', () => {
         ],
       },
     });
+  });
+
+  it('streams reasoning as deltas aligned with unary reasoning output', () => {
+    const mapper = createMapper();
+    const streamedEvents = [
+      ...mapper.processPart({ text: '<think>inspect\nfiles</think>' }),
+      ...mapper.processPart({ text: 'Done.' }),
+      ...mapper.complete(),
+    ].map(parseEvent);
+
+    const streamedReasoningDeltas = streamedEvents
+      .filter((event) => event.type === 'response.reasoning_text.delta')
+      .map((event) => (typeof event.delta === 'string' ? event.delta : ''))
+      .join('');
+    const reasoningOutputIndex = streamedEvents.findIndex(
+      (event) =>
+        event.type === 'response.output_item.added' &&
+        typeof event.item === 'object' &&
+        event.item !== null &&
+        Reflect.get(event.item, 'type') === 'reasoning',
+    );
+    const messageOutputIndex = streamedEvents.findIndex(
+      (event) =>
+        event.type === 'response.output_item.added' &&
+        typeof event.item === 'object' &&
+        event.item !== null &&
+        Reflect.get(event.item, 'type') === 'message',
+    );
+    expect(reasoningOutputIndex).toBeGreaterThanOrEqual(0);
+    expect(messageOutputIndex).toBeGreaterThan(reasoningOutputIndex);
+
+    const unaryResponse = toOpenAIResponsesResponse({
+      choices: [
+        {
+          finish_reason: 'stop',
+          index: 0,
+          message: {
+            annotations: [],
+            content: 'Done.',
+            reasoning_content: 'inspect\nfiles',
+            role: 'assistant',
+          },
+        },
+      ],
+      created: 1_700_000_001,
+      id: 'chatcmpl-stream-parity',
+      model: 'gemini-3-pro',
+      object: 'chat.completion',
+      usage: {
+        completion_tokens: 2,
+        prompt_tokens: 1,
+        total_tokens: 3,
+      },
+    } as any);
+    const unaryOutput = unaryResponse.output as Array<{
+      type?: string;
+      content?: Array<{ text?: string }>;
+    }>;
+    const unaryReasoningItem = unaryOutput.find((item) => item.type === 'reasoning');
+    const unaryReasoningContent = unaryReasoningItem?.content?.[0]?.text ?? '';
+
+    expect(unaryReasoningContent).toBe('inspect\nfiles');
+    expect(streamedReasoningDeltas).toBe(unaryReasoningContent);
   });
 
   it('closes reasoning before a tool call and keeps their output indexes distinct', () => {
