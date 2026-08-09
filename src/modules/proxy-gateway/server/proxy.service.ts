@@ -61,6 +61,7 @@ import { BaseProxyService } from '@/modules/proxy-gateway/server/common/base-pro
 import { ModelRouteError } from './common/exceptions/model-route-exception';
 import { createNoAvailableAccountError } from './common/model-route-errors';
 import { attachModelRouteMetadata } from './common/model-route-metadata';
+import { executeProjectContextFallback } from './common/project-context-fallback';
 import {
   processAnthropicInternalStream,
   type AnthropicInternalStreamRuntime,
@@ -347,11 +348,23 @@ export class ProxyService extends BaseProxyService {
           );
         }
       } catch (error) {
-        if (error instanceof Error && this.isProjectContextError(error.message)) {
-          this.logger.warn(
-            `Anthropic request hit project context issue, retrying without project: ${error.message}`,
-          );
-          try {
+        const fallbackResult = await executeProjectContextFallback({
+          error,
+          token,
+          retryState,
+          model: accountTargetModel,
+          isProjectContextError: (errorMessage) => this.isProjectContextError(errorMessage),
+          onProjectContextError: (errorMessage) =>
+            this.logger.warn(
+              `Anthropic request hit project context issue, retrying without project: ${errorMessage}`,
+            ),
+          prepareGraceRetry: (retryError) =>
+            appliedVariantRequest.variant
+              ? Promise.resolve(false)
+              : this.prepareGraceRetry(retryState, token, retryError, 'Anthropic'),
+          applyUpstreamPenalty: (accountId, model, retryError) =>
+            this.applyUpstreamPenalty(accountId, model, retryError),
+          onFallback: async () => {
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
               claudeRequest ?? baseClaudeRequest,
@@ -389,49 +402,40 @@ export class ProxyService extends BaseProxyService {
                 route.source,
                 webSearchModel,
               );
-            } else {
-              const response = await this.generateInternalWithStreamFallback(
-                fallbackBody,
-                token.token.access_token,
-                token.token.upstream_proxy_url,
-                extraHeaders,
-                deadlineAt,
-              );
-              this.markUpstreamSuccess(token.id, fallbackBody.model);
-              const anthropicResponse = this.toAnthropicChatResponse(
-                transformResponse(
-                  response,
-                  this.createSignatureState(token.id, fallbackBody.model),
-                  {
-                    webSearch,
-                    stopSequences: (claudeRequest ?? baseClaudeRequest).stop_sequences,
-                  },
-                ),
-                fallbackBody.model,
-              );
-              return this.attachRouteMetadata(
-                anthropicResponse,
-                request.model,
-                targetModel,
-                anthropicResponse.model,
-                route.source,
-                webSearchModel,
-              );
             }
-          } catch (fallbackErr) {
-            lastError = fallbackErr;
-          }
-        } else {
-          lastError = error;
-        }
 
-        if (
-          !appliedVariantRequest.variant &&
-          (await this.prepareGraceRetry(retryState, token, lastError, 'Anthropic'))
-        ) {
+            const response = await this.generateInternalWithStreamFallback(
+              fallbackBody,
+              token.token.access_token,
+              token.token.upstream_proxy_url,
+              extraHeaders,
+              deadlineAt,
+            );
+            this.markUpstreamSuccess(token.id, fallbackBody.model);
+            const anthropicResponse = this.toAnthropicChatResponse(
+              transformResponse(response, this.createSignatureState(token.id, fallbackBody.model), {
+                webSearch,
+                stopSequences: (claudeRequest ?? baseClaudeRequest).stop_sequences,
+              }),
+              fallbackBody.model,
+            );
+            return this.attachRouteMetadata(
+              anthropicResponse,
+              request.model,
+              targetModel,
+              anthropicResponse.model,
+              route.source,
+              webSearchModel,
+            );
+          },
+        });
+        if (fallbackResult.status === 'returned') {
+          return fallbackResult.value;
+        }
+        lastError = fallbackResult.lastError;
+        if (fallbackResult.shouldRetry) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, accountTargetModel, lastError);
       }
     }
     throw lastError || new Error('Request failed after retries');
@@ -541,11 +545,21 @@ export class ProxyService extends BaseProxyService {
           route.source,
         );
       } catch (err) {
-        if (err instanceof Error && this.isProjectContextError(err.message)) {
-          this.logger.warn(
-            `Gemini request hit project context issue, retrying without project: ${err.message}`,
-          );
-          try {
+        const fallbackResult = await executeProjectContextFallback({
+          error: err,
+          token,
+          retryState,
+          model: effectiveTargetModel,
+          isProjectContextError: (errorMessage) => this.isProjectContextError(errorMessage),
+          onProjectContextError: (errorMessage) =>
+            this.logger.warn(
+              `Gemini request hit project context issue, retrying without project: ${errorMessage}`,
+            ),
+          prepareGraceRetry: (retryError) =>
+            this.prepareGraceRetry(retryState, token, retryError, 'Gemini'),
+          applyUpstreamPenalty: (accountId, model, retryError) =>
+            this.applyUpstreamPenalty(accountId, model, retryError),
+          onFallback: async () => {
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = this.createGeminiInternalRequest(
               effectiveTargetModel,
@@ -577,17 +591,15 @@ export class ProxyService extends BaseProxyService {
                 : effectiveTargetModel,
               route.source,
             );
-          } catch (fallbackErr) {
-            lastError = fallbackErr;
-          }
-        } else {
-          lastError = err;
+          },
+        });
+        if (fallbackResult.status === 'returned') {
+          return fallbackResult.value;
         }
-
-        if (await this.prepareGraceRetry(retryState, token, lastError, 'Gemini')) {
+        lastError = fallbackResult.lastError;
+        if (fallbackResult.shouldRetry) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, effectiveTargetModel, lastError);
       }
     }
 
@@ -656,11 +668,21 @@ export class ProxyService extends BaseProxyService {
           route.source,
         );
       } catch (err) {
-        if (err instanceof Error && this.isProjectContextError(err.message)) {
-          this.logger.warn(
-            `Gemini stream request hit project context issue, retrying without project: ${err.message}`,
-          );
-          try {
+        const fallbackResult = await executeProjectContextFallback({
+          error: err,
+          token,
+          retryState,
+          model: effectiveTargetModel,
+          isProjectContextError: (errorMessage) => this.isProjectContextError(errorMessage),
+          onProjectContextError: (errorMessage) =>
+            this.logger.warn(
+              `Gemini stream request hit project context issue, retrying without project: ${errorMessage}`,
+            ),
+          prepareGraceRetry: (retryError) =>
+            this.prepareGraceRetry(retryState, token, retryError, 'Gemini stream'),
+          applyUpstreamPenalty: (accountId, model, retryError) =>
+            this.applyUpstreamPenalty(accountId, model, retryError),
+          onFallback: async () => {
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = this.createGeminiInternalRequest(
               effectiveTargetModel,
@@ -685,17 +707,15 @@ export class ProxyService extends BaseProxyService {
               effectiveTargetModel,
               route.source,
             );
-          } catch (fallbackErr) {
-            lastError = fallbackErr;
-          }
-        } else {
-          lastError = err;
+          },
+        });
+        if (fallbackResult.status === 'returned') {
+          return fallbackResult.value;
         }
-
-        if (await this.prepareGraceRetry(retryState, token, lastError, 'Gemini stream')) {
+        lastError = fallbackResult.lastError;
+        if (fallbackResult.shouldRetry) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, effectiveTargetModel, lastError);
       }
     }
 
@@ -969,11 +989,23 @@ export class ProxyService extends BaseProxyService {
           return attachRoute(openaiResponse, openaiResponse.model);
         }
       } catch (err) {
-        if (err instanceof Error && this.isProjectContextError(err.message)) {
-          this.logger.warn(
-            `OpenAI compatibility request hit project context issue, retrying without project: ${err.message}`,
-          );
-          try {
+        const fallbackResult = await executeProjectContextFallback({
+          error: err,
+          token,
+          retryState,
+          model: accountTargetModel,
+          isProjectContextError: (errorMessage) => this.isProjectContextError(errorMessage),
+          onProjectContextError: (errorMessage) =>
+            this.logger.warn(
+              `OpenAI compatibility request hit project context issue, retrying without project: ${errorMessage}`,
+            ),
+          prepareGraceRetry: (retryError) =>
+            appliedVariantRequest.variant
+              ? Promise.resolve(false)
+              : this.prepareGraceRetry(retryState, token, retryError, 'OpenAI-compatible'),
+          applyUpstreamPenalty: (accountId, model, retryError) =>
+            this.applyUpstreamPenalty(accountId, model, retryError),
+          onFallback: async () => {
             const claudeRequest = searchedClaudeRequest ?? baseClaudeRequest;
             const requestUserAgent = await resolveRequestUserAgent();
             const fallbackBody = transformClaudeRequestIn(
@@ -1029,20 +1061,15 @@ export class ProxyService extends BaseProxyService {
               webSearch,
             );
             return attachRoute(openaiResponse, openaiResponse.model);
-          } catch (fallbackErr) {
-            lastError = fallbackErr;
-          }
-        } else {
-          lastError = err;
+          },
+        });
+        if (fallbackResult.status === 'returned') {
+          return fallbackResult.value;
         }
-
-        if (
-          !appliedVariantRequest.variant &&
-          (await this.prepareGraceRetry(retryState, token, lastError, 'OpenAI-compatible'))
-        ) {
+        lastError = fallbackResult.lastError;
+        if (fallbackResult.shouldRetry) {
           continue;
         }
-        await this.applyUpstreamPenalty(token.id, accountTargetModel, lastError);
       }
     }
     throw lastError || new Error('Request failed after retries');
