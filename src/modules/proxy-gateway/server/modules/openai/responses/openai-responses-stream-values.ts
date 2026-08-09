@@ -3,6 +3,10 @@ import type {
   GeminiResponsesGroundingMetadata,
   GeminiResponsesStreamPart,
 } from '../../../../antigravity/OpenAIResponsesStreamingMapper';
+import {
+  parsePotentialWrappedReasoning,
+  type ParsedReasoningChunk,
+} from './openai-responses-reasoning-events';
 import { toRecord } from '../../../common/utils/json-record';
 import type { GeminiUsageMetadata } from '../../../common/interfaces/request-interfaces';
 
@@ -28,6 +32,9 @@ export function toResponsesStreamPart(value: unknown): GeminiResponsesStreamPart
           mimeType: inlineDataRecord.mimeType,
         }
       : undefined;
+  const thoughtText: ParsedReasoningChunk | null = isString(part.text)
+    ? parsePotentialWrappedReasoning(part.text)
+    : null;
 
   return {
     functionCall: functionName
@@ -40,8 +47,8 @@ export function toResponsesStreamPart(value: unknown): GeminiResponsesStreamPart
         }
       : undefined,
     inlineData,
-    text: isString(part.text) ? part.text : undefined,
-    thought: part.thought === true,
+    text: thoughtText?.text,
+    thought: part.thought === true || thoughtText?.isWrappedReasoning === true,
     thoughtSignature: isString(part.thoughtSignature) ? part.thoughtSignature : undefined,
     thought_signature: isString(part.thought_signature) ? part.thought_signature : undefined,
   };

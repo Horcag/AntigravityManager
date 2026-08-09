@@ -18,6 +18,11 @@ import {
 } from './web-search-results';
 import type { GroundingMetadata } from './types';
 import { ToolCallIdIntegrityTracker } from './tool-call-id-integrity';
+import {
+  OpenAIResponsesReasoningEventEmitter,
+  parsePotentialWrappedReasoning,
+  type OpenAIResponsesReasoningOutputItem,
+} from '../server/modules/openai/responses/openai-responses-reasoning-events';
 
 export interface GeminiResponsesStreamPart {
   functionCall?: {
@@ -58,20 +63,6 @@ interface ResponsesMessageOutputItem {
   type: 'message';
 }
 
-interface ResponsesReasoningOutputItem {
-  content: Array<{
-    text: string;
-    type: 'reasoning_text';
-  }>;
-  id: string;
-  status: 'completed' | 'incomplete';
-  summary: Array<{
-    text: string;
-    type: 'summary_text';
-  }>;
-  type: 'reasoning';
-}
-
 interface ResponsesFunctionCallOutputItem {
   arguments: string;
   call_id: string;
@@ -94,19 +85,12 @@ interface ResponsesCustomToolCallOutputItem {
 
 type ResponsesOutputItem =
   | ResponsesMessageOutputItem
-  | ResponsesReasoningOutputItem
+  | OpenAIResponsesReasoningOutputItem
   | ResponsesFunctionCallOutputItem
   | ResponsesCustomToolCallOutputItem;
 
 interface ActiveMessageOutput {
   item: ResponsesMessageOutputItem;
-  itemId: string;
-  outputIndex: number;
-  text: string;
-}
-
-interface ActiveReasoningOutput {
-  item: ResponsesReasoningOutputItem;
   itemId: string;
   outputIndex: number;
   text: string;
@@ -126,10 +110,25 @@ interface OpenAIResponsesStreamingMapperOptions {
 }
 
 export class OpenAIResponsesStreamingMapper {
+  private readonly reasoningEventEmitter = new OpenAIResponsesReasoningEventEmitter({
+    createItemId: () => {
+      const itemId = `rs_${this.options.responseId}_${this.messageCounter}`;
+      this.messageCounter += 1;
+      return itemId;
+    },
+    emitOutputItem: (item: OpenAIResponsesReasoningOutputItem) => {
+      this.outputItems.push(item);
+    },
+    nextOutputIndex: () => {
+      const outputIndex = this.nextOutputIndex;
+      this.nextOutputIndex += 1;
+      return outputIndex;
+    },
+    serialize: (event: Record<string, unknown>) => this.serialize(event),
+  });
   private readonly toolCallIdIntegrity = new ToolCallIdIntegrityTracker();
   private readonly outputItems: ResponsesOutputItem[] = [];
   private activeMessage: ActiveMessageOutput | null = null;
-  private activeThought: ActiveReasoningOutput | null = null;
   private completed = false;
   private readonly createdAt = Math.floor(Date.now() / 1000);
   private hasSeenRegularText = false;
@@ -194,12 +193,14 @@ export class OpenAIResponsesStreamingMapper {
       this.latestResponseSignature = signature;
     }
 
+    const potentialReasoning = part.text ? parsePotentialWrappedReasoning(part.text) : null;
+    const isThought = part.thought === true || potentialReasoning?.isWrappedReasoning === true;
     if (part.functionCall) {
       return this.processFunctionCall(part.functionCall, signature);
     }
 
-    if (part.thought && part.text) {
-      return this.processThought(part.text);
+    if (isThought && part.text) {
+      return this.processThought(potentialReasoning?.text ?? part.text);
     }
 
     if (part.inlineData?.data) {
@@ -366,63 +367,8 @@ export class OpenAIResponsesStreamingMapper {
     ];
   }
 
-  private startReasoning(): string[] {
-    if (this.activeThought) {
-      return [];
-    }
-
-    const outputIndex = this.nextOutputIndex;
-    this.nextOutputIndex += 1;
-    const itemId = `rs_${this.options.responseId}_${this.messageCounter}`;
-    this.messageCounter += 1;
-    const item: ResponsesReasoningOutputItem = {
-      content: [{ text: '', type: 'reasoning_text' }],
-      id: itemId,
-      status: 'completed',
-      summary: [{ text: '', type: 'summary_text' }],
-      type: 'reasoning',
-    };
-    this.activeThought = { item, itemId, outputIndex, text: '' };
-    this.outputItems.push(item);
-
-    return [
-      this.serialize({
-        item: {
-          content: [],
-          id: itemId,
-          status: 'in_progress',
-          summary: [],
-          type: 'reasoning',
-        },
-        output_index: outputIndex,
-        type: 'response.output_item.added',
-      }),
-    ];
-  }
-
   private closeThought(status: 'completed' | 'incomplete' = 'completed'): string[] {
-    const thought = this.activeThought;
-    if (!thought) {
-      return [];
-    }
-    this.activeThought = null;
-    thought.item.content = [{ text: thought.text, type: 'reasoning_text' }];
-    thought.item.status = status;
-    thought.item.summary = [{ text: thought.text, type: 'summary_text' }];
-    return [
-      this.serialize({
-        content_index: 0,
-        item_id: thought.itemId,
-        output_index: thought.outputIndex,
-        text: thought.text,
-        type: 'response.reasoning_text.done',
-      }),
-      this.serialize({
-        item: thought.item,
-        output_index: thought.outputIndex,
-        type: 'response.output_item.done',
-      }),
-    ];
+    return this.reasoningEventEmitter.closeThought(status);
   }
 
   private closeMessage(
@@ -684,34 +630,10 @@ export class OpenAIResponsesStreamingMapper {
   }
 
   private processThought(text: string): string[] {
-    const cleanText = text
-      .replaceAll('<think>\n', '')
-      .replaceAll('<think>', '')
-      .replaceAll('\n</think>', '')
-      .replaceAll('</think>', '');
-    if (!cleanText) {
-      return [];
-    }
     if (this.hasSeenRegularText) {
       return [];
     }
-
-    const events = this.startReasoning();
-    const thought = this.activeThought;
-    if (!thought) {
-      throw new Error('Responses thought item failed to start');
-    }
-    thought.text += cleanText;
-    events.push(
-      this.serialize({
-        content_index: 0,
-        delta: cleanText,
-        item_id: thought.itemId,
-        output_index: thought.outputIndex,
-        type: 'response.reasoning_text.delta',
-      }),
-    );
-    return events;
+    return this.reasoningEventEmitter.processThought(text);
   }
 
   private normalizeShellArguments(
