@@ -1092,6 +1092,68 @@ describe('ProxyService Empty Stream Retry Logic', () => {
     });
   });
 
+  it('retries Anthropic flow without project when project context is invalid', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockResolvedValueOnce({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+        usageMetadata: { totalTokenCount: 5 },
+      });
+
+    const result = (await service.handleAnthropicMessages({
+      model: 'claude-sonnet-4-5',
+      stream: false,
+      max_tokens: 256,
+      messages: [{ role: 'user', content: 'hello' }],
+    } as any)) as { type?: string };
+
+    expect(mockGeminiClient.generateInternal).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.generateInternal.mock.calls[0][0]).toMatchObject({
+      project: 'project-1',
+    });
+    expect(mockGeminiClient.generateInternal.mock.calls[1][0]).not.toHaveProperty('project');
+    expect(result.type).toBe('message');
+  });
+
+  it('skips the grace retry on Anthropic when a variant was applied', async () => {
+    setServerConfig(
+      createProxyConfig({
+        model_aliases: [{ alias: 'my-high-model', target: 'gemini-3.5-flash-high', enabled: true }],
+      }),
+    );
+    const service = new TestableProxyService();
+    const graceRetry = vi.spyOn(
+      service as never as { prepareGraceRetry: () => Promise<boolean> },
+      'prepareGraceRetry',
+    );
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    // Both the first attempt and the empty-project fallback fail, so the
+    // handler reaches the point where a non-variant request would ask for a
+    // grace retry.
+    mockGeminiClient.generateInternal.mockRejectedValue(
+      new Error(
+        'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+      ),
+    );
+
+    await expect(
+      service.handleAnthropicMessages({
+        model: 'my-high-model',
+        stream: false,
+        max_tokens: 256,
+        messages: [{ role: 'user', content: 'hello' }],
+      } as never),
+    ).rejects.toThrow();
+
+    expect(graceRetry).not.toHaveBeenCalled();
+  });
+
   it('retries Gemini flow with the same error classification matrix', async () => {
     const service = new TestableProxyService();
     const token1 = createToken('acc-1');
@@ -1242,6 +1304,56 @@ describe('ProxyService Empty Stream Retry Logic', () => {
 
     const internalPayload = mockGeminiClient.streamGenerateInternal.mock.calls[0][0];
     expect(internalPayload.requestType).toBe('generate-content');
+  });
+
+  it('retries Gemini stream request without project when project context is invalid', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.streamGenerateInternal
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockResolvedValueOnce(new EventEmitter());
+
+    const result = await service.handleGeminiStreamGenerateContent('models/gemini-2.5-flash', {
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    } as any);
+    expect(result).toBeInstanceOf(Observable);
+    expect(mockGeminiClient.streamGenerateInternal).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.streamGenerateInternal.mock.calls[0][0]).toMatchObject({
+      project: 'project-1',
+    });
+    expect(mockGeminiClient.streamGenerateInternal.mock.calls[1][0]).not.toHaveProperty('project');
+  });
+
+  it('retries OpenAI-compatible request without project when project context is invalid', async () => {
+    const service = new TestableProxyService();
+    mockAccountLeaseService.getNextToken.mockResolvedValue(createToken('acc-1'));
+    mockGeminiClient.generateInternal
+      .mockRejectedValueOnce(
+        new Error(
+          'You are currently configured to use a Google Cloud Project but lack a Gemini Code Assist license. (#3501)',
+        ),
+      )
+      .mockResolvedValueOnce({
+        candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+        usageMetadata: { totalTokenCount: 5 },
+      });
+
+    const result = await service.handleChatCompletions({
+      model: 'gpt-4o-mini',
+      stream: false,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+
+    expect(mockGeminiClient.generateInternal).toHaveBeenCalledTimes(2);
+    expect(mockGeminiClient.generateInternal.mock.calls[0][0]).toMatchObject({
+      project: 'project-1',
+    });
+    expect(mockGeminiClient.generateInternal.mock.calls[1][0]).not.toHaveProperty('project');
+    expect((result as any).choices?.[0]?.message.content).toBe('ok');
   });
 });
 
