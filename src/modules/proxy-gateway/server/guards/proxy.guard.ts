@@ -12,6 +12,7 @@ import {
   RequestHeaders,
 } from './api-key-auth.util';
 import { openCodeCredentialService } from '../../opencode-sync/opencode-credentials';
+import { buildAuthErrorBody, resolveAuthErrorSurface } from '../common/auth-error-envelope';
 
 @Injectable()
 export class ProxyGuard implements CanActivate {
@@ -44,6 +45,7 @@ export class ProxyGuard implements CanActivate {
     }
     this.logger.warn(`Rejected unauthorized request from ${request.ip}`);
 
-    throw new UnauthorizedException('API key validation failed');
+    const surface = resolveAuthErrorSurface(request);
+    throw new UnauthorizedException(buildAuthErrorBody(surface, 'API key validation failed'));
   }
 }
