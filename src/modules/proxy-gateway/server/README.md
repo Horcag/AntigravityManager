@@ -244,6 +244,22 @@ AntigravityManager exposes a native `/v1beta` Gemini REST/SSE adapter over Antig
 - `POST /v1beta/models/{model}:countTokens` (also `/countTokens`): Prompt token counting over the upstream `v1internal:countTokens` method, returning the public `{ "totalTokens": N }` envelope.
 - `GET /v1beta/models` & `GET /v1beta/models/{model}`: Dynamic model discovery advertising truthful supported generation methods (`countTokens`, `generateContent`, `streamGenerateContent`).
 - Transport of `contents` (including inline `image/png` and `audio/wav`), `generationConfig`, `tools` declarations, `toolConfig`, `safetySettings`, and text `systemInstruction`.
+
+### v1internal Diagnostic Passthrough
+
+This diagnostic surface is absent by default. Set `AGM_V1INTERNAL_PASSTHROUGH=1` before the proxy starts to register `POST /v1internal/{verb}`; changing the variable after startup has no effect. It is intended only to measure unimplemented vendor methods and must not be enabled for normal proxy use.
+
+The route accepts any JSON body and forwards it unchanged to `https://cloudcode-pa.googleapis.com/v1internal:{verb}` through the existing authorised transport. It buffers streaming responses as raw text, so `streamGenerateChat` can be inspected without adding a product streaming protocol. The response preserves Google's status and raw text body, forwards useful response headers, and adds `x-antigravity-v1internal-account-id` and `x-antigravity-v1internal-account-email`. The account is the next eligible account selected by the normal account lease service; those headers identify whose quota was charged.
+
+For example, with the proxy listening on port 8045:
+
+```bash
+AGM_V1INTERNAL_PASSTHROUGH=1 curl -i http://127.0.0.1:8045/v1internal/generateChat \
+  -H "content-type: application/json" \
+  --data '{"request":{"model":"gemini-2.5-flash","contents":[{"role":"user","parts":[{"text":"Reply with OK"}]}]}}'
+```
+
+A supported verb returns its upstream status and raw response envelope (normally a 2xx response); a rejected verb returns the upstream rejection unchanged, commonly a 4xx response with Google's error envelope. Compare the HTTP status and raw body rather than assuming a successful-looking local wrapper.
 - Tool declarations (`tools`), tool configuration (`toolConfig`), and function call/response parts (`functionCall`, `functionResponse`) are transported through the adapter; cross-protocol tool IDs, signature ownership, and full tool lifecycle management remain #18.
 
 ### Model Routing and Observability
