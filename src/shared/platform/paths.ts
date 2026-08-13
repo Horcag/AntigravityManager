@@ -722,6 +722,104 @@ export function getCloudAccountsDbPath(): string {
   return getCurrentPlatformPathApi().join(getAgentDir(), 'cloud_accounts.db');
 }
 
+const AGY_CLI_DIR_SEGMENTS = ['.gemini', 'antigravity-cli'] as const;
+const AGY_CLI_TOKEN_FILE = 'antigravity-oauth-token';
+const WSL_DISTRO_CACHE_TTL_MS = 60_000;
+
+let cachedRunningWslDistros: { names: string[]; readAt: number } | null = null;
+
+/**
+ * Lists the WSL distributions that are already running on this Windows host.
+ *
+ * Deliberately `--running` rather than every registered distribution: reading
+ * `\\wsl.localhost\<distro>` starts a stopped distribution, and waking WSL
+ * behind the user's back to refresh a token is a worse trade than letting the
+ * CLI there pick up the account on the next switch. The answer is cached
+ * briefly because automatic account rotation calls this in bursts.
+ */
+function getRunningWslDistros(): string[] {
+  if (process.platform !== 'win32') {
+    return [];
+  }
+
+  const now = Date.now();
+  if (cachedRunningWslDistros && now - cachedRunningWslDistros.readAt < WSL_DISTRO_CACHE_TTL_MS) {
+    return cachedRunningWslDistros.names;
+  }
+
+  let names: string[] = [];
+  try {
+    // wsl.exe answers in UTF-16LE for a Windows caller but in UTF-8 through
+    // interop, so decode by what the bytes actually look like.
+    const raw = execSync('wsl.exe -l -q --running', {
+      encoding: 'buffer',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    });
+    const text = raw.includes(0) ? raw.toString('utf16le') : raw.toString('utf-8');
+    names = text
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\0/g, '').trim())
+      .filter((line) => line.length > 0);
+  } catch {
+    // No WSL, or wsl.exe refused to answer: no distributions to serve.
+    names = [];
+  }
+
+  cachedRunningWslDistros = { names, readAt: now };
+  return names;
+}
+
+function listWslHomeDirs(distroRoot: string): string[] {
+  const homes = [path.win32.join(distroRoot, 'root')];
+
+  try {
+    const entries = fs.readdirSync(path.win32.join(distroRoot, 'home'), { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        homes.push(path.win32.join(distroRoot, 'home', entry.name));
+      }
+    }
+  } catch {
+    // A distribution without a readable /home contributes nothing.
+  }
+
+  return homes;
+}
+
+/**
+ * Token files of the Antigravity CLI (`agy`) this machine can write.
+ *
+ * The CLI keeps its session in a plain file instead of the credential store
+ * the IDE reads, and a Windows host can also reach the copies inside its
+ * running WSL distributions. Only directories that already exist are
+ * returned: the point is to keep CLI installs on the same account as the IDE,
+ * not to provision the CLI where it was never set up.
+ */
+export function getAgyCliTokenPaths(): string[] {
+  const pathApi = getCurrentPlatformPathApi();
+  const candidateDirs = [pathApi.join(os.homedir(), ...AGY_CLI_DIR_SEGMENTS)];
+
+  if (process.platform === 'win32') {
+    for (const distro of getRunningWslDistros()) {
+      for (const home of listWslHomeDirs(`\\\\wsl.localhost\\${distro}`)) {
+        candidateDirs.push(path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS));
+      }
+    }
+  }
+
+  const paths: string[] = [];
+  for (const dir of candidateDirs) {
+    if (!fs.existsSync(dir)) {
+      continue;
+    }
+
+    appendUniquePath(paths, pathApi.join(dir, AGY_CLI_TOKEN_FILE));
+  }
+
+  return paths;
+}
+
 export function getAntigravityDbPaths(target?: AntigravityAppTarget | null): string[] {
   const appData = getAppDataDir(target);
   const paths: string[] = [];

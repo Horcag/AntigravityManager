@@ -178,6 +178,68 @@ describe('Path Utilities', () => {
     );
   });
 
+  it('offers the local Antigravity CLI token only when the CLI directory exists', async () => {
+    vi.resetModules();
+    setPlatform('linux');
+    pretendPlainLinux();
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (candidate) => String(candidate) === '/home/alice/.gemini/antigravity-cli',
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([
+      '/home/alice/.gemini/antigravity-cli/antigravity-oauth-token',
+    ]);
+  });
+
+  it('offers no Antigravity CLI token when the CLI was never set up', async () => {
+    vi.resetModules();
+    setPlatform('linux');
+    pretendPlainLinux();
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([]);
+  });
+
+  it('reaches the Antigravity CLI inside running WSL distributions from Windows', async () => {
+    vi.resetModules();
+    setPlatform('win32');
+    vi.spyOn(os, 'homedir').mockReturnValue('C:\\Users\\Alice');
+    // wsl.exe answers a Windows caller in UTF-16LE.
+    childProcessMock.execSync.mockReturnValue(
+      Buffer.from('Ubuntu-24.04\r\n', 'utf16le') as unknown as string,
+    );
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((candidate: fs.PathLike) => {
+      if (String(candidate) === '\\\\wsl.localhost\\Ubuntu-24.04\\home') {
+        return [{ name: 'alice', isDirectory: () => true }];
+      }
+      throw new Error('ENOENT');
+    }) as unknown as typeof fs.readdirSync);
+    vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
+      [
+        'C:\\Users\\Alice\\.gemini\\antigravity-cli',
+        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli',
+      ].includes(String(candidate)),
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([
+      'C:\\Users\\Alice\\.gemini\\antigravity-cli\\antigravity-oauth-token',
+      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli\\antigravity-oauth-token',
+    ]);
+    // Stopped distributions are left alone: touching their share starts them.
+    expect(childProcessMock.execSync).toHaveBeenCalledWith(
+      expect.stringContaining('--running'),
+      expect.anything(),
+    );
+  });
+
   it('should skip non-writable derived portable user-data paths on macOS', async () => {
     vi.resetModules();
     setPlatform('darwin');
