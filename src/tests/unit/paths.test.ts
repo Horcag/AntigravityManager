@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 
 const p = {
   get join() {
@@ -46,6 +46,7 @@ const originalAppData = process.env.APPDATA;
 const originalLocalAppData = process.env.LOCALAPPDATA;
 const originalProgramFiles = process.env.ProgramFiles;
 const originalProgramFilesX86 = process.env['ProgramFiles(x86)'];
+const originalAgentDirOverride = process.env.ANTIGRAVITY_MANAGER_AGENT_DIR;
 
 function setPlatform(platformName: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', {
@@ -90,6 +91,13 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 }
 
 describe('Path Utilities', () => {
+  beforeEach(() => {
+    // The suite runs with the agent directory redirected away from the user's
+    // home (see vitest.config.mjs), but these cases assert how the path is
+    // derived, so they need the redirect out of the way.
+    delete process.env.ANTIGRAVITY_MANAGER_AGENT_DIR;
+  });
+
   afterEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
@@ -102,6 +110,33 @@ describe('Path Utilities', () => {
     restoreEnvValue('LOCALAPPDATA', originalLocalAppData);
     restoreEnvValue('ProgramFiles', originalProgramFiles);
     restoreEnvValue('ProgramFiles(x86)', originalProgramFilesX86);
+    restoreEnvValue('ANTIGRAVITY_MANAGER_AGENT_DIR', originalAgentDirOverride);
+  });
+
+  it('derives the agent directory from the home directory', async () => {
+    vi.resetModules();
+    setPlatform('linux');
+    pretendPlainLinux();
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgentDir()).toBe('/home/alice/.antigravity-agent');
+  });
+
+  it('honours the agent directory override', async () => {
+    vi.resetModules();
+    // The override is what keeps a unit run out of the user's live agent
+    // directory, and out of a relative `\home\...` path when a suite pins the
+    // platform to win32.
+    setPlatform('win32');
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+    process.env.ANTIGRAVITY_MANAGER_AGENT_DIR = 'D:\\agm-test\\agent-dir';
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgentDir()).toBe('D:\\agm-test\\agent-dir');
+    expect(paths.getCloudAccountsDbPath()).toBe('D:\\agm-test\\agent-dir\\cloud_accounts.db');
   });
 
   it('should get correct AppData directory', async () => {

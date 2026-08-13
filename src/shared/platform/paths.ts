@@ -706,7 +706,22 @@ export function getAppDataDir(target?: AntigravityAppTarget | null): string {
   }
 }
 
+/**
+ * Directory holding this manager's own state: logs, config, account database.
+ *
+ * `ANTIGRAVITY_MANAGER_AGENT_DIR` redirects it. The test suite relies on that:
+ * the logger creates this directory the moment it is imported, so without a
+ * redirect a unit run writes real logs into the user's live agent directory,
+ * and a test that pins `process.platform` to win32 turns the Linux home path
+ * into the relative name `\home\<user>\.antigravity-agent`, which then appears
+ * as junk in the repository root.
+ */
 export function getAgentDir(): string {
+  const override = process.env.ANTIGRAVITY_MANAGER_AGENT_DIR;
+  if (override) {
+    return override;
+  }
+
   return getCurrentPlatformPathApi().join(os.homedir(), '.antigravity-agent');
 }
 
