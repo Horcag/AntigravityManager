@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import findProcess, { type ProcessInfo } from 'find-process';
 import type { AntigravityAppTarget } from '@/modules/account/types';
 import { resolveAntigravityAppTarget } from '@/modules/account/types';
+import { detectAgyCliExecutablePath } from '@/modules/antigravity-runtime/binary-patch/agyCliPathDetection';
 import {
   isSafeWindowsImageName,
   queryWindowsProcessesByImageName,
@@ -802,40 +803,77 @@ function listWslHomeDirs(distroRoot: string): string[] {
   return homes;
 }
 
+export interface GetAgyCliTokenPathsOptions {
+  exists?: (candidatePath: string) => boolean;
+  homeDirectory?: string;
+  listRunningWslDistros?: () => string[];
+  listWslHomeDirsForDistro?: (distroRoot: string) => string[];
+  overrideDir?: string;
+  pathEnvironment?: string;
+  platform?: NodeJS.Platform;
+}
+
 /**
  * Token files of the Antigravity CLI (`agy`) this machine can write.
  *
  * The CLI keeps its session in a plain file instead of the credential store
  * the IDE reads, and a Windows host can also reach the copies inside its
- * running WSL distributions. Only directories that already exist are
- * returned: the point is to keep CLI installs on the same account as the IDE,
- * not to provision the CLI where it was never set up.
+ * running WSL distributions. A home directory is only offered a token path
+ * when `agy` is actually installed there (detected the same way the upstream
+ * `detectAgyCliExecutablePath()` does: user-local `~/.local/bin/agy` first,
+ * falling back to `PATH` for the local host — a remote WSL share cannot
+ * answer for its own `PATH`, so only the user-local candidate applies there).
+ * The point is to keep CLI installs on the same account as the IDE, not to
+ * provision the CLI where it was never set up.
  *
- * `ANTIGRAVITY_MANAGER_AGY_CLI_DIR` redirects the whole lookup, WSL hosts
- * included, and the test suite sets it: this writer targets a real session
- * file under the user's home, so a suite that reaches it unmocked signs the
- * live CLI out by overwriting its token with a fixture.
+ * `ANTIGRAVITY_MANAGER_AGY_CLI_DIR` still redirects the whole lookup,
+ * bypassing executable detection and the WSL scan entirely, and the test
+ * suite sets it globally (see `vitest.config.mjs`). The options above make
+ * `getAgyCliTokenPaths()` unit-testable without it, but the env override
+ * stays as the blanket backstop: production call sites invoke this function
+ * with no options, so a test that forgets to mock `os.homedir()` /
+ * `fs.existsSync()` would otherwise still reach the real session file.
  */
-export function getAgyCliTokenPaths(): string[] {
-  const pathApi = getCurrentPlatformPathApi();
-  const overrideDir = process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR;
-  const candidateDirs = [overrideDir || pathApi.join(os.homedir(), ...AGY_CLI_DIR_SEGMENTS)];
+export function getAgyCliTokenPaths(options: GetAgyCliTokenPathsOptions = {}): string[] {
+  const platform = options.platform ?? process.platform;
+  const localPathApi = platform === 'win32' ? path.win32 : path.posix;
+  const overrideDir = options.overrideDir ?? process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR;
 
-  if (!overrideDir && process.platform === 'win32') {
-    for (const distro of getRunningWslDistros()) {
-      for (const home of listWslHomeDirs(`\\\\wsl.localhost\\${distro}`)) {
-        candidateDirs.push(path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS));
-      }
-    }
+  if (overrideDir) {
+    return [localPathApi.join(overrideDir, AGY_CLI_TOKEN_FILE)];
   }
 
-  const paths: string[] = [];
-  for (const dir of candidateDirs) {
-    if (!fs.existsSync(dir)) {
-      continue;
-    }
+  const homeDirectory = options.homeDirectory ?? os.homedir();
+  const exists = options.exists ?? ((candidatePath: string) => fs.existsSync(candidatePath));
+  const pathEnvironment = options.pathEnvironment ?? process.env.PATH;
+  const listRunningWslDistros = options.listRunningWslDistros ?? getRunningWslDistros;
+  const listWslHomeDirsForDistro = options.listWslHomeDirsForDistro ?? listWslHomeDirs;
 
-    appendUniquePath(paths, pathApi.join(dir, AGY_CLI_TOKEN_FILE));
+  const paths: string[] = [];
+
+  const localExecutablePath = detectAgyCliExecutablePath({
+    exists,
+    homeDirectory,
+    pathEnvironment,
+    platform,
+  });
+  if (localExecutablePath) {
+    appendUniquePath(
+      paths,
+      localPathApi.join(homeDirectory, ...AGY_CLI_DIR_SEGMENTS, AGY_CLI_TOKEN_FILE),
+    );
+  }
+
+  if (platform === 'win32') {
+    for (const distro of listRunningWslDistros()) {
+      for (const home of listWslHomeDirsForDistro(`\\\\wsl.localhost\\${distro}`)) {
+        if (!exists(path.win32.join(home, '.local', 'bin', 'agy'))) {
+          continue;
+        }
+
+        appendUniquePath(paths, path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS, AGY_CLI_TOKEN_FILE));
+      }
+    }
   }
 
   return paths;

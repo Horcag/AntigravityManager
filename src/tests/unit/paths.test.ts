@@ -216,13 +216,13 @@ describe('Path Utilities', () => {
     );
   });
 
-  it('offers the local Antigravity CLI token only when the CLI directory exists', async () => {
+  it('offers the local Antigravity CLI token only when the CLI executable is installed', async () => {
     vi.resetModules();
     setPlatform('linux');
     pretendPlainLinux();
     vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
     vi.spyOn(fs, 'existsSync').mockImplementation(
-      (candidate) => String(candidate) === '/home/alice/.gemini/antigravity-cli',
+      (candidate) => String(candidate) === '/home/alice/.local/bin/agy',
     );
 
     const paths = await import('../../shared/platform/paths');
@@ -230,6 +230,21 @@ describe('Path Utilities', () => {
     expect(paths.getAgyCliTokenPaths()).toEqual([
       '/home/alice/.gemini/antigravity-cli/antigravity-oauth-token',
     ]);
+  });
+
+  it('does not offer a CLI token for a home directory with no agy executable', async () => {
+    vi.resetModules();
+    setPlatform('linux');
+    pretendPlainLinux();
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+    // The CLI directory exists (a stale install), but the executable is gone.
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (candidate) => String(candidate) === '/home/alice/.gemini/antigravity-cli',
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([]);
   });
 
   it('offers no Antigravity CLI token when the CLI was never set up', async () => {
@@ -260,8 +275,8 @@ describe('Path Utilities', () => {
     }) as unknown as typeof fs.readdirSync);
     vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
       [
-        'C:\\Users\\Alice\\.gemini\\antigravity-cli',
-        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli',
+        'C:\\Users\\Alice\\.local\\bin\\agy.exe',
+        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.local\\bin\\agy',
       ].includes(String(candidate)),
     );
 
@@ -276,6 +291,30 @@ describe('Path Utilities', () => {
       expect.stringContaining('--running'),
       expect.anything(),
     );
+  });
+
+  it('skips a running WSL distribution without an agy executable', async () => {
+    vi.resetModules();
+    setPlatform('win32');
+    vi.spyOn(os, 'homedir').mockReturnValue('C:\\Users\\Alice');
+    childProcessMock.execSync.mockReturnValue(
+      Buffer.from('Ubuntu-24.04\r\n', 'utf16le') as unknown as string,
+    );
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((candidate: fs.PathLike) => {
+      if (String(candidate) === '\\\\wsl.localhost\\Ubuntu-24.04\\home') {
+        return [{ name: 'alice', isDirectory: () => true }];
+      }
+      throw new Error('ENOENT');
+    }) as unknown as typeof fs.readdirSync);
+    // The distribution still has a stale token directory, but no executable.
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (candidate) =>
+        String(candidate) === '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli',
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([]);
   });
 
   it('confines the Antigravity CLI lookup to the override directory', async () => {
