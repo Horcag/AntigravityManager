@@ -16,6 +16,10 @@ export default defineConfig({
     globals: true,
     environment: 'happy-dom',
     include: ['src/tests/unit/**/*.test.ts'],
+    // Blocks every child_process entry point from starting a real application:
+    // under WSL a spawn site resolves to the Windows build and leaves a window
+    // behind. Pinned by src/tests/unit/no-app-launch-guard.test.ts.
+    setupFiles: ['src/tests/support/no-app-launch.setup.ts'],
     env: {
       // The logger creates the agent directory when it is imported, which
       // happens in most suites through the modules under test. Point it away
