@@ -810,12 +810,18 @@ function listWslHomeDirs(distroRoot: string): string[] {
  * running WSL distributions. Only directories that already exist are
  * returned: the point is to keep CLI installs on the same account as the IDE,
  * not to provision the CLI where it was never set up.
+ *
+ * `ANTIGRAVITY_MANAGER_AGY_CLI_DIR` redirects the whole lookup, WSL hosts
+ * included, and the test suite sets it: this writer targets a real session
+ * file under the user's home, so a suite that reaches it unmocked signs the
+ * live CLI out by overwriting its token with a fixture.
  */
 export function getAgyCliTokenPaths(): string[] {
   const pathApi = getCurrentPlatformPathApi();
-  const candidateDirs = [pathApi.join(os.homedir(), ...AGY_CLI_DIR_SEGMENTS)];
+  const overrideDir = process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR;
+  const candidateDirs = [overrideDir || pathApi.join(os.homedir(), ...AGY_CLI_DIR_SEGMENTS)];
 
-  if (process.platform === 'win32') {
+  if (!overrideDir && process.platform === 'win32') {
     for (const distro of getRunningWslDistros()) {
       for (const home of listWslHomeDirs(`\\\\wsl.localhost\\${distro}`)) {
         candidateDirs.push(path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS));

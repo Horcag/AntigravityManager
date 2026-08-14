@@ -28,6 +28,10 @@ export default defineConfig({
       // Linux home with the Windows path API and drop a `\home\...` directory
       // into the repository root.
       ANTIGRAVITY_MANAGER_AGENT_DIR: path.join(os.tmpdir(), 'agm-unit-tests', 'agent-dir'),
+      // The Antigravity CLI keeps its session in a file under the user's home,
+      // so a suite that exercises the credential-store writer without mocking
+      // it signs the live CLI out by replacing that token with a fixture.
+      ANTIGRAVITY_MANAGER_AGY_CLI_DIR: path.join(os.tmpdir(), 'agm-unit-tests', 'agy-cli-dir'),
     },
   },
 });

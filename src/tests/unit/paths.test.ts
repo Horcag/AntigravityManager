@@ -47,6 +47,7 @@ const originalLocalAppData = process.env.LOCALAPPDATA;
 const originalProgramFiles = process.env.ProgramFiles;
 const originalProgramFilesX86 = process.env['ProgramFiles(x86)'];
 const originalAgentDirOverride = process.env.ANTIGRAVITY_MANAGER_AGENT_DIR;
+const originalAgyCliDirOverride = process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR;
 
 function setPlatform(platformName: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', {
@@ -92,10 +93,11 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 
 describe('Path Utilities', () => {
   beforeEach(() => {
-    // The suite runs with the agent directory redirected away from the user's
-    // home (see vitest.config.mjs), but these cases assert how the path is
-    // derived, so they need the redirect out of the way.
+    // The suite runs with the agent and CLI directories redirected away from
+    // the user's home (see vitest.config.mjs), but these cases assert how the
+    // paths are derived, so they need the redirects out of the way.
     delete process.env.ANTIGRAVITY_MANAGER_AGENT_DIR;
+    delete process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR;
   });
 
   afterEach(() => {
@@ -111,6 +113,7 @@ describe('Path Utilities', () => {
     restoreEnvValue('ProgramFiles', originalProgramFiles);
     restoreEnvValue('ProgramFiles(x86)', originalProgramFilesX86);
     restoreEnvValue('ANTIGRAVITY_MANAGER_AGENT_DIR', originalAgentDirOverride);
+    restoreEnvValue('ANTIGRAVITY_MANAGER_AGY_CLI_DIR', originalAgyCliDirOverride);
   });
 
   it('derives the agent directory from the home directory', async () => {
@@ -273,6 +276,21 @@ describe('Path Utilities', () => {
       expect.stringContaining('--running'),
       expect.anything(),
     );
+  });
+
+  it('confines the Antigravity CLI lookup to the override directory', async () => {
+    vi.resetModules();
+    setPlatform('win32');
+    process.env.ANTIGRAVITY_MANAGER_AGY_CLI_DIR = 'C:\\tmp\\agy-cli';
+    vi.spyOn(os, 'homedir').mockReturnValue('C:\\Users\\Alice');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual(['C:\\tmp\\agy-cli\\antigravity-oauth-token']);
+    // The home directory and the WSL distributions stay out of reach, so a
+    // test run cannot overwrite a live CLI session.
+    expect(childProcessMock.execSync).not.toHaveBeenCalled();
   });
 
   it('should skip non-writable derived portable user-data paths on macOS', async () => {
