@@ -216,13 +216,15 @@ describe('Path Utilities', () => {
     );
   });
 
-  it('offers the local Antigravity CLI token only when the CLI executable is installed', async () => {
+  it('offers the local Antigravity CLI token when the executable is installed and it has a session', async () => {
     vi.resetModules();
     setPlatform('linux');
     pretendPlainLinux();
     vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
-    vi.spyOn(fs, 'existsSync').mockImplementation(
-      (candidate) => String(candidate) === '/home/alice/.local/bin/agy',
+    vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
+      ['/home/alice/.local/bin/agy', '/home/alice/.gemini/antigravity-cli'].includes(
+        String(candidate),
+      ),
     );
 
     const paths = await import('../../shared/platform/paths');
@@ -230,6 +232,22 @@ describe('Path Utilities', () => {
     expect(paths.getAgyCliTokenPaths()).toEqual([
       '/home/alice/.gemini/antigravity-cli/antigravity-oauth-token',
     ]);
+  });
+
+  it('does not offer a CLI token path when the CLI is installed but was never signed in', async () => {
+    vi.resetModules();
+    setPlatform('linux');
+    pretendPlainLinux();
+    vi.spyOn(os, 'homedir').mockReturnValue('/home/alice');
+    // The executable exists, but agy creates the session directory only on
+    // first login, so a fresh install has neither the directory nor a token.
+    vi.spyOn(fs, 'existsSync').mockImplementation(
+      (candidate) => String(candidate) === '/home/alice/.local/bin/agy',
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([]);
   });
 
   it('does not offer a CLI token for a home directory with no agy executable', async () => {
@@ -276,7 +294,9 @@ describe('Path Utilities', () => {
     vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
       [
         'C:\\Users\\Alice\\.local\\bin\\agy.exe',
+        'C:\\Users\\Alice\\.gemini\\antigravity-cli',
         '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.local\\bin\\agy',
+        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli',
       ].includes(String(candidate)),
     );
 
@@ -291,6 +311,35 @@ describe('Path Utilities', () => {
       expect.stringContaining('--running'),
       expect.anything(),
     );
+  });
+
+  it('reaches a WSL distribution where agy is installed system-wide, outside ~/.local/bin', async () => {
+    vi.resetModules();
+    setPlatform('win32');
+    vi.spyOn(os, 'homedir').mockReturnValue('C:\\Users\\Alice');
+    childProcessMock.execSync.mockReturnValue(
+      Buffer.from('Ubuntu-24.04\r\n', 'utf16le') as unknown as string,
+    );
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((candidate: fs.PathLike) => {
+      if (String(candidate) === '\\\\wsl.localhost\\Ubuntu-24.04\\home') {
+        return [{ name: 'alice', isDirectory: () => true }];
+      }
+      throw new Error('ENOENT');
+    }) as unknown as typeof fs.readdirSync);
+    // agy lives in /usr/local/bin, not ~/.local/bin, but the distro still has
+    // a session directory for alice.
+    vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
+      [
+        '\\\\wsl.localhost\\Ubuntu-24.04\\usr\\local\\bin\\agy',
+        '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli',
+      ].includes(String(candidate)),
+    );
+
+    const paths = await import('../../shared/platform/paths');
+
+    expect(paths.getAgyCliTokenPaths()).toEqual([
+      '\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\.gemini\\antigravity-cli\\antigravity-oauth-token',
+    ]);
   });
 
   it('skips a running WSL distribution without an agy executable', async () => {

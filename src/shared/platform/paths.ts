@@ -742,6 +742,16 @@ const AGY_CLI_DIR_SEGMENTS = ['.gemini', 'antigravity-cli'] as const;
 const AGY_CLI_TOKEN_FILE = 'antigravity-oauth-token';
 const WSL_DISTRO_CACHE_TTL_MS = 60_000;
 
+// A remote WSL share cannot answer for its own PATH (see the file-level doc
+// comment on getAgyCliTokenPaths), so system-wide installs there are matched
+// against the locations `agy` is actually distributed to, rather than a full
+// PATH scan like the local host gets.
+const AGY_CLI_WSL_HOME_EXECUTABLE_SEGMENTS = ['.local', 'bin', 'agy'] as const;
+const AGY_CLI_WSL_SYSTEM_EXECUTABLE_SEGMENTS: readonly (readonly string[])[] = [
+  ['usr', 'local', 'bin', 'agy'],
+  ['usr', 'bin', 'agy'],
+];
+
 let cachedRunningWslDistros: { names: string[]; readAt: number } | null = null;
 
 /**
@@ -803,6 +813,26 @@ function listWslHomeDirs(distroRoot: string): string[] {
   return homes;
 }
 
+/**
+ * Whether a WSL distribution's home has an `agy` executable reachable from
+ * this share: the user-local install, or one of the system-wide locations
+ * `agy` is actually distributed to. See the doc comment on
+ * `getAgyCliTokenPaths()` for why this cannot fall back to a `PATH` scan.
+ */
+function hasWslAgyCliExecutable(
+  exists: (candidatePath: string) => boolean,
+  distroRoot: string,
+  home: string,
+): boolean {
+  if (exists(path.win32.join(home, ...AGY_CLI_WSL_HOME_EXECUTABLE_SEGMENTS))) {
+    return true;
+  }
+
+  return AGY_CLI_WSL_SYSTEM_EXECUTABLE_SEGMENTS.some((segments) =>
+    exists(path.win32.join(distroRoot, ...segments)),
+  );
+}
+
 export interface GetAgyCliTokenPathsOptions {
   exists?: (candidatePath: string) => boolean;
   homeDirectory?: string;
@@ -818,13 +848,20 @@ export interface GetAgyCliTokenPathsOptions {
  *
  * The CLI keeps its session in a plain file instead of the credential store
  * the IDE reads, and a Windows host can also reach the copies inside its
- * running WSL distributions. A home directory is only offered a token path
- * when `agy` is actually installed there (detected the same way the upstream
- * `detectAgyCliExecutablePath()` does: user-local `~/.local/bin/agy` first,
- * falling back to `PATH` for the local host — a remote WSL share cannot
- * answer for its own `PATH`, so only the user-local candidate applies there).
- * The point is to keep CLI installs on the same account as the IDE, not to
- * provision the CLI where it was never set up.
+ * running WSL distributions. Two separate conditions gate each candidate:
+ *
+ * 1. `agy` is actually installed there — for the local host, detected the
+ *    same way the upstream `detectAgyCliExecutablePath()` does (configured
+ *    path, then user-local `~/.local/bin/agy`, then `PATH`); for a WSL home,
+ *    a remote share cannot answer for its own `PATH`, so the check instead
+ *    matches `~/.local/bin/agy` plus the handful of system-wide locations
+ *    `agy` is actually distributed to (`/usr/local/bin`, `/usr/bin`).
+ * 2. The session directory (`~/.gemini/antigravity-cli`) already exists —
+ *    `agy` creates it on first login, so its absence means the CLI is
+ *    installed but was never signed in. Writing there would fail with
+ *    ENOENT on every account switch, and the function must not create the
+ *    directory itself: the point is to keep CLI installs on the same
+ *    account as the IDE, not to provision the CLI where it was never set up.
  *
  * `ANTIGRAVITY_MANAGER_AGY_CLI_DIR` still redirects the whole lookup,
  * bypassing executable detection and the WSL scan entirely, and the test
@@ -858,20 +895,26 @@ export function getAgyCliTokenPaths(options: GetAgyCliTokenPathsOptions = {}): s
     platform,
   });
   if (localExecutablePath) {
-    appendUniquePath(
-      paths,
-      localPathApi.join(homeDirectory, ...AGY_CLI_DIR_SEGMENTS, AGY_CLI_TOKEN_FILE),
-    );
+    const sessionDir = localPathApi.join(homeDirectory, ...AGY_CLI_DIR_SEGMENTS);
+    if (exists(sessionDir)) {
+      appendUniquePath(paths, localPathApi.join(sessionDir, AGY_CLI_TOKEN_FILE));
+    }
   }
 
   if (platform === 'win32') {
     for (const distro of listRunningWslDistros()) {
-      for (const home of listWslHomeDirsForDistro(`\\\\wsl.localhost\\${distro}`)) {
-        if (!exists(path.win32.join(home, '.local', 'bin', 'agy'))) {
+      const distroRoot = `\\\\wsl.localhost\\${distro}`;
+      for (const home of listWslHomeDirsForDistro(distroRoot)) {
+        if (!hasWslAgyCliExecutable(exists, distroRoot, home)) {
           continue;
         }
 
-        appendUniquePath(paths, path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS, AGY_CLI_TOKEN_FILE));
+        const sessionDir = path.win32.join(home, ...AGY_CLI_DIR_SEGMENTS);
+        if (!exists(sessionDir)) {
+          continue;
+        }
+
+        appendUniquePath(paths, path.win32.join(sessionDir, AGY_CLI_TOKEN_FILE));
       }
     }
   }
