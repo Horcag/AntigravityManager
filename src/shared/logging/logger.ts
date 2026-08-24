@@ -12,6 +12,11 @@ const LOG_WINDOW_MS = 30_000;
 const MAX_LOG_ENTRIES = 200;
 const LOG_RETENTION = '30d';
 const LOG_MAX_SIZE = '10m';
+const STDOUT_ONLY_MODE_ARGS = new Set(['--export-cloud-accounts-with-tokens-stdout']);
+
+function isStdoutOnlyMode(): boolean {
+  return process.argv.some((arg) => STDOUT_ONLY_MODE_ARGS.has(arg));
+}
 
 interface LogEntry {
   timestamp: number;
@@ -113,6 +118,7 @@ class Logger {
       level: 'debug',
       transports: [consoleTransport, rotateTransport],
       exitOnError: false,
+      silent: isStdoutOnlyMode(),
     });
   }
 

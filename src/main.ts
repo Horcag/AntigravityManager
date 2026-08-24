@@ -51,6 +51,9 @@ import { getQuickObservabilityConfig } from '@/shared/observability/observabilit
 
 const packetLogPath = path.join(app.getPath('userData'), 'orpc_packets.log');
 const isE2eTest = process.env.AGM_E2E_TEST === 'true';
+const isCloudAccountsStdoutExport = process.argv.includes(
+  '--export-cloud-accounts-with-tokens-stdout',
+);
 
 function logPacket(data: any) {
   try {
@@ -319,12 +322,12 @@ if (process.platform === 'win32') {
   );
 }
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const gotSingleInstanceLock = isCloudAccountsStdoutExport ? true : app.requestSingleInstanceLock();
 
-if (!gotSingleInstanceLock) {
+if (!isCloudAccountsStdoutExport && !gotSingleInstanceLock) {
   app.quit();
   process.exit(0);
-} else {
+} else if (!isCloudAccountsStdoutExport) {
   app.on('second-instance', () => {
     logger.info('Second instance detected, focusing existing window');
     if (app.isReady()) {
@@ -605,106 +608,131 @@ process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled Rejection:', reason);
 });
 
-app
-  .whenReady()
-  .then(async () => {
-    logger.info('Step: Load Config');
-    const config = ConfigManager.loadConfig();
-    startupConfig = config;
-    if (!isE2eTest) {
-      syncAutoStart(config);
-    }
-    shouldStartHidden = isAutoStartLaunch() && config.auto_startup && config.start_in_tray;
-    if (shouldStartHidden) {
-      logger.info('Startup: Auto-start detected, window will start hidden');
-    }
+async function exportCloudAccountsToStdout(): Promise<void> {
+  try {
+    await app.whenReady();
+    await CloudAccountRepo.init();
 
-    logger.info('Step: Initialize CloudAccountRepo');
-    try {
-      await CloudAccountRepo.init();
-    } catch (e) {
-      logger.error('Startup: Failed to initialize CloudAccountRepo', e);
-    }
+    const { exportCloudAccounts } = await import('@/modules/cloud-account/ipc/handler');
+    const json = await exportCloudAccounts(false);
+    const output = json.endsWith('\n') ? json : `${json}\n`;
+    fs.writeFileSync(process.stdout.fd, output, { encoding: 'utf8' });
+    app.exit(0);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`Failed to export cloud accounts: ${message}\n`);
+    app.exit(1);
+  }
+}
 
-    if (!isE2eTest) {
-      logger.info('Step: Initialize Antigravity DB (WAL Mode)');
-      initDatabase();
-    }
-  })
-  .then(() => {
-    logger.info('Step: setupORPC');
-    return setupORPC();
-  })
-  .then(async () => {
-    logger.info('Step: createWindow');
-    await createWindow({ startHidden: shouldStartHidden });
-  })
-  .then(() => {
-    logger.info('Step: installExtensions (SKIPPED)');
-    // return installExtensions();
-  })
-  .then(() => {
-    if (!isE2eTest) {
-      logger.info('Step: checkForUpdates');
-      checkForUpdates();
-    }
-  })
-  .then(async () => {
-    // Initialize Cloud Monitor if enabled
-    try {
+if (isCloudAccountsStdoutExport) {
+  void exportCloudAccountsToStdout();
+} else {
+  app
+    .whenReady()
+    .then(async () => {
+      logger.info('Step: Load Config');
+      const config = ConfigManager.loadConfig();
+      startupConfig = config;
       if (!isE2eTest) {
-        AuthServer.start();
+        syncAutoStart(config);
+      }
+      shouldStartHidden = isAutoStartLaunch() && config.auto_startup && config.start_in_tray;
+      if (shouldStartHidden) {
+        logger.info('Startup: Auto-start detected, window will start hidden');
       }
 
-      // Gateway Server (NestJS) - auto-start if enabled
-      const config = startupConfig || ConfigManager.loadConfig();
-      if (config.proxy?.auto_start) {
-        const port = config.proxy?.port || 8045;
-        let proxyStarted = false;
-        // Default to a valid ProxyConfig object if null, although loadConfig ensures defaults
-        if (config.proxy) {
-          const result = await bootstrapNestServer(config.proxy);
-          proxyStarted = result.success;
-          if (result.success) {
-            logger.info(`NestJS Proxy: Auto-started on port ${result.port}`);
-          } else {
-            logger.warn(`NestJS Proxy: Auto-start failed on port ${port}: ${result.message}`);
+      logger.info('Step: Initialize CloudAccountRepo');
+      try {
+        await CloudAccountRepo.init();
+      } catch (e) {
+        logger.error('Startup: Failed to initialize CloudAccountRepo', e);
+      }
+
+      if (!isE2eTest) {
+        logger.info('Step: Initialize Antigravity DB (WAL Mode)');
+        initDatabase();
+      }
+    })
+    .then(() => {
+      logger.info('Step: setupORPC');
+      return setupORPC();
+    })
+    .then(async () => {
+      logger.info('Step: createWindow');
+      await createWindow({ startHidden: shouldStartHidden });
+    })
+    .then(() => {
+      logger.info('Step: installExtensions (SKIPPED)');
+      // return installExtensions();
+    })
+    .then(() => {
+      if (!isE2eTest) {
+        logger.info('Step: checkForUpdates');
+        checkForUpdates();
+      }
+    })
+    .then(async () => {
+      // Initialize Cloud Monitor if enabled
+      try {
+        if (!isE2eTest) {
+          AuthServer.start();
+        }
+
+        // Gateway Server (NestJS) - auto-start if enabled
+        const config = startupConfig || ConfigManager.loadConfig();
+        if (config.proxy?.auto_start) {
+          const port = config.proxy?.port || 8045;
+          let proxyStarted = false;
+          // Default to a valid ProxyConfig object if null, although loadConfig ensures defaults
+          if (config.proxy) {
+            const result = await bootstrapNestServer(config.proxy);
+            proxyStarted = result.success;
+            if (result.success) {
+              logger.info(`NestJS Proxy: Auto-started on port ${result.port}`);
+            } else {
+              logger.warn(`NestJS Proxy: Auto-start failed on port ${port}: ${result.message}`);
+            }
+          }
+          if (!proxyStarted) {
+            logger.info('NestJS Proxy: Auto-start skipped because the proxy server is not running');
           }
         }
-        if (!proxyStarted) {
-          logger.info('NestJS Proxy: Auto-start skipped because the proxy server is not running');
-        }
-      }
 
-      if (!isE2eTest) {
-        const enabled = CloudAccountSettingsStore.getSetting('auto_switch_enabled', false);
-        if (enabled) {
-          logger.info('Startup: Auto-Switch enabled, starting monitor...');
-          CloudMonitorService.start();
-        } else {
-          logger.info(
-            'Startup: Auto-Switch disabled, running one-time quota and AI credits sync...',
-          );
-          await CloudMonitorService.poll();
+        if (!isE2eTest) {
+          const enabled = CloudAccountSettingsStore.getSetting('auto_switch_enabled', false);
+          if (enabled) {
+            logger.info('Startup: Auto-Switch enabled, starting monitor...');
+            CloudMonitorService.start();
+          } else {
+            logger.info(
+              'Startup: Auto-Switch disabled, running one-time quota and AI credits sync...',
+            );
+            await CloudMonitorService.poll();
+          }
         }
+      } catch (e) {
+        logger.error('Startup: Failed to initialize services', e);
       }
-    } catch (e) {
-      logger.error('Startup: Failed to initialize services', e);
-    }
-  })
-  .then(async () => {
-    logger.info('Step: Startup Complete');
-    if (globalMainWindow && !isE2eTest) {
-      initTray(globalMainWindow);
-    }
-  })
-  .catch((error) => {
-    logger.error('Failed to start application:', error);
-    app.quit();
-  });
+    })
+    .then(async () => {
+      logger.info('Step: Startup Complete');
+      if (globalMainWindow && !isE2eTest) {
+        initTray(globalMainWindow);
+      }
+    })
+    .catch((error) => {
+      logger.error('Failed to start application:', error);
+      app.quit();
+    });
+}
 
 //osX only
 app.on('window-all-closed', () => {
+  if (isCloudAccountsStdoutExport) {
+    return;
+  }
+
   logger.info('Window all closed event triggered');
   stopNestServer(); // Stop server
   if (process.platform !== 'darwin') {
@@ -714,6 +742,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
+  if (isCloudAccountsStdoutExport) {
+    return;
+  }
+
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow({ startHidden: false });
   }

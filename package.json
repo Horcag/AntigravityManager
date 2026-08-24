@@ -19,6 +19,7 @@
     "updater:serve-feed": "node scripts/serve-local-update-feed.mjs",
     "audit:size:win32:x64": "node scripts/audit-windows-x64-size.mjs",
     "publish": "electron-forge publish",
+    "export:cloud-accounts:tokens:stdout": "node scripts/export-cloud-accounts-stdout.mjs",
     "lint": "eslint .",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
